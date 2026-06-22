@@ -16,6 +16,7 @@ import {
 	chmodSync,
 	unlinkSync,
 	mkdirSync,
+	renameSync,
 } from "fs";
 import { createServer } from "http";
 import { resolve, join, basename, extname } from "path";
@@ -119,6 +120,7 @@ type BotResponse =
 
 const SESSION_DIR = join(homedir(), ".flowith");
 const SESSION_FILE = join(SESSION_DIR, "bot-session.json");
+const BATCH_DIR = join(SESSION_DIR, "batches");
 const SESSION_LOCK_FILE = join(SESSION_DIR, "bot-session.lock");
 const LEGACY_SESSION_FILE = ".flowith-bot-session.json";
 const BOT_EVENTS = { ACTION: "bot_action", RESPONSE: "bot_response" } as const;
@@ -130,6 +132,7 @@ const BROWSER_OPEN_WAIT_MS = 25_000;
 const BROWSER_POLL_MS = 2_000;
 const BROWSER_OPEN_COOLDOWN_MS = 60_000;
 const BROWSER_MAX_OPENS = 3; // Max auto-opens per session before giving up
+const BATCH_LOCKED_RETRIES = 2; // Retries when the frontend rate-limits a batch submit
 const VALID_MODES = new Set(["text", "image", "video", "agent", "neo"]);
 
 // Input validation
@@ -988,6 +991,31 @@ async function quickPing(
 	}
 }
 
+/**
+ * Read-only liveness probe: is a logged-in Flowith tab actually responding?
+ * Unlike ensureBrowserConnected, this never opens a browser — used by
+ * `status --live` and `login` to report true connection state.
+ */
+async function liveBrowserPing(session: CanvasBotSession): Promise<boolean> {
+	const userId = getJwtUserId(session.accessToken);
+	if (!userId) return false;
+	const client = new RealtimeLite(
+		session.supabaseUrl,
+		session.supabaseKey,
+		session.accessToken,
+	);
+	try {
+		await client.connect();
+		const ch = `bot_ctrl:${userId}`;
+		await client.join(ch);
+		return await quickPing(client, ch, session);
+	} catch {
+		return false;
+	} finally {
+		client.close();
+	}
+}
+
 async function ensureBrowserConnected(
 	client: RealtimeLite,
 	session: CanvasBotSession,
@@ -1270,6 +1298,94 @@ function extractFlag(
 	return { values, rest };
 }
 
+// ============ Batch journal (crash/interrupt recovery) ============
+
+interface BatchRecord {
+	batchId: string;
+	convId: string;
+	mode?: string;
+	models: string[];
+	createdAt: string;
+	updatedAt: string;
+	total: number;
+	items: Array<{
+		index: number;
+		prompt: string;
+		status: "pending" | "submitted" | "failed";
+		questionNodeId?: string;
+		// Why a failed item failed, so a re-run can tell "rate-limited, retry later"
+		// (rate_limited) apart from a real error and avoid re-submitting blindly.
+		reason?: "rate_limited" | "error";
+	}>;
+}
+
+function batchFile(batchId: string): string {
+	return join(BATCH_DIR, `${batchId}.json`);
+}
+
+/**
+ * Persist the batch record after every item so an interrupt leaves an audit
+ * trail. Writes atomically (temp file + rename) so an interrupt mid-write can
+ * never leave a half-written JSON that loadBatch would silently drop. A write
+ * failure is warned (not swallowed) since it means recovery won't be available.
+ */
+let _batchSaveWarned = false;
+function saveBatch(rec: BatchRecord) {
+	try {
+		mkdirSync(BATCH_DIR, { recursive: true });
+		rec.updatedAt = new Date().toISOString();
+		const dest = batchFile(rec.batchId);
+		const tmp = `${dest}.${process.pid}.tmp`;
+		writeFileSync(tmp, JSON.stringify(rec, null, 2));
+		renameSync(tmp, dest); // atomic on the same filesystem
+	} catch (e: any) {
+		if (!_batchSaveWarned) {
+			_batchSaveWarned = true;
+			console.error(
+				`[canvas-cowork] WARNING: failed to write batch journal (${e?.message ?? e}). ` +
+					`Recovery via 'batches ${rec.batchId}' may be unavailable.`,
+			);
+		}
+	}
+}
+
+function loadBatch(batchId: string): BatchRecord | null {
+	try {
+		return JSON.parse(readFileSync(batchFile(batchId), "utf-8")) as BatchRecord;
+	} catch (e: any) {
+		// ENOENT is expected (no such batch); anything else means a corrupt or
+		// unreadable journal — surface it so a bad audit isn't mistaken for "none".
+		if (e?.code !== "ENOENT") {
+			console.error(
+				`[canvas-cowork] WARNING: batch journal for ${batchId} is unreadable (${e?.message ?? e}).`,
+			);
+		}
+		return null;
+	}
+}
+
+function listBatches(limit = 20): BatchRecord[] {
+	try {
+		const { readdirSync } = require("fs");
+		return (readdirSync(BATCH_DIR) as string[])
+			.filter((f) => f.endsWith(".json"))
+			.map((f) => {
+				try {
+					return JSON.parse(
+						readFileSync(join(BATCH_DIR, f), "utf-8"),
+					) as BatchRecord;
+				} catch {
+					return null;
+				}
+			})
+			.filter((r): r is BatchRecord => r !== null)
+			.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+			.slice(0, limit);
+	} catch {
+		return [];
+	}
+}
+
 // ============ Main ============
 
 async function main() {
@@ -1290,18 +1406,55 @@ async function main() {
 	const cmd = args[0];
 
 	// ---- status ----
+	// Default: fast, file-only snapshot. --live: also probe the browser tab so
+	// the reported state reflects reality (the file alone can lie mid-login).
 	if (cmd === "status") {
+		const s = loadSession();
+		if (!s) {
+			console.log(JSON.stringify({ status: "no_session" }));
+			return;
+		}
+		const base: Record<string, unknown> = {
+			status: "ok",
+			activeUser: getJwtUserId(s.accessToken) ?? null,
+			activeConvId: s.activeConvId ?? null,
+			expiresAt: s.expiresAt,
+		};
+		if (args.includes("--live")) {
+			const connected = await liveBrowserPing(s);
+			base.browser = connected ? "connected" : "disconnected";
+		}
+		console.log(JSON.stringify(base));
+		return;
+	}
+
+	// ---- whoami: identify the logged-in user without side effects ----
+	if (cmd === "whoami") {
 		const s = loadSession();
 		console.log(
 			JSON.stringify(
 				s
-					? {
-							status: "ok",
-							activeConvId: s.activeConvId ?? null,
-							expiresAt: s.expiresAt,
-						}
-					: { status: "no_session" },
+					? { userId: getJwtUserId(s.accessToken), expiresAt: s.expiresAt }
+					: { userId: null, status: "no_session" },
 			),
+		);
+		return;
+	}
+
+	// ---- login / connect: explicit session handshake (no other side effects) ----
+	// Replaces the old pattern of triggering login as a side effect of
+	// list-models. Establishes (or reuses) a session, then reports browser state.
+	if (cmd === "login" || cmd === "connect") {
+		const s = await acquireSession(botClient);
+		const connected = await liveBrowserPing(s);
+		console.log(
+			JSON.stringify({
+				status: "connected",
+				activeUser: getJwtUserId(s.accessToken),
+				activeConvId: s.activeConvId ?? null,
+				expiresAt: s.expiresAt,
+				browser: connected ? "connected" : "disconnected",
+			}),
 		);
 		return;
 	}
@@ -1375,6 +1528,38 @@ async function main() {
 			saveSession(existing);
 		}
 		console.error(`Opened ${target} (new tab)`);
+		return;
+	}
+
+	// ---- batches (file I/O only, no session needed) ----
+	// Audit submit-batch runs after a timeout/interrupt: which prompts landed
+	// as nodes (questionNodeId set) vs. never submitted.
+	if (cmd === "batches") {
+		const id = args.find((a, i) => i > 0 && !a.startsWith("--"));
+		if (id) {
+			const rec = loadBatch(id);
+			if (!rec) {
+				console.log(
+					JSON.stringify({ type: "error", code: "NOT_FOUND", batchId: id }),
+				);
+				process.exit(1);
+			}
+			console.log(JSON.stringify(rec, null, 2));
+		} else {
+			console.log(
+				JSON.stringify(
+					listBatches().map((r) => ({
+						batchId: r.batchId,
+						convId: r.convId,
+						updatedAt: r.updatedAt,
+						submitted: r.items.filter((it) => it.status === "submitted").length,
+						total: r.total,
+					})),
+					null,
+					2,
+				),
+			);
+		}
 		return;
 	}
 
@@ -1659,29 +1844,119 @@ async function main() {
 
 	// ---- submit-batch: fire N submits over one connection ----
 	if (cmd === "submit-batch") {
+		// POSIX-style "--" separator: everything after the first bare "--" is a
+		// literal prompt, never parsed as a flag. Lets users submit prompts that
+		// legitimately start with "--" (otherwise the unknown-flag guard rejects them).
+		const rawBatchArgs = args.slice(1);
+		const sepIdx = rawBatchArgs.indexOf("--");
+		const flagSegment =
+			sepIdx === -1 ? rawBatchArgs : rawBatchArgs.slice(0, sepIdx);
+		const literalPrompts =
+			sepIdx === -1 ? [] : rawBatchArgs.slice(sepIdx + 1);
+
 		const { values: followFlag, rest: batchRest0 } = extractFlag(
-			args.slice(1),
+			flagSegment,
 			"--follow",
 		);
 		const { values: modesBatchFlag, rest: batchRest1 } = extractFlag(
 			batchRest0,
 			"--mode",
 		);
-		const { values: modelsBatchFlag, rest: batchRest } = extractFlag(
+		const { values: modelsBatchFlag, rest: batchRest2 } = extractFlag(
 			batchRest1,
 			"--models",
+		);
+		// --model (singular) is a forgiving alias for --models with one model.
+		// Without it, "--model x" leaks the flag value "x" as an extra prompt.
+		const { values: modelBatchFlag, rest: batchRest3 } = extractFlag(
+			batchRest2,
+			"--model",
+		);
+		const { values: ratioBatchFlag, rest: batchRest4 } = extractFlag(
+			batchRest3,
+			"--ratio",
+		);
+		const { values: sizeBatchFlag, rest: batchRest } = extractFlag(
+			batchRest4,
+			"--size",
 		);
 		const follow = followFlag[0];
 		if (follow) assertUUID(follow, "follow nodeId");
 		const batchMode = modesBatchFlag[0]; // e.g. "image"
-		const modelList = modelsBatchFlag[0]?.split(",") || []; // e.g. "gpt-image-1.5,seedream-v4.5"
-		const prompts = batchRest.filter((a) => !a.startsWith("--"));
-		if (!prompts.length) {
+		if (batchMode && !VALID_MODES.has(batchMode)) {
 			console.error(
-				'Error: submit-batch requires at least one prompt.\nUsage: submit-batch [--follow <nodeId>] [--mode <m>] [--models "m1,m2,..."] "prompt1" "prompt2" ...',
+				`Error: invalid mode "${batchMode}". Valid: ${Array.from(VALID_MODES).join(", ")}`,
 			);
 			process.exit(1);
 		}
+		// --model and --models are redundant ways to say the same thing; if both
+		// are given the merge order is non-obvious, so warn rather than guess.
+		if (modelsBatchFlag.length > 0 && modelBatchFlag.length > 0) {
+			console.error(
+				"[canvas-cowork] WARNING: both --models and --model given; merging both (--models first).",
+			);
+		}
+		// Accept both --models "a,b" and --model "a"; merge into one list.
+		const modelList = [
+			...(modelsBatchFlag[0]?.split(",") ?? []),
+			...modelBatchFlag,
+		]
+			.map((m) => m.trim())
+			.filter(Boolean); // e.g. ["gpt-image-1.5", "seedream-v4.5"]
+		// A model flag was supplied but resolved to nothing (e.g. --models "" or
+		// --model "  "): that's a usage error, not a silent fall-through to default.
+		if (
+			(modelsBatchFlag.length > 0 || modelBatchFlag.length > 0) &&
+			modelList.length === 0
+		) {
+			console.error(
+				"Error: --models/--model was given but empty. Pass at least one model id, or omit the flag.",
+			);
+			process.exit(1);
+		}
+		const aspectRatio = ratioBatchFlag[0];
+		const imageSize = sizeBatchFlag[0];
+
+		// Fail fast on any leftover flag: never silently treat a flag value as a
+		// prompt (historically "--size 2K" leaked "2K" as an extra generation).
+		// A value-taking flag with no value (e.g. trailing "--ratio") also lands
+		// here, since extractFlag only consumes a following non-flag token.
+		const unknownFlag = batchRest.find((a) => a.startsWith("--"));
+		if (unknownFlag) {
+			console.error(
+				`Error: submit-batch does not support "${unknownFlag}" (or it was given without a value).\n` +
+					'Supported flags: --follow <nodeId> --mode <m> --models "m1,m2,..." (or --model <m>) --ratio <r> --size <s>\n' +
+					'To submit a prompt that starts with "--", put it after a "--" separator.',
+			);
+			process.exit(1);
+		}
+		const prompts = [...batchRest, ...literalPrompts];
+		if (!prompts.length) {
+			console.error(
+				'Error: submit-batch requires at least one prompt.\nUsage: submit-batch [--follow <nodeId>] [--mode <m>] [--models "m1,m2,..."] [--ratio <r>] [--size <s>] "prompt1" "prompt2" ...',
+			);
+			process.exit(1);
+		}
+
+		// Same footgun guard as single submit: image/video without a model lets
+		// the canvas pick a default that has historically misrouted credits.
+		if (
+			batchMode &&
+			modelList.length === 0 &&
+			(batchMode === "image" || batchMode === "video")
+		) {
+			console.error(
+				`[canvas-cowork] WARNING: submit-batch --mode ${batchMode} without --models/--model.`,
+			);
+			console.error(
+				`  The canvas will pick a default model (bot default → first available).`,
+			);
+			console.error(
+				`  Pass --models "<id>" (or --model <id>) to control which model runs;`,
+			);
+			console.error(`  run list-models ${batchMode} to see the active options.`);
+		}
+
 		if (!session.activeConvId) {
 			session.activeConvId = "00000000-0000-0000-0000-000000000000";
 		}
@@ -1699,11 +1974,28 @@ async function main() {
 			await ensureBrowserConnected(client, session, userId, botClient);
 			await client.join(ch);
 
-			const results: Array<{
-				prompt: string;
-				questionNodeId?: string;
-				success: boolean;
-			}> = [];
+			// Journal the batch up front so an interrupt mid-run is recoverable:
+			// each item flips pending → submitted/failed and is persisted as it lands.
+			const batch: BatchRecord = {
+				batchId: crypto.randomUUID(),
+				convId: session.activeConvId!,
+				mode: batchMode,
+				models: modelList,
+				createdAt: new Date().toISOString(),
+				updatedAt: new Date().toISOString(),
+				total: prompts.length,
+				items: prompts.map((prompt, index) => ({
+					index,
+					prompt,
+					status: "pending" as const,
+				})),
+			};
+			saveBatch(batch);
+			console.error(
+				`Batch ${batch.batchId} — ${prompts.length} prompts. ` +
+					`Recover with: batches ${batch.batchId}`,
+			);
+
 			const makeAction = (fields: BotActionPayload): BotAction =>
 				({
 					actionId: crypto.randomUUID(),
@@ -1723,20 +2015,52 @@ async function main() {
 					...(follow ? { follow } : {}),
 					...(batchMode ? { mode: batchMode } : {}),
 					...(perModel ? { model: perModel } : {}),
+					...(aspectRatio ? { aspectRatio } : {}),
+					...(imageSize ? { imageSize } : {}),
 				});
-				const resp = await sendAndWait(
-					client,
-					ch,
-					submitAction,
-					ORACLE_TIMEOUT_MS,
-				);
-				const qid =
-					resp.type === "result"
-						? (resp.data as any)?.questionNodeId
-						: undefined;
-				const ok =
-					resp.type === "result" && (resp.data as any)?.success !== false;
-				results.push({ prompt: prompts[i], questionNodeId: qid, success: ok });
+				let qid: string | undefined;
+				let ok = false;
+				let failReason: "rate_limited" | "error" = "error";
+				// LOCKED is the frontend's rate-limit signal (>30 actions/10s), not a
+				// real failure — back off and retry instead of dropping the prompt.
+				for (let attempt = 0; attempt <= BATCH_LOCKED_RETRIES; attempt++) {
+					try {
+						const resp = await sendAndWait(
+							client,
+							ch,
+							submitAction,
+							ORACLE_TIMEOUT_MS,
+						);
+						if (resp.type === "error" && (resp as any).code === "LOCKED") {
+							// Still rate-limited. Retry with backoff while budget remains;
+							// once exhausted, record it as rate_limited (not a hard error)
+							// so a re-run knows it was throttled, not broken.
+							failReason = "rate_limited";
+							if (attempt < BATCH_LOCKED_RETRIES) {
+								const backoff = 4_000 * (attempt + 1);
+								console.error(
+									`  [${i + 1}/${prompts.length}] rate-limited, backing off ${backoff / 1000}s...`,
+								);
+								await new Promise((r) => setTimeout(r, backoff));
+								continue;
+							}
+						}
+						qid =
+							resp.type === "result"
+								? (resp.data as any)?.questionNodeId
+								: undefined;
+						ok = resp.type === "result" && (resp.data as any)?.success !== false;
+					} catch (e: any) {
+						// One slow/failed submit shouldn't sink the rest of the batch.
+						failReason = "error";
+						console.error(`  [${i + 1}/${prompts.length}] error: ${e.message}`);
+					}
+					break;
+				}
+				batch.items[i].status = ok ? "submitted" : "failed";
+				batch.items[i].questionNodeId = qid;
+				if (!ok) batch.items[i].reason = failReason;
+				saveBatch(batch);
 				console.error(
 					`  [${i + 1}/${prompts.length}] ${ok ? "✓" : "✗"} ${prompts[i].slice(0, 40)}...`,
 				);
@@ -1745,12 +2069,25 @@ async function main() {
 				if (i < prompts.length - 1)
 					await new Promise((r) => setTimeout(r, 500));
 			}
+			const submitted = batch.items.filter(
+				(it) => it.status === "submitted",
+			).length;
 			console.log(
 				JSON.stringify(
 					{
 						type: "result",
 						actionId: crypto.randomUUID(),
-						data: { submitted: results.length, results },
+						data: {
+							batchId: batch.batchId,
+							submitted,
+							total: batch.total,
+							results: batch.items.map((it) => ({
+								prompt: it.prompt,
+								questionNodeId: it.questionNodeId,
+								success: it.status === "submitted",
+								...(it.reason ? { reason: it.reason } : {}),
+							})),
+						},
 					},
 					null,
 					2,
@@ -2203,7 +2540,9 @@ Global:
   --bot <identity>                Set bot cursor identity (claude-code|codex|openclaw|cursor|opencode|flowithos)
 
 Commands:
-  status                          Check session
+  status [--live]                 Check session (--live also probes the browser tab)
+  login | connect                 Establish/reuse a session, report browser state
+  whoami                          Print the logged-in userId (no side effects)
   open [convId]                   Open Flowith in browser
   ping                            Test browser connection
 
@@ -2251,6 +2590,10 @@ Commands:
                                          --failed: only failed nodes
                                          --conv: read from a different canvas (no switch)
   clean-failed                    Find & delete all failed nodes from database
+
+  batches [batchId]               Audit submit-batch runs (recovery after timeout/interrupt)
+                                         no arg: list recent batches
+                                         batchId: per-prompt status + questionNodeIds
 
   dream-init "theme" [--mode m]   Initialize creative journal (default: image)
 

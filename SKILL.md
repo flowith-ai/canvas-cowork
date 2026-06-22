@@ -202,6 +202,48 @@ If `set-model` or `--model` references a model the user can't access (not in the
 `--wait` polls via browser broadcast (2s→3s→5s→8s→10s). Default timeout 300s. For video/neo, use `--wait=600`.
 Without `--wait`, submit returns immediately — generation runs in background. Use `read-db` to check later.
 
+### `submit` vs `submit-batch` — flag differences
+
+They are NOT interchangeable. `submit-batch` takes **`--models`** (plural, comma-separated), not `--model`. Both forms now reject unknown flags instead of silently turning the flag value into a prompt. To submit a prompt that legitimately starts with `--`, put everything after a `--` separator: `submit-batch --mode image -- "--retro poster" "another prompt"`.
+
+| Flag | `submit` | `submit-batch` |
+|---|---|---|
+| model | `--model <id>` | `--models "a,b"` (or `--model <id>` as a single-model alias) |
+| mode | `--mode <m>` | `--mode <m>` |
+| ratio / size | `--ratio` / `--size` | `--ratio` / `--size` (applied to every prompt) |
+| follow parent | `--follow <id>` | `--follow <id>` (all prompts branch from it) |
+| image input | `--image <path>` | — (batch is text prompts only) |
+| wait | `--wait[=sec]` | — (batch never waits; audit with `read-db`) |
+
+### Daily batch production cookbook
+
+For "N canvases × M images" runs, do NOT use `--wait` on large batches and do NOT submit one-by-one:
+
+```bash
+# 1. Connect explicitly (don't trigger login via list-models)
+bun $S --bot claude-code login
+
+# 2. Confirm the exact model id + its size/ratio vocabulary
+bun $S --bot claude-code list-models image
+
+# 3. Create the canvas
+bun $S --bot claude-code create-canvas "Day 1 - Topic"
+
+# 4. Submit all prompts in ONE batch with explicit model + size
+bun $S --bot claude-code submit-batch --mode image --models "seedream-v4.5" --size 2K \
+  "prompt1" "prompt2" ... "prompt16"
+#    → prints a batchId; nodes are created fast, generation runs in background
+
+# 5. Audit by reading the canvas, NOT by waiting
+bun $S --bot claude-code read-db --conv <convId> --full
+bun $S --bot claude-code read-db --conv <convId> --failed
+```
+
+Recovery rules:
+- The frontend serializes bot actions and rate-limits at ~30 actions / 10s. `submit-batch` already paces itself and retries on rate-limit, but very large bursts can still be throttled.
+- If a batch times out or is interrupted, read the journal before retrying: `batches` (list) → `batches <batchId>` (per-prompt status). Items with a `questionNodeId` landed; only re-submit the ones that didn't.
+- If `read-db` comes back empty after a timeout, the submit phase likely never started (browser wasn't on the canvas) — re-run, don't assume duplicates.
+
 ## Creative Dream
 
 A persistent creative journal. See `references/creative-dream.md`.
@@ -218,6 +260,8 @@ bun $S --bot claude-code dream-init "ukiyo-e x cyberpunk"
 
 | Command | What it does |
 |---------|-------------|
+| `login` / `connect` | Establish (or reuse) a session and report browser state. Use this to log in — don't trigger login as a side effect of `list-models`. |
+| `whoami` | Print the logged-in userId (no side effects) |
 | `ping` | Test connection |
 | `create-canvas "title"` | Create canvas + auto-switch (auto-adds `[Bot]` prefix) |
 | `switch <convId>` | Set active canvas |
@@ -225,7 +269,7 @@ bun $S --bot claude-code dream-init "ukiyo-e x cyberpunk"
 | `search "query"` | Search canvases by title |
 | `list-models [mode]` | List available models |
 | `open [convId \| url]` | Open canvas in browser; accepts full URLs for shared/invitation links |
-| `status` | Check session/activeConvId |
+| `status [--live]` | Check session/activeConvId. `--live` also probes the browser tab (file alone can lie mid-login). |
 
 ### Canvas Operations (require canvas page open)
 
@@ -234,7 +278,7 @@ bun $S --bot claude-code dream-init "ukiyo-e x cyberpunk"
 | `set-mode <mode>` | Switch mode (text/image/video/agent/neo) |
 | `set-model <model-id>` | Select model (text/image/video only) |
 | `submit "text" [--follow id] [--mode m] [--model id] [--image ...] [--ratio r] [--size s] [--duration d] [--loop] [--no-audio] [--wait[=sec]]` | Submit a generation |
-| `submit-batch [--follow id] [--mode m] [--models "m1,m2,..."] "p1" "p2" ...` | N submits with optional per-prompt models |
+| `submit-batch [--follow id] [--mode m] [--models "m1,m2,..."] [--ratio r] [--size s] "p1" "p2" ...` | N submits; `--ratio`/`--size` apply to all, `--model` accepted as a single-model alias. Unknown flags now error instead of leaking as prompts. |
 | `read [nodeId \| --all]` | Read node content (browser memory) |
 | `comment <nodeId> "text"` | Move cursor to node + show comment label (30s fade) |
 | `delete <nodeId>` | Delete a node |
@@ -259,6 +303,8 @@ bun $S --bot claude-code dream-init "ukiyo-e x cyberpunk"
 | `read-db --failed` | Failed nodes only |
 | `read-db --conv <id> --full` | Read another canvas without switching away |
 | `clean-failed` | Delete failed nodes + orphaned parents |
+| `batches` | List recent `submit-batch` runs (for recovery after a timeout/interrupt) |
+| `batches <batchId>` | Per-prompt status + questionNodeIds for one batch |
 
 ### Memory
 

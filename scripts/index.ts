@@ -345,6 +345,48 @@ function parseAgentIdFlag(rawArgs: string[]): {
 // ============ Browser open helper ============
 
 /**
+ * On macOS, return the bundle id (lowercase) of the default HTTPS handler.
+ * No Launch Services plist, or no https entry in it, means the system default (Safari).
+ * Returns null if the plist exists but can't be read.
+ */
+let _macDefaultHttpsHandler: string | null | undefined; // undefined = not checked yet
+function getMacDefaultHttpsHandler(): string | null {
+	if (_macDefaultHttpsHandler !== undefined) return _macDefaultHttpsHandler;
+	_macDefaultHttpsHandler = readMacDefaultHttpsHandler();
+	return _macDefaultHttpsHandler;
+}
+
+function readMacDefaultHttpsHandler(): string | null {
+	const plist = join(
+		homedir(),
+		"Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist",
+	);
+	if (!existsSync(plist)) return "com.apple.safari";
+
+	const { execFileSync } = require("child_process");
+	try {
+		// Parse the plist as JSON — `defaults read` text output lists each handler's keys
+		// alphabetically (LSHandlerRoleAll before LSHandlerURLScheme), so regexes over it
+		// pick up the wrong entry.
+		const out = execFileSync("plutil", ["-convert", "json", "-o", "-", plist], {
+			encoding: "utf-8",
+			timeout: 2000,
+			stdio: ["ignore", "pipe", "ignore"],
+		});
+		const handlers: any[] = JSON.parse(out).LSHandlers ?? [];
+		const https = handlers.find(
+			(h) => String(h?.LSHandlerURLScheme).toLowerCase() === "https",
+		);
+		const bundleId = https?.LSHandlerRoleAll ?? https?.LSHandlerRoleViewer;
+		return typeof bundleId === "string"
+			? bundleId.toLowerCase()
+			: "com.apple.safari";
+	} catch {
+		return null;
+	}
+}
+
+/**
  * On macOS, detect if the default HTTPS handler is Safari.
  * If so, find an installed Chromium-based browser to use instead
  * (Safari blocks ws://127.0.0.1 from HTTPS pages — mixed content).
@@ -357,24 +399,9 @@ function getMacBrowserOverride(): string | typeof SAFARI_ONLY | null {
 	if (process.platform !== "darwin") return null;
 	if (_macBrowserOverride !== undefined) return _macBrowserOverride;
 
-	const { execSync } = require("child_process");
-
-	// Check default browser via Launch Services
-	let isSafariDefault = false;
-	try {
-		const out = execSync(
-			`defaults read com.apple.LaunchServices/com.apple.launchservices.secure LSHandlers 2>/dev/null`,
-			{ encoding: "utf-8", timeout: 1000 },
-		);
-		// If no custom handler overrides https, Safari is the system default
-		// Look for an https handler that is NOT safari
-		const httpsSection = out.match(
-			/LSHandlerURLScheme = https;[\s\S]*?LSHandlerRoleAll = "([^"]+)"/,
-		)?.[1];
-		isSafariDefault = !httpsSection || httpsSection.includes("safari");
-	} catch {
-		isSafariDefault = false; // can't detect — assume non-Safari
-	}
+	// Check default browser via Launch Services (null = can't detect — assume non-Safari)
+	const isSafariDefault =
+		getMacDefaultHttpsHandler()?.includes("safari") ?? false;
 
 	if (!isSafariDefault) {
 		_macBrowserOverride = null;
@@ -465,8 +492,13 @@ function tryReuseExistingTab(url: string): boolean {
 	return false;
 }
 
+// True when the last openInBrowser() handed an https URL to a macOS default browser
+// that is (or may be) Safari, which can't complete the localhost handshake.
+let _lastOpenMaybeSafari = false;
+
 async function openInBrowser(url: string) {
 	const { spawnSync } = await import("child_process");
+	_lastOpenMaybeSafari = false;
 
 	// On macOS, try to navigate an existing Flowith tab first (no new tab)
 	if (process.platform === "darwin" && tryReuseExistingTab(url)) return;
@@ -486,6 +518,8 @@ async function openInBrowser(url: string) {
 					`Failed to launch ${override}, falling back to default browser`,
 				);
 			}
+			const handler = getMacDefaultHttpsHandler();
+			_lastOpenMaybeSafari = handler === null || handler.includes("safari");
 		}
 		spawnSync("open", [url], { stdio: "ignore" });
 	} else if (process.platform === "win32") {
@@ -648,7 +682,11 @@ async function acquireSession(botClient = "other"): Promise<CanvasBotSession> {
 				fail(
 					"Browser did not send session within 2 minutes.\n\n" +
 						"This usually means you are not logged in to Flowith.\n" +
-						"Please log in at the browser window that was opened, then re-run this command.",
+						"Please log in at the browser window that was opened, then re-run this command." +
+						(_lastOpenMaybeSafari
+							? "\n\nIf the page opened in Safari, it can't complete the handshake (Safari blocks ws://127.0.0.1 from HTTPS pages).\n" +
+								"Set Chrome, Arc, Edge or Brave as your default browser, or re-run this command and open the printed \"Waiting for browser at\" URL in one of them."
+							: ""),
 					"NOT_LOGGED_IN",
 				),
 			120_000,

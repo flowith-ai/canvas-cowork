@@ -246,6 +246,101 @@ export function resolveVideoParams(
 	return out;
 }
 
+// ---------- aliases & defaults ----------
+
+export type Alias = "best" | "fast";
+
+/**
+ * Curated picks so an agent can say `--model best` without reading the
+ * catalogue. Override per machine in ~/.flowith/defaults.json:
+ *   {"video":{"best":"seedance-2.5","fast":"seedance-2.0-fast"}, ...}
+ */
+export const MODEL_ALIASES: Record<Mode, Record<Alias, string>> = {
+	text: { best: "claude-opus-5-5", fast: "gemini-3.8-flash" },
+	image: { best: "gpt-image-2.5-flare", fast: "gemini-3.1-flash-image" },
+	video: { best: "seedance-2.5", fast: "seedance-2.0-fast" },
+};
+
+/** What `gen` uses when --model is omitted. Video defaults to the cheaper tier. */
+export const DEFAULT_ALIAS: Record<Mode, Alias> = { text: "best", image: "best", video: "fast" };
+
+const DEFAULTS_FILE = join(homedir(), ".flowith", "defaults.json");
+
+export function loadAliasTable(): Record<Mode, Record<Alias, string>> {
+	const table: Record<Mode, Record<Alias, string>> = {
+		text: { ...MODEL_ALIASES.text },
+		image: { ...MODEL_ALIASES.image },
+		video: { ...MODEL_ALIASES.video },
+	};
+	if (existsSync(DEFAULTS_FILE)) {
+		try {
+			const o = JSON.parse(readFileSync(DEFAULTS_FILE, "utf-8"));
+			for (const mode of ["text", "image", "video"] as Mode[])
+				for (const alias of ["best", "fast"] as Alias[])
+					if (typeof o?.[mode]?.[alias] === "string") table[mode][alias] = o[mode][alias];
+		} catch {}
+	}
+	return table;
+}
+
+/**
+ * Turn `best` / `fast` / a model id / nothing into a concrete model id.
+ * Alias targets that vanished from the catalogue fall back to the first
+ * model for the mode (and say so via `note`).
+ */
+export function resolveModel(
+	models: ModelMap,
+	mode: Mode,
+	requested: string | undefined,
+	table: Record<Mode, Record<Alias, string>> = loadAliasTable(),
+): { id: string; alias?: Alias; note?: string } {
+	const alias = (requested ?? DEFAULT_ALIAS[mode]) as Alias;
+	if (requested !== undefined && !(requested in table[mode])) return { id: requested };
+	const target = table[mode][alias];
+	if (models[target]) return { id: target, alias };
+	const first = modelsForMode(models, mode)[0]?.[0];
+	if (!first) throw new CliError(`No ${mode} models available.`, "INVALID_MODEL");
+	return { id: first, alias, note: `alias "${alias}" → "${target}" is not in the catalogue; using "${first}"` };
+}
+
+/** One line per model for the default `models` listing. */
+export function compactModelLine(id: string, m: RemoteModel): string {
+	const flags: string[] = [];
+	if (m.supportsAudio) flags.push("audio");
+	if (m.supportedKeyframe) flags.push("keyframe");
+	if (m.referenceAssetLimits) {
+		const l = m.referenceAssetLimits;
+		flags.push(`refs:${l.image}i/${l.video}v/${l.audio}a`);
+	} else if (m.maxReferenceImages) flags.push(`refs:${m.maxReferenceImages}i`);
+	if (m.supportsDraft) flags.push("draft");
+	if (m.supportsImageInput && m.media === "text") flags.push("vision");
+	if (m.comingSoon) flags.push("coming-soon");
+	const cols: string[] = [id];
+	if (m.media === "video") {
+		cols.push(`ratios=${(m.supportedAspectRatios ?? []).join(",") || "-"}`);
+		const d = m.supportedDurations ?? [];
+		cols.push(`dur=${d.length ? `${d[0]}..${d[d.length - 1]}s` : "-"}`);
+		cols.push(`res=${(m.supportedResolutions ?? []).join(",") || "-"}`);
+		cols.push(flags.join(" ") || "-");
+		if (m.estimatedPricePer5s !== undefined) cols.push(`~${Math.round(m.estimatedPricePer5s)}cr/5s`);
+	} else if (m.media === "image") {
+		if (m.sizeMatrix?.sizes) {
+			cols.push(`ratios=${(m.sizeMatrix.ratios ?? Object.keys(m.sizeMatrix.sizes)).join(",")}`);
+			cols.push(`sizes=${(m.sizeMatrix.resolutions ?? []).join(",") || "px"}`);
+		} else {
+			cols.push(`ratios=${(m.supportedAspectRatios ?? []).join(",") || "-"}`);
+			cols.push(`sizes=${(m.supportedImageSizes ?? []).join(",") || "-"}`);
+		}
+		cols.push(flags.join(" ") || "-");
+		if (m.estimatedPrice !== undefined) cols.push(`~${m.estimatedPrice}cr`);
+	} else {
+		cols.push(m.title ?? "");
+		cols.push(flags.join(" ") || "-");
+		if (m.consume_num !== undefined) cols.push(`~${m.consume_num}cr`);
+	}
+	return cols.join("  ");
+}
+
 /** Seedance 2.x accepts image/video/audio references in the prompt (`image1`, `audio1`, ...). */
 export function isSeedanceMultiMedia(id: string): boolean {
 	return id.includes("seedance-2.0") || id.includes("seedance-2.5");

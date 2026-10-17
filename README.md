@@ -22,13 +22,16 @@ npx skills add flowith-ai/canvas-cowork
 S=scripts/index.ts
 bun $S --bot claude-code login                      # once: opens Flowith, log in
 
-bun $S --bot claude-code list-models video --json   # what each model accepts + credits
-bun $S --bot claude-code gen video "a red roadster on a coastal road at sunset" \
-  --model seedance-2.0-fast --duration 5 --ratio 16:9 --resolution 720p
-# → {"type":"result","data":{"status":"finished","url":"https://vg.flowith.net/....mp4", ...}}
+bun $S --bot claude-code gen video "a red roadster on a coastal road at sunset"
+# → {"type":"result","data":{"status":"finished","url":"https://vg.flowith.net/....mp4", "model":"seedance-2.0-fast", ...}}
+bun $S --bot claude-code gen video "..." --model best --resolution 1080p --duration 10   # seedance-2.5
 
-bun $S --bot claude-code gen image "a golden retriever in a wheat field" \
-  --model gemini-3.1-flash-image --ratio 16:9 --size 2k
+bun $S --bot claude-code gen image "a golden retriever in a wheat field" --ratio 16:9 --size 2K   # gpt-image-2.5-flare
+bun $S --bot claude-code gen text "Summarise the three films above" --follow <nodeId>          # Claude Opus 5.5, with the thread as history
+bun $S --bot claude-code gen image "apple" "pear" "lemon" --json --out ./fruit/              # batch → one array, files saved
+
+bun $S --bot claude-code models video               # compact table with ratios, durations, resolutions, credits
+bun $S --bot claude-code models --aliases           # what best / fast resolve to (override in ~/.flowith/defaults.json)
 
 # Seedance 2.x: reference audio / video / images
 bun $S --bot claude-code gen video "the orb pulses to audio1, palette of image1" \

@@ -21,7 +21,7 @@ Errors are structured JSON on stdout (exit code 1):
 | `GENERATION_FAILED` | The model failed; credits are refunded (`data.refund_amount`) | Simplify the prompt / change model; `clean-failed` to tidy |
 | `RATE_LIMITED` | HTTP 429 | Wait `retryAfterSeconds` (in `data`), retry |
 | `TIMEOUT` | `gen --wait` ran out | `read-db <nodeId>` later; the job keeps running server-side |
-| `NO_CANVAS` | No active canvas for a node command | `create-canvas`, `switch <id>` or `--canvas <id>` |
+| `NO_CANVAS` | No active canvas for a node command | `create-canvas`, `switch <id>`, `--canvas <id>` or env `FLOWITH_CANVAS=<id>` |
 | `BROWSER_NOT_CONNECTED` | Canvas-mode command, tab didn't respond | Ensure the Flowith tab is fully loaded, or use the direct command instead |
 | `LOCKED` | Frontend rate limit (30 actions / 10 s) | Wait 2 s, retry |
 | `INVALID_SESSION` | Session file corrupted | Delete `~/.flowith/bot-session.json`, re-run `login` |

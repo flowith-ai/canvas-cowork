@@ -147,6 +147,36 @@ Poll the node: `data.status === "finished"` → `data.videoId` (and `data.value`
 is the mp4 URL. On failure `data.error`, `data.error_type`, `data.error_code`,
 `data.refund_amount` are set.
 
+## Generate text
+
+Same two inserts, response node `type:"2"` with `mode:"General"`:
+
+```json
+{"id":"<N>","conv_id":"<CONV>","p_id":"<Q>","c_ids":[],"type":"2","position":{"x":0,"y":130},
+ "data":{"title":"AI","value":"","mode":"General","isImage":false,"status":"init",
+         "timestamp":"<unix s>","model":"claude-opus-5-5"}}
+```
+
+```bash
+curl -s 'https://edge.flowith.io/completion/async?mode=general' -H "Authorization: $TOKEN" \
+  -H 'Content-Type: application/json' -d '{
+  "target_feature":"text_completion",
+  "model":"claude-opus-5-5",
+  "nodeId":"<N>", "convId":"<CONV>",
+  "messages":[
+    {"role":"system","content":"Be brief."},            // optional
+    {"role":"user","content":"earlier question"},        // thread history, oldest first
+    {"role":"assistant","content":"earlier answer"},
+    {"role":"user","content":"the new prompt"}
+  ]
+}'
+# → {"nodeId":"<N>","convId":"<CONV>","status":"processing"}
+```
+
+Poll the node: `data.status` goes `running` → `finished`; `data.value` is the answer
+(markdown), `data.reasoning` the model's thinking when it exposes it. Text models are
+the catalogue entries with `media:"text"` (Claude, GPT, Gemini, DeepSeek, Kimi, …).
+
 ## Credits
 
 ```bash

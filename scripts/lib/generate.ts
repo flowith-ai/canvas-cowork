@@ -36,20 +36,40 @@ import {
 } from "./canvas";
 import type { UploadedMedia } from "./upload";
 
+export type GenKind = "text" | "image" | "video";
+
 export interface GenResult {
 	status: "finished" | "failed" | "submitted" | "timeout";
-	mode: "image" | "video";
+	kind: GenKind;
 	model: string;
 	convId: string;
 	questionNodeId: string;
 	nodeId: string;
+	/** image / video result */
 	url?: string;
+	/** text result */
+	text?: string;
+	reasoning?: string;
+	ratio?: string;
+	duration?: string;
+	resolution?: string;
+	elapsedMs?: number;
 	error?: string;
 	errorCode?: string;
 	/** the node's `data` as last seen (status, refund_amount, resolution, ...) */
 	data?: Record<string, unknown>;
 	/** Seedance reference tokens → URLs, so the caller can explain the mapping */
 	references?: Record<string, string>;
+}
+
+/** Trim a result to what an agent needs by default (`--verbose` keeps `data`). */
+export function compactResult(r: GenResult): GenResult {
+	const { data, ...rest } = r;
+	if (r.status !== "failed" || !data) return rest;
+	const keep: Record<string, unknown> = {};
+	for (const k of ["error", "error_type", "error_code", "refund_amount", "request_id"])
+		if (data[k] !== undefined && data[k] !== null) keep[k] = data[k];
+	return Object.keys(keep).length ? { ...rest, data: keep } : rest;
 }
 
 interface FileListEntry {
@@ -324,15 +344,118 @@ export function buildVideoRequest(
 	return { questionNode, responseNode, path: "/video/async", body, references };
 }
 
+// ---------- text ----------
+
+export interface ChatMessage {
+	role: "system" | "user" | "assistant";
+	content: string;
+}
+
+export interface TextOpts {
+	prompt: string;
+	model: string;
+	system?: string;
+	convId: string;
+	follow?: string;
+}
+
+/**
+ * Conversation history for a follow-up: walk `p_id` from the follow node up
+ * to the canvas root, questions → user, responses → assistant (image nodes
+ * become "[image: url]"), oldest first, capped at `maxTurns` messages. This
+ * is the text-only core of the app's getHistoryMessageList.
+ */
+export function buildHistoryMessages(
+	nodes: Array<Pick<FlowNodeRow, "id" | "p_id" | "type" | "data">>,
+	followId: string | undefined,
+	maxTurns = 20,
+): ChatMessage[] {
+	if (!followId) return [];
+	const byId = new Map(nodes.map((n) => [n.id, n]));
+	const out: ChatMessage[] = [];
+	const seen = new Set<string>();
+	let cur = byId.get(followId);
+	while (cur && !seen.has(cur.id) && out.length < maxTurns) {
+		seen.add(cur.id);
+		const d = cur.data ?? {};
+		if (cur.type === NODE_TYPE.question) {
+			const v = typeof d.value === "string" ? d.value : "";
+			if (v) out.push({ role: "user", content: v });
+		} else if (cur.type === NODE_TYPE.response || cur.type === NODE_TYPE.video) {
+			const v = typeof d.value === "string" ? d.value : "";
+			if (v) {
+				const isMedia = d.isImage === true || cur.type === NODE_TYPE.video || /^https?:\/\/\S+$/.test(v);
+				out.push({ role: "assistant", content: isMedia ? `[${cur.type === NODE_TYPE.video ? "video" : "image"}: ${v}]` : v });
+			}
+		}
+		cur = cur.p_id ? byId.get(cur.p_id) : undefined;
+	}
+	return out.reverse();
+}
+
+export function buildTextRequest(
+	opts: TextOpts,
+	questionPos: Position,
+	history: ChatMessage[],
+): BuiltRequest {
+	const ts = nowTimestamp();
+	const questionId = crypto.randomUUID();
+	const nodeId = crypto.randomUUID();
+	const questionNode: BuiltRequest["questionNode"] = {
+		id: questionId,
+		conv_id: opts.convId,
+		p_id: opts.follow ?? opts.convId,
+		c_ids: [],
+		type: NODE_TYPE.question,
+		position: questionPos,
+		data: { timestamp: ts, value: opts.prompt },
+	};
+	const responseNode: BuiltRequest["responseNode"] = {
+		id: nodeId,
+		conv_id: opts.convId,
+		p_id: questionId,
+		c_ids: [],
+		type: NODE_TYPE.response,
+		position: childPosition(questionNode),
+		data: {
+			title: "AI",
+			value: "",
+			mode: "General",
+			timestamp: ts,
+			isImage: false,
+			status: "init",
+			model: opts.model,
+		},
+	};
+	const messages: ChatMessage[] = [
+		...(opts.system ? [{ role: "system" as const, content: opts.system }] : []),
+		...history,
+		{ role: "user", content: opts.prompt },
+	];
+	const body: Record<string, unknown> = {
+		target_feature: "text_completion",
+		model: opts.model,
+		messages,
+		nodeId,
+		convId: opts.convId,
+	};
+	return { questionNode, responseNode, path: "/completion/async?mode=general", body };
+}
+
 // ---------- run ----------
 
 export interface RunOpts {
 	wait: boolean;
 	timeoutMs: number;
 	onProgress?: (msg: string) => void;
+	/** Pre-computed question position (batch runs plan these up front so nodes don't overlap). */
+	questionPos?: Position;
 }
 
-async function questionPositionFor(s: ApiSession, convId: string, follow?: string): Promise<Position> {
+/** Vertical space one question+response pair takes; batch jobs are stacked by this. */
+export const BATCH_ROW_HEIGHT = 650;
+
+export async function questionPositionFor(s: ApiSession, convId: string, follow?: string): Promise<Position> {
 	if (follow) {
 		const parent = await fetchNode(s, follow);
 		if (!parent || parent.conv_id !== convId)
@@ -362,20 +485,25 @@ function failureInfo(node: FlowNodeRow | null): { error: string; code: string } 
 
 async function run(
 	s: ApiSession,
-	mode: "image" | "video",
+	kind: GenKind,
 	built: BuiltRequest & { references?: Record<string, string> },
 	runOpts: RunOpts,
 ): Promise<GenResult> {
-	const base = {
-		mode,
+	const started = Date.now();
+	const rd = built.responseNode.data ?? {};
+	const base: Omit<GenResult, "status"> = {
+		kind,
 		model: built.body.model as string,
 		convId: built.questionNode.conv_id,
 		questionNodeId: built.questionNode.id,
 		nodeId: built.responseNode.id,
+		...(rd.aspect_ratio ? { ratio: rd.aspect_ratio as string } : {}),
+		...(kind === "video" && rd.duration ? { duration: String(rd.duration) } : {}),
+		...(kind === "video" && rd.resolution ? { resolution: rd.resolution as string } : {}),
 		...(built.references ? { references: built.references } : {}),
 	};
 	await upsertNodes(s, [built.questionNode, built.responseNode]);
-	runOpts.onProgress?.(`Submitting ${mode} to ${base.model}...`);
+	runOpts.onProgress?.(`Submitting ${kind} to ${base.model}...`);
 	try {
 		await workerFetch(s, built.path, { json: built.body, timeoutMs: 120_000 });
 	} catch (e) {
@@ -394,7 +522,7 @@ async function run(
 		}
 		throw e;
 	}
-	if (!runOpts.wait) return { ...base, status: "submitted" };
+	if (!runOpts.wait) return { ...base, status: "submitted", elapsedMs: Date.now() - started };
 
 	runOpts.onProgress?.(`Waiting for generation (timeout ${Math.round(runOpts.timeoutMs / 1000)}s)...`);
 	const res = await pollNode(s, base.nodeId, {
@@ -404,20 +532,38 @@ async function run(
 		},
 	});
 	const data = res.node?.data ?? undefined;
+	const elapsedMs = Date.now() - started;
 	if (res.status === "finished") {
+		if (kind === "text") {
+			const text = typeof data?.value === "string" ? data.value : "";
+			const reasoning = typeof data?.reasoning === "string" && data.reasoning ? data.reasoning : undefined;
+			return { ...base, status: "finished", text, ...(reasoning ? { reasoning } : {}), elapsedMs, data };
+		}
 		const url = (data?.videoId as string) || (data?.value as string) || undefined;
-		return { ...base, status: "finished", url, data };
+		return {
+			...base,
+			status: "finished",
+			url,
+			...(data?.resolution ? { resolution: data.resolution as string } : {}),
+			elapsedMs,
+			data,
+		};
 	}
 	if (res.status === "timeout") {
 		return {
 			...base,
 			status: "timeout",
 			error: `Timed out after ${Math.round(runOpts.timeoutMs / 1000)}s; check later with: read-db ${base.nodeId}`,
+			elapsedMs,
 			data,
 		};
 	}
 	const { error, code } = failureInfo(res.node);
-	return { ...base, status: "failed", error, errorCode: code, data };
+	return { ...base, status: "failed", error, errorCode: code, elapsedMs, data };
+}
+
+async function positionFor(s: ApiSession, convId: string, follow: string | undefined, runOpts: RunOpts) {
+	return runOpts.questionPos ?? (await questionPositionFor(s, convId, follow));
 }
 
 export async function genImage(
@@ -427,8 +573,20 @@ export async function genImage(
 	runOpts: RunOpts,
 ): Promise<GenResult> {
 	const model = requireModel(models, opts.model, "image");
-	const pos = await questionPositionFor(s, opts.convId, opts.follow);
+	const pos = await positionFor(s, opts.convId, opts.follow, runOpts);
 	return run(s, "image", buildImageRequest(opts, model, pos), runOpts);
+}
+
+/** Defaults an agent would otherwise have to look up: 16:9, 5 s, 720p when the model offers them. */
+export function applyVideoDefaults(opts: VideoOpts, model: RemoteModel): VideoOpts {
+	const has = (list: string[] | undefined, v: string) => list?.some((x) => x.toLowerCase() === v) ?? false;
+	return {
+		...opts,
+		ratio: opts.ratio ?? (has(model.supportedAspectRatios, "16:9") ? "16:9" : undefined),
+		duration: opts.duration ?? (has(model.supportedDurations, "5") ? "5" : undefined),
+		resolution:
+			opts.resolution ?? (opts.draft ? undefined : has(model.supportedResolutions, "720p") ? "720p" : undefined),
+	};
 }
 
 export async function genVideo(
@@ -438,6 +596,23 @@ export async function genVideo(
 	runOpts: RunOpts,
 ): Promise<GenResult> {
 	const model = requireModel(models, opts.model, "video");
-	const pos = await questionPositionFor(s, opts.convId, opts.follow);
-	return run(s, "video", buildVideoRequest(opts, model, pos), runOpts);
+	const pos = await positionFor(s, opts.convId, opts.follow, runOpts);
+	return run(s, "video", buildVideoRequest(applyVideoDefaults(opts, model), model, pos), runOpts);
+}
+
+export async function genText(
+	s: ApiSession,
+	models: ModelMap,
+	opts: TextOpts,
+	runOpts: RunOpts,
+): Promise<GenResult> {
+	requireModel(models, opts.model, "text");
+	const nodes = opts.follow ? await fetchNodes(s, opts.convId) : [];
+	if (opts.follow && !nodes.some((n) => n.id === opts.follow))
+		throw new CliError(`--follow node ${opts.follow} not found on canvas ${opts.convId}.`, "NOT_FOUND");
+	const history = buildHistoryMessages(nodes, opts.follow);
+	const pos =
+		runOpts.questionPos ??
+		(opts.follow ? childPosition(nodes.find((n) => n.id === opts.follow)!) : rootQuestionPosition(nodes.length ? nodes : await fetchNodes(s, opts.convId)));
+	return run(s, "text", buildTextRequest(opts, pos, history), runOpts);
 }

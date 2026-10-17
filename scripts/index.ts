@@ -30,7 +30,16 @@ import {
 	jwtExpiresInMs,
 	refreshAccessToken,
 } from "./lib/session";
-import { type Mode, fetchModels, modelsForMode, summarizeModel } from "./lib/models";
+import {
+	DEFAULT_ALIAS,
+	type Mode,
+	compactModelLine,
+	fetchModels,
+	loadAliasTable,
+	modelsForMode,
+	resolveModel,
+	summarizeModel,
+} from "./lib/models";
 import {
 	cleanFailed,
 	createCanvas,
@@ -40,7 +49,16 @@ import {
 	readNodes,
 } from "./lib/canvas";
 import { resolveMedia, uploadFile } from "./lib/upload";
-import { type GenResult, genImage, genVideo } from "./lib/generate";
+import {
+	BATCH_ROW_HEIGHT,
+	type GenResult,
+	compactResult,
+	genImage,
+	genText,
+	genVideo,
+	questionPositionFor,
+} from "./lib/generate";
+import { outputPathFor, saveResult } from "./lib/download";
 
 // ============ Runtime check ============
 
@@ -1393,14 +1411,20 @@ function listBatches(limit = 20): BatchRecord[] {
 
 // ============ Output ============
 
-let JSON_COMPACT = false;
+let JSON_COMPACT = false; // --json: compact single-line JSON on stdout, implies --quiet
+let VERBOSE = false; // --verbose: keep the full node `data` in gen results
+let QUIET = false; // --quiet: no progress lines on stderr
 
-/** `--json` anywhere on the command line → compact single-line JSON on stdout. */
+/** Strip the global output flags (--json / --verbose / --quiet) from anywhere on the line. */
 function parseJsonFlag(rawArgs: string[]): string[] {
-	const idx = rawArgs.indexOf("--json");
-	if (idx === -1) return rawArgs;
-	JSON_COMPACT = true;
-	return rawArgs.filter((_, i) => i !== idx);
+	const rest: string[] = [];
+	for (const a of rawArgs) {
+		if (a === "--json") JSON_COMPACT = QUIET = true;
+		else if (a === "--verbose") VERBOSE = true;
+		else if (a === "--quiet") QUIET = true;
+		else rest.push(a);
+	}
+	return rest;
 }
 
 function out(obj: unknown) {
@@ -1409,6 +1433,10 @@ function out(obj: unknown) {
 
 function resultOut(data: unknown) {
 	out({ type: "result", actionId: crypto.randomUUID(), data });
+}
+
+function progress(msg: string) {
+	if (!QUIET) console.error(msg);
 }
 
 // ============ Direct (headless) commands ============
@@ -1465,23 +1493,91 @@ const GEN_VALUE_FLAGS = new Set([
 	"--wait",
 	"--timeout",
 	"--title",
+	"--system",
+	"--out",
+	"--jobs",
 ]);
 const GEN_BOOL_FLAGS = new Set(["--no-wait", "--no-audio", "--draft"]);
 
+const GEN_USAGE = `gen text|image|video "prompt" ["prompt2" ...] [flags]
+
+  --model <id|best|fast>   default: best (text, image), fast (video). \`models <mode>\` lists ids
+  --follow <nodeId>        continue from a node (text: carries the thread as history)
+  --no-wait                return immediately; poll with: read-db <nodeId>
+  --out <file|dir/>        save the result (image/video download, text as a file)
+  --jobs <file.json>       batch: [{"prompt": "...", "model"?: "...", ...}]; or pass several prompts
+  --json  --verbose        compact one-line JSON (quiet) / keep full node data
+
+  text:   --system "..."
+  image:  --ratio 16:9 --size 2k|2K  --quality q  --ref <img>...
+  video:  --ratio 16:9 --duration 5 --resolution 480p|720p|1080p --no-audio --draft
+          --start <img> [--end <img>]   or   --ref <img|mp4|wav>... (Seedance 2.x: image1/audio1/video1 in the prompt)
+
+Lands on the active canvas (--canvas <id> or FLOWITH_CANVAS=<id>; creates "[Bot] <date>" when none).`;
+
+interface GenJob {
+	prompt: string;
+	model?: string;
+	ratio?: string;
+	size?: string;
+	quality?: string;
+	refs?: string[];
+	follow?: string;
+	duration?: string;
+	resolution?: string;
+	start?: string;
+	end?: string;
+	audio?: boolean;
+	draft?: boolean;
+	system?: string;
+}
+
 interface GenArgs {
 	mode: Mode;
-	prompt: string;
+	jobs: GenJob[];
 	flags: Record<string, string[]>;
 	bools: Set<string>;
 }
 
+/** Normalise one entry of a --jobs file (flag names or camelCase keys both work). */
+function jobFromObject(o: Record<string, unknown>, shared: GenJob): GenJob {
+	const pick = (...keys: string[]): string | undefined => {
+		for (const k of keys) if (typeof o[k] === "string" && o[k]) return o[k] as string;
+		return undefined;
+	};
+	const refsRaw = o.refs ?? o.ref ?? o["--ref"];
+	const refs = Array.isArray(refsRaw)
+		? (refsRaw as unknown[]).map(String)
+		: typeof refsRaw === "string"
+			? [refsRaw]
+			: undefined;
+	const audio =
+		typeof o.audio === "boolean" ? o.audio : o.noAudio === true || o["--no-audio"] === true ? false : undefined;
+	const prompt = pick("prompt", "value", "text");
+	if (!prompt) throw new CliError('Each job needs a "prompt".', "INVALID_PARAM", o);
+	return {
+		...shared,
+		prompt,
+		model: pick("model", "--model") ?? shared.model,
+		ratio: pick("ratio", "aspect_ratio", "--ratio") ?? shared.ratio,
+		size: pick("size", "image_size", "--size") ?? shared.size,
+		quality: pick("quality", "--quality") ?? shared.quality,
+		refs: refs ?? shared.refs,
+		follow: pick("follow", "--follow") ?? shared.follow,
+		duration: pick("duration", "--duration") ?? (o.duration !== undefined ? String(o.duration) : shared.duration),
+		resolution: pick("resolution", "--resolution") ?? shared.resolution,
+		start: pick("start", "imageURL", "--start") ?? shared.start,
+		end: pick("end", "--end") ?? shared.end,
+		audio: audio ?? shared.audio,
+		draft: typeof o.draft === "boolean" ? o.draft : shared.draft,
+		system: pick("system", "--system") ?? shared.system,
+	};
+}
+
 function parseGenArgs(args: string[]): GenArgs {
 	const mode = args[0];
-	if (mode !== "image" && mode !== "video")
-		throw new CliError(
-			'Usage: gen image|video "<prompt>" --model <id> [flags]  (see --help)',
-			"INVALID_PARAM",
-		);
+	if (mode !== "text" && mode !== "image" && mode !== "video")
+		throw new CliError(GEN_USAGE, "INVALID_PARAM");
 	const flags: Record<string, string[]> = {};
 	const bools = new Set<string>();
 	const positional: string[] = [];
@@ -1497,32 +1593,221 @@ function parseGenArgs(args: string[]): GenArgs {
 				throw new CliError(`${name} needs a value.`, "INVALID_PARAM");
 			(flags[name] ??= []).push(value);
 		} else if (a.startsWith("--")) {
-			throw new CliError(
-				`Unknown flag ${name}. Flags: ${[...GEN_VALUE_FLAGS, ...GEN_BOOL_FLAGS].join(" ")}`,
-				"INVALID_PARAM",
-			);
+			throw new CliError(`Unknown flag ${name}.\n\n${GEN_USAGE}`, "INVALID_PARAM");
 		} else {
 			positional.push(a);
 		}
 	}
-	if (positional.length !== 1)
-		throw new CliError(
-			positional.length === 0
-				? "gen needs exactly one quoted prompt."
-				: `gen takes one prompt; got ${positional.length} positional args (quote the prompt).`,
-			"INVALID_PARAM",
+	const shared: GenJob = {
+		prompt: "",
+		model: flags["--model"]?.[0],
+		ratio: flags["--ratio"]?.[0],
+		size: flags["--size"]?.[0],
+		quality: flags["--quality"]?.[0],
+		refs: flags["--ref"],
+		follow: flags["--follow"]?.[0],
+		duration: flags["--duration"]?.[0],
+		resolution: flags["--resolution"]?.[0],
+		start: flags["--start"]?.[0],
+		end: flags["--end"]?.[0],
+		audio: bools.has("--no-audio") ? false : undefined,
+		draft: bools.has("--draft") || undefined,
+		system: flags["--system"]?.[0],
+	};
+	let jobs: GenJob[];
+	if (flags["--jobs"]?.[0]) {
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(readFileSync(flags["--jobs"][0], "utf-8"));
+		} catch (e: any) {
+			throw new CliError(`Could not read --jobs file: ${e?.message ?? e}`, "INVALID_PARAM");
+		}
+		const list = Array.isArray(parsed) ? parsed : Array.isArray((parsed as any)?.jobs) ? (parsed as any).jobs : null;
+		if (!list) throw new CliError("--jobs file must be a JSON array of {prompt, ...}.", "INVALID_PARAM");
+		jobs = list.map((o: unknown) =>
+			typeof o === "string" ? { ...shared, prompt: o } : jobFromObject(o as Record<string, unknown>, shared),
 		);
-	return { mode, prompt: positional[0], flags, bools };
+		if (positional.length)
+			throw new CliError("Use either --jobs or prompts on the command line, not both.", "INVALID_PARAM");
+	} else {
+		if (positional.length === 0) throw new CliError(`gen needs a quoted prompt.\n\n${GEN_USAGE}`, "INVALID_PARAM");
+		jobs = positional.map((p) => ({ ...shared, prompt: p }));
+	}
+	if (!jobs.length) throw new CliError("No jobs to run.", "INVALID_PARAM");
+	return { mode, jobs, flags, bools };
 }
 
 function requireActiveCanvas(session: CanvasBotSession, what: string): string {
 	if (!session.activeConvId)
 		throw new CliError(
-			`${what}: no active canvas. Run create-canvas, or list → switch <id>, or pass --canvas <id>.`,
+			`${what}: no active canvas. Run create-canvas, or list → switch <id>, or pass --canvas <id> / FLOWITH_CANVAS.`,
 			"NO_CANVAS",
 		);
 	assertUUID(session.activeConvId, "activeConvId");
 	return session.activeConvId;
+}
+
+/** Run `fn` over `items` with at most `limit` in flight; results keep input order. */
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T, i: number) => Promise<R>): Promise<R[]> {
+	const results: R[] = new Array(items.length);
+	let next = 0;
+	const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+		while (next < items.length) {
+			const i = next++;
+			results[i] = await fn(items[i], i);
+		}
+	});
+	await Promise.all(workers);
+	return results;
+}
+
+async function runGen(
+	api: ApiSession,
+	session: CanvasBotSession,
+	g: GenArgs,
+): Promise<void> {
+	const models = await fetchModels(workerUrl(api));
+	const aliases = loadAliasTable();
+
+	let convId = session.activeConvId;
+	if (!convId) {
+		const t = g.flags["--title"]?.[0] ?? new Date().toISOString().slice(0, 10);
+		const title = t.startsWith("[") ? t : `[Bot] ${t}`;
+		const created = await createCanvas(api, title);
+		convId = created.convId;
+		session.activeConvId = convId;
+		saveSession(session);
+		progress(`No active canvas — created "${title}" (${convId}).`);
+	}
+	assertUUID(convId, "convId");
+
+	const wait = !g.bools.has("--no-wait");
+	const waitSec = Number(
+		g.flags["--wait"]?.[0] ?? g.flags["--timeout"]?.[0] ?? (g.mode === "video" ? 600 : 300),
+	);
+	if (!Number.isFinite(waitSec) || waitSec <= 0)
+		throw new CliError("--wait/--timeout must be a positive number of seconds.", "INVALID_PARAM");
+	const outPath = g.flags["--out"]?.[0];
+	if (outPath && !wait) progress("--out is ignored with --no-wait (nothing to save yet).");
+
+	const batch = g.jobs.length > 1;
+	// Plan positions up front so concurrent jobs don't stack on the same spot.
+	const sharedFollow = g.jobs.every((j) => j.follow === g.jobs[0].follow) ? g.jobs[0].follow : undefined;
+	if (sharedFollow) assertUUID(sharedFollow, "follow nodeId");
+	const basePos = batch ? await questionPositionFor(api, convId, sharedFollow) : undefined;
+
+	const runOne = async (job: GenJob, i: number): Promise<GenResult> => {
+		const resolved = resolveModel(models, g.mode, job.model, aliases);
+		if (resolved.note) progress(resolved.note);
+		if (job.follow) assertUUID(job.follow, "follow nodeId");
+		const tag = batch ? `[${i + 1}/${g.jobs.length}] ` : "";
+		const runOpts = {
+			wait,
+			timeoutMs: waitSec * 1000,
+			onProgress: (m: string) => progress(tag + m),
+			...(basePos
+				? { questionPos: sharedFollow ? { x: basePos.x + i * 450, y: basePos.y } : { x: basePos.x, y: basePos.y + i * BATCH_ROW_HEIGHT } }
+				: {}),
+		};
+		const refs = await resolveMedia(api, job.refs ?? [], { convId, quiet: QUIET });
+		let result: GenResult;
+		if (g.mode === "text") {
+			result = await genText(
+				api,
+				models,
+				{ prompt: job.prompt, model: resolved.id, system: job.system, convId, follow: job.follow },
+				runOpts,
+			);
+		} else if (g.mode === "image") {
+			result = await genImage(
+				api,
+				models,
+				{
+					prompt: job.prompt,
+					model: resolved.id,
+					ratio: job.ratio,
+					size: job.size,
+					quality: job.quality,
+					refs,
+					convId,
+					follow: job.follow,
+				},
+				runOpts,
+			);
+		} else {
+			const [start] = job.start ? await resolveMedia(api, [job.start], { convId, quiet: QUIET }) : [];
+			const [end] = job.end ? await resolveMedia(api, [job.end], { convId, quiet: QUIET }) : [];
+			result = await genVideo(
+				api,
+				models,
+				{
+					prompt: job.prompt,
+					model: resolved.id,
+					ratio: job.ratio,
+					duration: job.duration,
+					resolution: job.resolution,
+					audio: job.audio,
+					start,
+					end,
+					refs,
+					draft: job.draft,
+					convId,
+					follow: job.follow,
+				},
+				runOpts,
+			);
+		}
+		if (result.references)
+			progress(
+				`${tag}References: ${Object.entries(result.references)
+					.map(([t, u]) => `${t} → ${u}`)
+					.join(", ")}`,
+			);
+		if (outPath && result.status === "finished" && (result.url || result.text !== undefined)) {
+			const file = outputPathFor(outPath, { nodeId: result.nodeId, index: batch ? i : undefined, url: result.url, kind: g.mode, batch });
+			const saved = await saveResult(file, { url: result.url, text: result.text });
+			(result as GenResult & { file?: string }).file = saved.file;
+			progress(`${tag}Saved → ${saved.file} (${(saved.bytes / 1024).toFixed(0)}KB)`);
+		}
+		return VERBOSE ? result : compactResult(result);
+	};
+
+	const concurrency = g.mode === "video" ? 2 : 4;
+	const results = await mapLimit(g.jobs, concurrency, (job, i) =>
+		runOne(job, i).catch((e) => {
+			// In a batch one bad job must not sink the others; surface it in its slot.
+			if (!batch || !(e instanceof CliError)) throw e;
+			return {
+				status: "failed",
+				kind: g.mode,
+				model: job.model ?? "",
+				convId: convId!,
+				questionNodeId: "",
+				nodeId: "",
+				error: e.message,
+				errorCode: e.code,
+			} as GenResult;
+		}),
+	);
+
+	if (batch) {
+		resultOut(results);
+		if (results.every((r) => r.status === "failed" || r.status === "timeout")) process.exit(1);
+		return;
+	}
+	const r = results[0];
+	if (r.status === "finished" || r.status === "submitted") {
+		resultOut(r);
+		return;
+	}
+	out({
+		type: "error",
+		actionId: null,
+		code: r.errorCode ?? (r.status === "timeout" ? "TIMEOUT" : "GENERATION_FAILED"),
+		message: r.error ?? "Generation failed",
+		data: r,
+	});
+	process.exit(1);
 }
 
 /** Returns true when `cmd` was handled here. */
@@ -1537,30 +1822,47 @@ async function runDirectCommand(
 	const api: ApiSession = session;
 
 	switch (cmd) {
-		// ---- models: public catalogue, full fields ----
+		// ---- models: public catalogue ----
 		case "models":
 		case "list-models": {
-			const modeArg = args[1] && !args[1].startsWith("--") ? args[1] : undefined;
-			if (modeArg && !["text", "image", "video", "agent"].includes(modeArg))
-				throw new CliError(
-					`Unknown mode "${modeArg}". Use text|image|video|agent.`,
-					"INVALID_PARAM",
-				);
-			const models = await fetchModels(workerUrl(api), {
-				noCache: args.includes("--refresh"),
-			});
-			const data: Record<string, unknown> = {};
-			const modes: Mode[] = modeArg && modeArg !== "agent"
-				? [modeArg as Mode]
-				: ["text", "image", "video"];
-			if (!modeArg || modeArg !== "agent")
-				for (const m of modes)
-					data[m] = modelsForMode(models, m).map(([id, rm]) => summarizeModel(id, rm));
-			if (!modeArg || modeArg === "agent")
-				data.agent = {
-					outputTypes: ["auto", "text", "slides", "webpage", "game", "video", "images"],
-				};
-			resultOut(data);
+			const positional = args.slice(1).filter((a) => !a.startsWith("--"));
+			const modeArg = positional.find((a) => ["text", "image", "video", "agent"].includes(a));
+			const modelArg = positional.find((a) => !["text", "image", "video", "agent"].includes(a));
+			const models = await fetchModels(workerUrl(api), { noCache: args.includes("--refresh") });
+			if (args.includes("--aliases")) {
+				const table = loadAliasTable();
+				if (JSON_COMPACT) {
+					resultOut({ aliases: table, defaults: DEFAULT_ALIAS });
+				} else {
+					for (const m of ["text", "image", "video"] as Mode[])
+						console.log(`${m.padEnd(6)} best=${table[m].best}  fast=${table[m].fast}  (default: ${DEFAULT_ALIAS[m]})`);
+					console.log("Override in ~/.flowith/defaults.json, e.g. {\"video\":{\"best\":\"seedance-2.5\"}}");
+				}
+				return true;
+			}
+			if (modelArg) {
+				const m = models[modelArg];
+				if (!m) throw new CliError(`Unknown model "${modelArg}". Run: models <text|image|video>`, "INVALID_MODEL");
+				resultOut(summarizeModel(modelArg, m));
+				return true;
+			}
+			const modes: Mode[] = modeArg && modeArg !== "agent" ? [modeArg as Mode] : ["text", "image", "video"];
+			if (JSON_COMPACT) {
+				const data: Record<string, unknown> = {};
+				if (modeArg !== "agent")
+					for (const m of modes) data[m] = modelsForMode(models, m).map(([id, rm]) => summarizeModel(id, rm));
+				if (!modeArg || modeArg === "agent")
+					data.agent = { outputTypes: ["auto", "text", "slides", "webpage", "game", "video", "images"] };
+				resultOut(data);
+				return true;
+			}
+			const table = loadAliasTable();
+			for (const m of modes) {
+				console.log(`# ${m}  (best=${table[m].best}, fast=${table[m].fast})`);
+				for (const [id, rm] of modelsForMode(models, m)) console.log(compactModelLine(id, rm));
+				console.log("");
+			}
+			console.log("Details: models <id>   ·   full JSON: --json   ·   aliases: models --aliases");
 			return true;
 		}
 
@@ -1575,7 +1877,7 @@ async function runDirectCommand(
 				throw new CliError("Usage: upload <file> [--conv <convId>]", "INVALID_PARAM");
 			const { values: conv } = extractFlag(args.slice(2), "--conv");
 			if (conv[0]) assertUUID(conv[0], "convId");
-			resultOut(await uploadFile(api, file, { convId: conv[0] ?? session.activeConvId }));
+			resultOut(await uploadFile(api, file, { convId: conv[0] ?? session.activeConvId, quiet: QUIET }));
 			return true;
 		}
 
@@ -1690,105 +1992,12 @@ async function runDirectCommand(
 
 		// ---- generation ----
 		case "gen": {
-			const g = parseGenArgs(args.slice(1));
-			const model = g.flags["--model"]?.[0];
-			const models = await fetchModels(workerUrl(api));
-			if (!model) {
-				const ids = modelsForMode(models, g.mode).map(([id]) => id);
-				throw new CliError(
-					`gen ${g.mode} needs --model <id>. Available: ${ids.join(", ")}`,
-					"INVALID_PARAM",
-					{ available: ids },
-				);
-			}
-			let convId = session.activeConvId;
-			if (!convId) {
-				const t = g.flags["--title"]?.[0] ?? new Date().toISOString().slice(0, 10);
-				const title = t.startsWith("[") ? t : `[Bot] ${t}`;
-				const created = await createCanvas(api, title);
-				convId = created.convId;
-				session.activeConvId = convId;
-				saveSession(session);
-				console.error(`No active canvas — created "${title}" (${convId}).`);
-			}
-			assertUUID(convId, "convId");
-			const follow = g.flags["--follow"]?.[0];
-			if (follow) assertUUID(follow, "follow nodeId");
-			const wait = !g.bools.has("--no-wait");
-			const waitSec = Number(
-				g.flags["--wait"]?.[0] ?? g.flags["--timeout"]?.[0] ?? (g.mode === "video" ? 600 : 300),
-			);
-			if (!Number.isFinite(waitSec) || waitSec <= 0)
-				throw new CliError("--wait/--timeout must be a positive number of seconds.", "INVALID_PARAM");
-			const runOpts = {
-				wait,
-				timeoutMs: waitSec * 1000,
-				onProgress: (m: string) => console.error(m),
-			};
-			const refs = await resolveMedia(api, g.flags["--ref"] ?? [], { convId });
-
-			let result: GenResult;
-			if (g.mode === "image") {
-				result = await genImage(
-					api,
-					models,
-					{
-						prompt: g.prompt,
-						model,
-						ratio: g.flags["--ratio"]?.[0],
-						size: g.flags["--size"]?.[0],
-						quality: g.flags["--quality"]?.[0],
-						refs,
-						convId,
-						follow,
-					},
-					runOpts,
-				);
-			} else {
-				const [start] = g.flags["--start"]
-					? await resolveMedia(api, [g.flags["--start"][0]], { convId })
-					: [];
-				const [end] = g.flags["--end"]
-					? await resolveMedia(api, [g.flags["--end"][0]], { convId })
-					: [];
-				result = await genVideo(
-					api,
-					models,
-					{
-						prompt: g.prompt,
-						model,
-						ratio: g.flags["--ratio"]?.[0],
-						duration: g.flags["--duration"]?.[0],
-						resolution: g.flags["--resolution"]?.[0],
-						audio: g.bools.has("--no-audio") ? false : undefined,
-						start,
-						end,
-						refs,
-						draft: g.bools.has("--draft"),
-						convId,
-						follow,
-					},
-					runOpts,
-				);
-			}
-			if (result.references)
-				console.error(
-					`References: ${Object.entries(result.references)
-						.map(([t, u]) => `${t} → ${u}`)
-						.join(", ")}`,
-				);
-			if (result.status === "finished" || result.status === "submitted") {
-				resultOut(result);
+			if (!args[1] || args[1] === "--help" || args[1] === "-h") {
+				console.log(GEN_USAGE);
 				return true;
 			}
-			out({
-				type: "error",
-				actionId: null,
-				code: result.errorCode ?? (result.status === "timeout" ? "TIMEOUT" : "GENERATION_FAILED"),
-				message: result.error ?? "Generation failed",
-				data: result,
-			});
-			process.exit(1);
+			await runGen(api, session, parseGenArgs(args.slice(1)));
+			return true;
 		}
 
 		default:
@@ -2040,9 +2249,12 @@ async function main() {
 		process.exit(1);
 	}
 
-	// --canvas: explicitly target a canvas (skip auto-alignment)
-	if (explicitCanvasId) {
-		session.activeConvId = explicitCanvasId;
+	// --canvas (or FLOWITH_CANVAS): explicitly target a canvas (skip auto-alignment).
+	// Only create-canvas / switch persist a canvas; this stays in-memory.
+	const canvasOverride = explicitCanvasId || process.env.FLOWITH_CANVAS;
+	if (canvasOverride) {
+		assertUUID(canvasOverride, "canvas id");
+		session.activeConvId = canvasOverride;
 	}
 
 	// ---- current: ask browser what canvas user is viewing ----
@@ -2703,89 +2915,27 @@ function sendAndWait(
 
 function printUsage() {
 	console.log(`
-Canvas Bot CLI — Remote Flowith canvas control (zero dependencies)
+canvas-cowork — Flowith canvas from the CLI.   bun scripts/index.ts --bot <identity> <command>
 
-Usage:  bun .claude/skills/canvas/canvas-bot.ts --bot <identity> <command> [args]
+Generate (no browser needed):
+  gen text|image|video "prompt" [--model best|fast|<id>] [--follow id] [--no-wait] [--out f] [--json]
+                                  text: --system "..."   image: --ratio --size --ref...
+                                  video: --duration --resolution --no-audio --start/--end --ref... --draft
+                                  several prompts or --jobs file.json = batch (one JSON array back)
+  upload <file>                   image/video/audio/pdf → URL
+  models [text|image|video] [id]  catalogue (compact table; --json full; --aliases; --refresh)
+  credits                         remaining credits
 
-Global:
-  --bot <identity>                Set bot cursor identity (claude-code|codex|openclaw|cursor|opencode|flowithos)
+Canvases & nodes (no browser needed):
+  create-canvas "title" · switch <id> · list · search "q"
+  read-db [nodeId] [--full] [--failed] [--conv id] · clean-failed · delete <id>...
+  recall "q" [--type t] [--conv id] · recall-node <conv> <node>
 
-Commands:
-  status [--live]                 Check session (--live also probes the browser tab)
-  login | connect                 Establish/reuse a session, report browser state
-  whoami                          Print the logged-in userId (no side effects)
-  open [convId]                   Open Flowith in browser
-  ping                            Test browser connection
+Session: login · status [--live] · whoami · open [convId|url]
+Live cursor (needs a Flowith tab): set-mode · set-model · submit "..." [--wait] · submit-batch · comment · read · ping
 
-Direct (plain HTTP — works with no browser open; use these from agents):
-  gen image "prompt" --model <id> [--ratio r] [--size s] [--quality q] [--ref <img>]...
-                                  [--follow <nodeId>] [--no-wait] [--wait=<sec>] [--title "canvas"]
-  gen video "prompt" --model <id> [--ratio r] [--duration s] [--resolution 480p|720p|1080p]
-                                  [--no-audio] [--start <img>] [--end <img>] [--ref <img|mp4|wav>]...
-                                  [--draft] [--follow <nodeId>] [--no-wait] [--wait=<sec>]
-                                    Generates on the active canvas (--canvas <id> to pick one;
-                                    auto-creates one when none is active). Prints the result URL.
-                                    --ref on Seedance 2.x: images/video/audio, referenced in the
-                                    prompt as image1, video1, audio1 (appended if not mentioned).
-  upload <file> [--conv <id>]     Upload image/video/audio/pdf, print its URL
-  list-models [mode] [--refresh]  Models with ratios, sizes, durations, resolutions, limits, prices
-  credits                         Remaining credits
-  --json                          (global) compact single-line JSON output
-
-  create-canvas [title]           Create new canvas (auto-switches, adds [Bot] prefix)
-  switch <convId>                 Set active canvas
-  list                            List recent canvases
-  search "query"                  Search canvases by title (case-insensitive)
-
-  set-mode <mode>                 Set generation mode (text|image|video|agent|neo)
-  set-model <model-id>            Set model
-  submit "text" [--image <path-or-url>]... [--ratio <r>] [--size <s>] [--wait]
-                                    Submit text with optional image(s)
-                                    --image: local file (auto-uploaded) or URL
-                                    In image mode: used as style reference
-                                    In video mode: used as start/end frame
-                                    In text mode: multimodal attachment
-                                    --ratio: aspect ratio — VALUES ARE MODEL-SPECIFIC.
-                                             Run list-models first and copy a value from the target
-                                             model's supportedAspectRatios verbatim. Formats differ:
-                                               gpt-image-2 → pixel strings ("1024x1024", "3840x2160")
-                                               seedream-5 / gemini / kling → ratio strings ("16:9")
-                                             Passing the wrong format is now rejected up front.
-                                    --size: image resolution from the model's supportedImageSizes
-                                             (e.g. gemini-3-pro-image: "1k" / "2k" / "4k").
-                                    --duration: video duration in seconds (e.g. 5, 10)
-                                    --loop: loop video (start frame = end frame)
-                                    --no-audio: disable audio generation
-
-  read [nodeId | --all]           Read node(s) from browser memory
-  delete <nodeId>                 Delete node (via browser)
-  delete-many <id1> <id2> ...     Delete multiple nodes (via browser)
-
-  recall ["query"] [flags]         Search user's memory (fast DB match + AI fallback)
-                                    --type <text|image|video|webpage>  Filter by content type
-                                    --conv <convId>                    Scope to a conversation
-                                    --limit <n>                        Max results (default 10)
-                                    Empty query with --conv lists all entries on that canvas
-  recall-node <convId> <nodeId>   Get bookshelf metadata for a specific node
-
-  read-db [nodeId] [--failed] [--full] [--conv <convId>]
-                                         Read nodes from database (default: summary)
-                                         nodeId: drill into one node (full content)
-                                         --full: all nodes with full content
-                                         --failed: only failed nodes
-                                         --conv: read from a different canvas (no switch)
-  clean-failed                    Find & delete all failed nodes from database
-
-  batches [batchId]               Audit submit-batch runs (recovery after timeout/interrupt)
-                                         no arg: list recent batches
-                                         batchId: per-prompt status + questionNodeIds
-
-  dream-init "theme" [--mode m]   Initialize creative journal (default: image)
-
-First run: browser opens automatically, log in to Flowith, done.
-Journal stored in ~/.flowith/creative-journal.md — edit it directly.
-Session stored in ~/.flowith/bot-session.json (access token ~1h; refreshed
-automatically when the frontend handshake provided a refresh token).
+Global: --bot <id> (required)  --canvas <id> | FLOWITH_CANVAS  --json  --verbose  --quiet  --parallel --agent-id
+Full reference: references/cli.md · raw HTTP: references/api.md
 `);
 }
 

@@ -21,6 +21,26 @@ import {
 import { createServer } from "http";
 import { resolve, join, basename, extname } from "path";
 import { homedir } from "os";
+import { type ApiSession, CliError, workerJson, workerUrl } from "./lib/http";
+import {
+	REFRESH_AHEAD_MS,
+	getJwtUserId,
+	isJwtExpired,
+	jwtExpiresAtIso,
+	jwtExpiresInMs,
+	refreshAccessToken,
+} from "./lib/session";
+import { type Mode, fetchModels, modelsForMode, summarizeModel } from "./lib/models";
+import {
+	cleanFailed,
+	createCanvas,
+	deleteNodes,
+	getCanvas,
+	listCanvases,
+	readNodes,
+} from "./lib/canvas";
+import { resolveMedia, uploadFile } from "./lib/upload";
+import { type GenResult, genImage, genVideo } from "./lib/generate";
 
 // ============ Runtime check ============
 
@@ -37,6 +57,8 @@ interface CanvasBotSession {
 	supabaseUrl: string;
 	supabaseKey: string;
 	accessToken: string;
+	/** Only present when the frontend handshake passes it; lets the CLI refresh itself. */
+	refreshToken?: string;
 	workerURL?: string;
 	activeConvId?: string;
 	createdAt: string;
@@ -531,24 +553,7 @@ async function openInBrowser(url: string) {
 	}
 }
 
-// ============ JWT helpers ============
-
-function decodeJwt(jwt: string): any {
-	try {
-		return JSON.parse(
-			atob(jwt.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")),
-		);
-	} catch {
-		return null;
-	}
-}
-function getJwtUserId(jwt: string): string | null {
-	return decodeJwt(jwt)?.sub ?? null;
-}
-function isJwtExpired(jwt: string): boolean {
-	const p = decodeJwt(jwt);
-	return p?.exp ? p.exp * 1000 < Date.now() : false;
-}
+// JWT helpers live in ./lib/session
 
 // ============ Session I/O ============
 
@@ -585,11 +590,9 @@ function loadSession(): CanvasBotSession | null {
 		const s: CanvasBotSession = JSON.parse(readFileSync(SESSION_FILE, "utf-8"));
 		if (!s.sessionId || !s.sessionSecret || !s.supabaseUrl || !s.accessToken)
 			return null;
-		if (
-			new Date(s.expiresAt).getTime() < Date.now() ||
-			isJwtExpired(s.accessToken)
-		)
-			return null;
+		// An expired access token is still usable when we hold a refresh token:
+		// acquireSession() refreshes it before use.
+		if (isJwtExpired(s.accessToken) && !s.refreshToken) return null;
 		return s;
 	} catch {
 		return null;
@@ -620,6 +623,38 @@ async function validateToken(session: CanvasBotSession): Promise<boolean> {
 
 // ============ Browser handshake: local WebSocket server receives session from frontend ============
 
+/**
+ * Refresh the access token when it is about to expire and we hold a refresh
+ * token. Returns true when the session was refreshed. On a rejected refresh
+ * the refresh token is dropped so the caller falls back to the browser
+ * handshake (the browser tab shares the same Supabase refresh chain, so a
+ * rejection usually means it rotated the token first).
+ */
+async function ensureFreshToken(s: CanvasBotSession): Promise<boolean> {
+	if (!s.refreshToken) return false;
+	if (jwtExpiresInMs(s.accessToken) > REFRESH_AHEAD_MS) return false;
+	try {
+		const t = await refreshAccessToken({
+			supabaseUrl: s.supabaseUrl,
+			supabaseKey: s.supabaseKey,
+			refreshToken: s.refreshToken,
+		});
+		s.accessToken = t.accessToken;
+		s.refreshToken = t.refreshToken;
+		s.expiresAt = t.expiresAt;
+		saveSession(s);
+		console.error(`Access token refreshed (valid until ${t.expiresAt}).`);
+		return true;
+	} catch (e: any) {
+		console.error(
+			`Token refresh failed (${e?.message ?? e}). Falling back to the browser handshake.`,
+		);
+		delete s.refreshToken;
+		saveSession(s);
+		return false;
+	}
+}
+
 async function acquireSession(botClient = "other"): Promise<CanvasBotSession> {
 	const currentFlowithUrl = await getFlowithUrl();
 	const existing = loadSession();
@@ -633,6 +668,9 @@ async function acquireSession(botClient = "other"): Promise<CanvasBotSession> {
 				`Flowith URL changed (${existing.flowithUrl} → ${currentFlowithUrl}). Re-authenticating...`,
 			);
 		} else {
+			// Refresh first when we can, so a long-running agent never needs the
+			// browser just to stay logged in.
+			await ensureFreshToken(existing);
 			// Quick server-side token validation (catches revoked/expired tokens the JWT check misses)
 			const valid = await validateToken(existing);
 			if (valid) return existing;
@@ -725,6 +763,9 @@ async function acquireSession(botClient = "other"): Promise<CanvasBotSession> {
 					};
 					const session: CanvasBotSession = {
 						...sessionData,
+						// Trust the JWT's own expiry over the page's fixed "+55 min".
+						expiresAt:
+							jwtExpiresAtIso(sessionData.accessToken) ?? sessionData.expiresAt,
 						sessionSecret: crypto.randomUUID(),
 						lastBrowserOpenAt: new Date().toISOString(),
 						flowithUrl: currentFlowithUrl,
@@ -1219,104 +1260,30 @@ async function connectAndExecute(
 	throw lastError ?? new Error("Connection failed after retries");
 }
 
-// ============ Image upload ============
-
-const IMAGE_EXTS = new Set([
-	"jpg",
-	"jpeg",
-	"png",
-	"webp",
-	"gif",
-	"svg",
-	"bmp",
-	"avif",
-	"heic",
-]);
-const IMAGE_MIME: Record<string, string> = {
-	jpg: "image/jpeg",
-	jpeg: "image/jpeg",
-	png: "image/png",
-	webp: "image/webp",
-	gif: "image/gif",
-	svg: "image/svg+xml",
-	bmp: "image/bmp",
-	avif: "image/avif",
-	heic: "image/heic",
-};
-const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
-
-function isUrl(s: string): boolean {
-	return /^https?:\/\//i.test(s);
-}
+// ============ Uploads (see ./lib/upload) ============
 
 type SubmitFile = { url: string; name: string; type?: string };
 
-/** Upload a local file via the same /file/store endpoint the frontend uses. */
-async function uploadToWorker(
-	filePath: string,
-	session: CanvasBotSession,
-): Promise<SubmitFile> {
-	const workerURL = session.workerURL;
-	if (!workerURL)
-		throw new Error(
-			"Session missing workerURL — re-run to get a fresh session from the browser",
-		);
-
-	const absPath = resolve(filePath);
-	if (!existsSync(absPath)) throw new Error(`File not found: ${filePath}`);
-
-	const ext = extname(absPath).slice(1).toLowerCase();
-	if (!IMAGE_EXTS.has(ext))
-		throw new Error(
-			`Not an image file: ${filePath} (supported: ${Array.from(IMAGE_EXTS).join(", ")})`,
-		);
-
-	const fileData = readFileSync(absPath);
-	if (fileData.byteLength > MAX_UPLOAD_BYTES) {
-		throw new Error(
-			`File too large: ${(fileData.byteLength / 1024 / 1024).toFixed(1)}MB (max ${MAX_UPLOAD_BYTES / 1024 / 1024}MB)`,
-		);
-	}
-
-	const fileName = basename(absPath);
-	const contentType = IMAGE_MIME[ext] || "application/octet-stream";
-	console.error(
-		`Uploading ${fileName} (${(fileData.byteLength / 1024).toFixed(0)}KB)...`,
-	);
-
-	// Replicate what the frontend's storeFile() does: POST FormData to /file/store
-	const blob = new Blob([fileData], { type: contentType });
-	const formData = new FormData();
-	formData.append("file", blob, fileName);
-
-	const resp = await fetch(`${workerURL}/file/store`, {
-		method: "POST",
-		headers: { Authorization: session.accessToken },
-		body: formData,
-		signal: AbortSignal.timeout(30_000),
-	});
-	if (!resp.ok) {
-		const text = await resp.text().catch(() => "");
-		throw new Error(`Upload failed (${resp.status}): ${text}`);
-	}
-
-	const { url } = (await resp.json()) as { url: string };
-	console.error(`Uploaded → ${url}`);
-	return { url, name: fileName, type: contentType };
-}
-
+/**
+ * `submit --image`: local files are uploaded, URLs pass through. The browser
+ * submit path treats attachments as images (start/end frames in video mode),
+ * so only images are accepted here; use `gen video --ref` for audio/video.
+ */
 async function resolveImages(
 	paths: string[],
 	session: CanvasBotSession,
 ): Promise<SubmitFile[]> {
-	return Promise.all(
-		paths.map(async (p): Promise<SubmitFile> => {
-			if (isUrl(p)) {
-				return { url: p, name: p.split("/").pop()?.split("?")[0] || "image" };
-			}
-			return uploadToWorker(p, session);
-		}),
-	);
+	const media = await resolveMedia(session, paths, {
+		convId: session.activeConvId,
+	});
+	const bad = media.filter((m) => m.media !== "image");
+	if (bad.length)
+		throw new CliError(
+			`submit --image only accepts images (got ${bad.map((m) => m.name).join(", ")}). ` +
+				"For Seedance audio/video references use: gen video --ref <file>",
+			"INVALID_PARAM",
+		);
+	return media.map((m) => ({ url: m.url, name: m.name, type: m.type }));
 }
 
 function extractFlag(
@@ -1424,13 +1391,419 @@ function listBatches(limit = 20): BatchRecord[] {
 	}
 }
 
+// ============ Output ============
+
+let JSON_COMPACT = false;
+
+/** `--json` anywhere on the command line → compact single-line JSON on stdout. */
+function parseJsonFlag(rawArgs: string[]): string[] {
+	const idx = rawArgs.indexOf("--json");
+	if (idx === -1) return rawArgs;
+	JSON_COMPACT = true;
+	return rawArgs.filter((_, i) => i !== idx);
+}
+
+function out(obj: unknown) {
+	console.log(JSON_COMPACT ? JSON.stringify(obj) : JSON.stringify(obj, null, 2));
+}
+
+function resultOut(data: unknown) {
+	out({ type: "result", actionId: crypto.randomUUID(), data });
+}
+
+// ============ Direct (headless) commands ============
+//
+// Everything below talks straight to Supabase / the edge worker with the
+// session's access token. No browser tab is needed; when one *is* connected
+// we still nudge it (create-canvas / switch navigate it) so the user sees
+// the cursor land where the work happens.
+
+/** Best-effort: navigate a connected Flowith tab to a canvas. Never throws. */
+async function tryBrowserNavigate(
+	session: CanvasBotSession,
+	userId: string,
+	botClient: string,
+	convId: string,
+): Promise<boolean> {
+	const client = new RealtimeLite(
+		session.supabaseUrl,
+		session.supabaseKey,
+		session.accessToken,
+	);
+	try {
+		await client.connect();
+		const ch = `bot_ctrl:${userId}`;
+		await registerWithFrontend(client, session, userId, botClient);
+		if (!(await quickPing(client, ch, session))) return false;
+		const action: BotAction = {
+			actionId: crypto.randomUUID(),
+			sessionId: session.sessionId,
+			timestamp: new Date().toISOString(),
+			type: "switch_canvas",
+			convId,
+		};
+		await sendAndWait(client, ch, action, ACTION_TIMEOUT_MS);
+		return true;
+	} catch {
+		return false;
+	} finally {
+		client.close();
+	}
+}
+
+const GEN_VALUE_FLAGS = new Set([
+	"--model",
+	"--ratio",
+	"--size",
+	"--quality",
+	"--ref",
+	"--follow",
+	"--duration",
+	"--resolution",
+	"--start",
+	"--end",
+	"--wait",
+	"--timeout",
+	"--title",
+]);
+const GEN_BOOL_FLAGS = new Set(["--no-wait", "--no-audio", "--draft"]);
+
+interface GenArgs {
+	mode: Mode;
+	prompt: string;
+	flags: Record<string, string[]>;
+	bools: Set<string>;
+}
+
+function parseGenArgs(args: string[]): GenArgs {
+	const mode = args[0];
+	if (mode !== "image" && mode !== "video")
+		throw new CliError(
+			'Usage: gen image|video "<prompt>" --model <id> [flags]  (see --help)',
+			"INVALID_PARAM",
+		);
+	const flags: Record<string, string[]> = {};
+	const bools = new Set<string>();
+	const positional: string[] = [];
+	for (let i = 1; i < args.length; i++) {
+		const a = args[i];
+		const eq = a.startsWith("--") ? a.indexOf("=") : -1;
+		const name = eq === -1 ? a : a.slice(0, eq);
+		if (GEN_BOOL_FLAGS.has(name)) {
+			bools.add(name);
+		} else if (GEN_VALUE_FLAGS.has(name)) {
+			const value = eq === -1 ? args[++i] : a.slice(eq + 1);
+			if (value === undefined || (eq === -1 && value.startsWith("--")))
+				throw new CliError(`${name} needs a value.`, "INVALID_PARAM");
+			(flags[name] ??= []).push(value);
+		} else if (a.startsWith("--")) {
+			throw new CliError(
+				`Unknown flag ${name}. Flags: ${[...GEN_VALUE_FLAGS, ...GEN_BOOL_FLAGS].join(" ")}`,
+				"INVALID_PARAM",
+			);
+		} else {
+			positional.push(a);
+		}
+	}
+	if (positional.length !== 1)
+		throw new CliError(
+			positional.length === 0
+				? "gen needs exactly one quoted prompt."
+				: `gen takes one prompt; got ${positional.length} positional args (quote the prompt).`,
+			"INVALID_PARAM",
+		);
+	return { mode, prompt: positional[0], flags, bools };
+}
+
+function requireActiveCanvas(session: CanvasBotSession, what: string): string {
+	if (!session.activeConvId)
+		throw new CliError(
+			`${what}: no active canvas. Run create-canvas, or list → switch <id>, or pass --canvas <id>.`,
+			"NO_CANVAS",
+		);
+	assertUUID(session.activeConvId, "activeConvId");
+	return session.activeConvId;
+}
+
+/** Returns true when `cmd` was handled here. */
+async function runDirectCommand(
+	cmd: string,
+	args: string[],
+	session: CanvasBotSession,
+	userId: string,
+	botClient: string,
+	parallelMode: boolean,
+): Promise<boolean> {
+	const api: ApiSession = session;
+
+	switch (cmd) {
+		// ---- models: public catalogue, full fields ----
+		case "models":
+		case "list-models": {
+			const modeArg = args[1] && !args[1].startsWith("--") ? args[1] : undefined;
+			if (modeArg && !["text", "image", "video", "agent"].includes(modeArg))
+				throw new CliError(
+					`Unknown mode "${modeArg}". Use text|image|video|agent.`,
+					"INVALID_PARAM",
+				);
+			const models = await fetchModels(workerUrl(api), {
+				noCache: args.includes("--refresh"),
+			});
+			const data: Record<string, unknown> = {};
+			const modes: Mode[] = modeArg && modeArg !== "agent"
+				? [modeArg as Mode]
+				: ["text", "image", "video"];
+			if (!modeArg || modeArg !== "agent")
+				for (const m of modes)
+					data[m] = modelsForMode(models, m).map(([id, rm]) => summarizeModel(id, rm));
+			if (!modeArg || modeArg === "agent")
+				data.agent = {
+					outputTypes: ["auto", "text", "slides", "webpage", "game", "video", "images"],
+				};
+			resultOut(data);
+			return true;
+		}
+
+		case "credits": {
+			resultOut(await workerJson(api, "/user/credits"));
+			return true;
+		}
+
+		case "upload": {
+			const file = args[1];
+			if (!file || file.startsWith("--"))
+				throw new CliError("Usage: upload <file> [--conv <convId>]", "INVALID_PARAM");
+			const { values: conv } = extractFlag(args.slice(2), "--conv");
+			if (conv[0]) assertUUID(conv[0], "convId");
+			resultOut(await uploadFile(api, file, { convId: conv[0] ?? session.activeConvId }));
+			return true;
+		}
+
+		// ---- canvases ----
+		case "list":
+		case "canvases": {
+			resultOut(await listCanvases(api));
+			return true;
+		}
+		case "search": {
+			if (!args[1]) throw new CliError("search requires a query string.", "INVALID_PARAM");
+			resultOut(await listCanvases(api, args[1]));
+			return true;
+		}
+		case "create-canvas": {
+			const rawTitle = args[1] || "Untitled";
+			const title = rawTitle.startsWith("[") ? rawTitle : `[Bot] ${rawTitle}`;
+			const created = await createCanvas(api, title);
+			session.activeConvId = created.convId;
+			saveSession(session);
+			const navigated = parallelMode
+				? false
+				: await tryBrowserNavigate(session, userId, botClient, created.convId);
+			resultOut({ convId: created.convId, title, reused: created.reused, browser: navigated ? "navigated" : "not_connected" });
+			return true;
+		}
+		case "switch": {
+			if (!args[1]) throw new CliError("switch requires convId.", "INVALID_PARAM");
+			assertUUID(args[1], "convId");
+			const canvas = await getCanvas(api, args[1]);
+			session.activeConvId = canvas.id;
+			saveSession(session);
+			const navigated = parallelMode
+				? false
+				: await tryBrowserNavigate(session, userId, botClient, canvas.id);
+			resultOut({ convId: canvas.id, title: canvas.title, browser: navigated ? "navigated" : "not_connected" });
+			return true;
+		}
+
+		// ---- nodes ----
+		case "read-db": {
+			const { values: convValues, rest } = extractFlag(args.slice(1), "--conv");
+			if (convValues[0]) assertUUID(convValues[0], "convId");
+			const convId = convValues[0] || requireActiveCanvas(session, "read-db");
+			const flags = new Set(rest.filter((a) => a.startsWith("--")));
+			const nodeId = rest.find((a) => !a.startsWith("--"));
+			if (nodeId) assertUUID(nodeId, "nodeId");
+			resultOut(
+				await readNodes(api, convId, {
+					nodeId,
+					full: flags.has("--full"),
+					failed: flags.has("--failed"),
+				}),
+			);
+			return true;
+		}
+		case "clean-failed": {
+			resultOut(await cleanFailed(api, requireActiveCanvas(session, "clean-failed")));
+			return true;
+		}
+		case "delete":
+		case "delete-many": {
+			const ids = args.slice(1).filter((a) => !a.startsWith("--"));
+			if (!ids.length) throw new CliError(`${cmd} requires nodeId(s).`, "INVALID_PARAM");
+			for (const id of ids) assertUUID(id, "nodeId");
+			const convId = requireActiveCanvas(session, cmd);
+			await deleteNodes(api, convId, ids);
+			resultOut({ deleted: ids });
+			return true;
+		}
+
+		// ---- memory ----
+		case "recall": {
+			const hasQuery = args[1] !== undefined && !args[1].startsWith("--");
+			const query = hasQuery ? args[1] : "";
+			const flags = args.slice(hasQuery ? 2 : 1);
+			let limit = 10;
+			const filters: Record<string, unknown> = {};
+			for (let i = 0; i < flags.length; i++) {
+				if (flags[i] === "--limit" && flags[i + 1]) limit = parseInt(flags[++i], 10);
+				else if (flags[i] === "--type" && flags[i + 1]) filters.types = [flags[++i]];
+				else if (flags[i] === "--conv" && flags[i + 1]) {
+					assertUUID(flags[i + 1], "convId");
+					filters.convId = flags[++i];
+				}
+			}
+			resultOut(
+				await workerJson(api, "/bookshelf/search", {
+					json: { query, limit, ...(Object.keys(filters).length ? { filters } : {}) },
+				}),
+			);
+			return true;
+		}
+		case "recall-node": {
+			const [convId, nodeId] = [args[1], args[2]];
+			if (!convId || !nodeId)
+				throw new CliError("recall-node requires <convId> <nodeId>.", "INVALID_PARAM");
+			assertUUID(convId, "convId");
+			assertUUID(nodeId, "nodeId");
+			try {
+				resultOut(
+					await workerJson(api, "/bookshelf/get", {
+						json: { pattern: "conv/node", convId, nodeId },
+					}),
+				);
+			} catch (e) {
+				if (e instanceof CliError && e.status === 404) resultOut({ success: true, book: null });
+				else throw e;
+			}
+			return true;
+		}
+
+		// ---- generation ----
+		case "gen": {
+			const g = parseGenArgs(args.slice(1));
+			const model = g.flags["--model"]?.[0];
+			const models = await fetchModels(workerUrl(api));
+			if (!model) {
+				const ids = modelsForMode(models, g.mode).map(([id]) => id);
+				throw new CliError(
+					`gen ${g.mode} needs --model <id>. Available: ${ids.join(", ")}`,
+					"INVALID_PARAM",
+					{ available: ids },
+				);
+			}
+			let convId = session.activeConvId;
+			if (!convId) {
+				const t = g.flags["--title"]?.[0] ?? new Date().toISOString().slice(0, 10);
+				const title = t.startsWith("[") ? t : `[Bot] ${t}`;
+				const created = await createCanvas(api, title);
+				convId = created.convId;
+				session.activeConvId = convId;
+				saveSession(session);
+				console.error(`No active canvas — created "${title}" (${convId}).`);
+			}
+			assertUUID(convId, "convId");
+			const follow = g.flags["--follow"]?.[0];
+			if (follow) assertUUID(follow, "follow nodeId");
+			const wait = !g.bools.has("--no-wait");
+			const waitSec = Number(
+				g.flags["--wait"]?.[0] ?? g.flags["--timeout"]?.[0] ?? (g.mode === "video" ? 600 : 300),
+			);
+			if (!Number.isFinite(waitSec) || waitSec <= 0)
+				throw new CliError("--wait/--timeout must be a positive number of seconds.", "INVALID_PARAM");
+			const runOpts = {
+				wait,
+				timeoutMs: waitSec * 1000,
+				onProgress: (m: string) => console.error(m),
+			};
+			const refs = await resolveMedia(api, g.flags["--ref"] ?? [], { convId });
+
+			let result: GenResult;
+			if (g.mode === "image") {
+				result = await genImage(
+					api,
+					models,
+					{
+						prompt: g.prompt,
+						model,
+						ratio: g.flags["--ratio"]?.[0],
+						size: g.flags["--size"]?.[0],
+						quality: g.flags["--quality"]?.[0],
+						refs,
+						convId,
+						follow,
+					},
+					runOpts,
+				);
+			} else {
+				const [start] = g.flags["--start"]
+					? await resolveMedia(api, [g.flags["--start"][0]], { convId })
+					: [];
+				const [end] = g.flags["--end"]
+					? await resolveMedia(api, [g.flags["--end"][0]], { convId })
+					: [];
+				result = await genVideo(
+					api,
+					models,
+					{
+						prompt: g.prompt,
+						model,
+						ratio: g.flags["--ratio"]?.[0],
+						duration: g.flags["--duration"]?.[0],
+						resolution: g.flags["--resolution"]?.[0],
+						audio: g.bools.has("--no-audio") ? false : undefined,
+						start,
+						end,
+						refs,
+						draft: g.bools.has("--draft"),
+						convId,
+						follow,
+					},
+					runOpts,
+				);
+			}
+			if (result.references)
+				console.error(
+					`References: ${Object.entries(result.references)
+						.map(([t, u]) => `${t} → ${u}`)
+						.join(", ")}`,
+				);
+			if (result.status === "finished" || result.status === "submitted") {
+				resultOut(result);
+				return true;
+			}
+			out({
+				type: "error",
+				actionId: null,
+				code: result.errorCode ?? (result.status === "timeout" ? "TIMEOUT" : "GENERATION_FAILED"),
+				message: result.error ?? "Generation failed",
+				data: result,
+			});
+			process.exit(1);
+		}
+
+		default:
+			return false;
+	}
+}
+
 // ============ Main ============
 
 async function main() {
 	const { args: args0, botClient } = parseBotClient(process.argv.slice(2));
 	const { args: args1, canvasId: explicitCanvasId } = parseCanvasFlag(args0);
 	const { args: args2, parallel: parallelMode } = parseParallelFlag(args1);
-	const { args, agentId } = parseAgentIdFlag(args2);
+	const { args: args3, agentId } = parseAgentIdFlag(args2);
+	const args = parseJsonFlag(args3);
 
 	if (parallelMode && !explicitCanvasId) {
 		console.error("Error: --parallel requires --canvas <convId>.");
@@ -1457,6 +1830,9 @@ async function main() {
 			activeUser: getJwtUserId(s.accessToken) ?? null,
 			activeConvId: s.activeConvId ?? null,
 			expiresAt: s.expiresAt,
+			tokenExpiresAt: jwtExpiresAtIso(s.accessToken),
+			tokenExpired: isJwtExpired(s.accessToken),
+			canRefresh: Boolean(s.refreshToken),
 		};
 		if (args.includes("--live")) {
 			const connected = await liveBrowserPing(s);
@@ -1690,195 +2066,9 @@ async function main() {
 		return;
 	}
 
-	// ---- list ----
-	if (cmd === "list") {
-		const action: BotAction = {
-			actionId: crypto.randomUUID(),
-			sessionId: session.sessionId,
-			timestamp: new Date().toISOString(),
-			type: "list_canvases",
-		};
-		const result = await connectAndExecute(
-			session,
-			userId,
-			`bot_ctrl:${userId}`,
-			action,
-			ACTION_TIMEOUT_MS,
-			botClient,
-		);
-		console.log(JSON.stringify(result, null, 2));
+	// ---- Direct (headless) commands: plain HTTP, no browser needed ----
+	if (await runDirectCommand(cmd, args, session, userId, botClient, parallelMode))
 		return;
-	}
-
-	// ---- search ----
-	if (cmd === "search") {
-		if (!args[1]) {
-			console.error("Error: search requires a query string.");
-			process.exit(1);
-		}
-		const action: BotAction = {
-			actionId: crypto.randomUUID(),
-			sessionId: session.sessionId,
-			timestamp: new Date().toISOString(),
-			type: "search_canvases",
-			query: args[1],
-		};
-		const result = await connectAndExecute(
-			session,
-			userId,
-			`bot_ctrl:${userId}`,
-			action,
-			ACTION_TIMEOUT_MS,
-			botClient,
-		);
-		console.log(JSON.stringify(result, null, 2));
-		return;
-	}
-
-	// ---- recall (via browser control channel) ----
-	if (cmd === "recall") {
-		const hasQuery = args[1] !== undefined && !args[1].startsWith("--");
-		const query = hasQuery ? args[1] : "";
-		const flags = args.slice(hasQuery ? 2 : 1);
-		let limit = 10;
-		let filterType: string | undefined;
-		let filterConvId: string | undefined;
-		for (let i = 0; i < flags.length; i++) {
-			if (flags[i] === "--limit" && flags[i + 1]) {
-				limit = parseInt(flags[i + 1], 10);
-				i++;
-			} else if (flags[i] === "--type" && flags[i + 1]) {
-				filterType = flags[i + 1];
-				i++;
-			} else if (flags[i] === "--conv" && flags[i + 1]) {
-				filterConvId = flags[i + 1];
-				i++;
-			}
-		}
-		if (filterConvId) assertUUID(filterConvId, "convId");
-		const filters: Record<string, unknown> = {};
-		if (filterType) filters.types = [filterType];
-		if (filterConvId) filters.convId = filterConvId;
-		const action: BotAction = {
-			actionId: crypto.randomUUID(),
-			sessionId: session.sessionId,
-			timestamp: new Date().toISOString(),
-			type: "recall",
-			query,
-			limit,
-			filters: Object.keys(filters).length > 0 ? filters : undefined,
-		};
-		const result = await connectAndExecute(
-			session,
-			userId,
-			`bot_ctrl:${userId}`,
-			action,
-			ACTION_TIMEOUT_MS,
-			botClient,
-		);
-		console.log(JSON.stringify(result, null, 2));
-		return;
-	}
-
-	// ---- recall-node (via browser control channel) ----
-	if (cmd === "recall-node") {
-		const convId = args[1];
-		const nodeId = args[2];
-		if (!convId || !nodeId) {
-			console.error("Error: recall-node requires <convId> <nodeId>.");
-			process.exit(1);
-		}
-		assertUUID(convId, "convId");
-		assertUUID(nodeId, "nodeId");
-		const action: BotAction = {
-			actionId: crypto.randomUUID(),
-			sessionId: session.sessionId,
-			timestamp: new Date().toISOString(),
-			type: "recall_node",
-			convId,
-			nodeId,
-		};
-		const result = await connectAndExecute(
-			session,
-			userId,
-			`bot_ctrl:${userId}`,
-			action,
-			ACTION_TIMEOUT_MS,
-			botClient,
-		);
-		console.log(JSON.stringify(result, null, 2));
-		return;
-	}
-
-	// ---- read-db (via browser) ----
-	if (cmd === "read-db") {
-		// --conv <id> allows reading any canvas without switching away from the current one
-		const { values: convValues, rest: readDbRest } = extractFlag(
-			args.slice(1),
-			"--conv",
-		);
-		const explicitConvId = convValues[0];
-		if (explicitConvId) assertUUID(explicitConvId, "convId");
-		const convId = explicitConvId || session.activeConvId;
-		if (!convId) {
-			console.error(
-				"Error: No active canvas. Run: create-canvas or list → switch <id>",
-			);
-			process.exit(1);
-		}
-		assertUUID(convId, "convId");
-		const flags = new Set(readDbRest.filter((a) => a.startsWith("--")));
-		const positional = readDbRest.find((a) => !a.startsWith("--"));
-		if (positional) assertUUID(positional, "nodeId");
-		const action: BotAction = {
-			actionId: crypto.randomUUID(),
-			sessionId: session.sessionId,
-			timestamp: new Date().toISOString(),
-			type: "read_nodes",
-			convId,
-			nodeId: positional,
-			full: flags.has("--full"),
-			failed: flags.has("--failed"),
-		};
-		const result = await connectAndExecute(
-			session,
-			userId,
-			`bot_ctrl:${userId}`,
-			action,
-			ACTION_TIMEOUT_MS,
-			botClient,
-		);
-		console.log(JSON.stringify(result, null, 2));
-		return;
-	}
-
-	// ---- clean-failed (via browser control channel) ----
-	if (cmd === "clean-failed") {
-		if (!session.activeConvId) {
-			console.error(
-				"Error: No active canvas. Run: create-canvas or list → switch <id>",
-			);
-			process.exit(1);
-		}
-		assertUUID(session.activeConvId, "activeConvId");
-		const action: BotAction = {
-			actionId: crypto.randomUUID(),
-			sessionId: session.sessionId,
-			timestamp: new Date().toISOString(),
-			type: "clean_failed",
-			convId: session.activeConvId,
-		};
-		const result = await connectAndExecute(
-			session,
-			userId,
-			`bot_ctrl:${userId}`,
-			action,
-			ACTION_TIMEOUT_MS,
-			botClient,
-		);
-		console.log(JSON.stringify(result, null, 2));
-		return;
-	}
 
 	// ---- submit-batch: fire N submits over one connection ----
 	if (cmd === "submit-batch") {
@@ -2167,31 +2357,6 @@ async function main() {
 			action = { ...base, type: "ping" };
 			channelName = `bot_ctrl:${userId}`;
 			break;
-		case "create-canvas": {
-			const rawTitle = args[1] || "Untitled";
-			const title = rawTitle.startsWith("[") ? rawTitle : `[Bot] ${rawTitle}`;
-			action = { ...base, type: "create_canvas", title };
-			channelName = `bot_ctrl:${userId}`;
-			break;
-		}
-		case "switch": {
-			if (!args[1]) {
-				console.error("Error: switch requires convId.");
-				process.exit(1);
-			}
-			assertUUID(args[1], "convId");
-			session.activeConvId = args[1];
-			saveSession(session);
-			action = { ...base, type: "switch_canvas", convId: args[1] };
-			channelName = `bot_ctrl:${userId}`;
-			break;
-		}
-		case "list-models": {
-			action = { ...base, type: "list_models", chatMode: args[1] };
-			channelName = `bot_ctrl:${userId}`;
-			break;
-		}
-
 		// -- Canvas channel: atomic store operations --
 		case "set-mode": {
 			if (!args[1]) {
@@ -2347,27 +2512,6 @@ async function main() {
 			channelName = canvasCh();
 			break;
 		}
-		case "delete": {
-			if (!args[1]) {
-				console.error("Error: delete requires nodeId.");
-				process.exit(1);
-			}
-			requireCanvas();
-			action = { ...base, type: "delete_node", nodeId: args[1] };
-			channelName = canvasCh();
-			break;
-		}
-		case "delete-many": {
-			if (args.length < 2) {
-				console.error("Error: delete-many requires nodeIds.");
-				process.exit(1);
-			}
-			requireCanvas();
-			action = { ...base, type: "delete_nodes", nodeIds: args.slice(1) };
-			channelName = canvasCh();
-			break;
-		}
-
 		default:
 			console.error(`Unknown command: ${cmd}`);
 			printUsage();
@@ -2387,17 +2531,6 @@ async function main() {
 		botClient,
 		parallelMode ? { parallel: true } : undefined,
 	);
-
-	// Auto-set activeConvId after successful create_canvas (skip in parallel mode)
-	if (
-		!parallelMode &&
-		action.type === "create_canvas" &&
-		result.type === "result" &&
-		(result.data as any)?.convId
-	) {
-		session.activeConvId = (result.data as any).convId;
-		saveSession(session);
-	}
 
 	// Echo the model(s) that actually ran for a submit, so the user/agent can
 	// confirm it matches their intent (especially after --mode without --model).
@@ -2584,11 +2717,25 @@ Commands:
   open [convId]                   Open Flowith in browser
   ping                            Test browser connection
 
+Direct (plain HTTP — works with no browser open; use these from agents):
+  gen image "prompt" --model <id> [--ratio r] [--size s] [--quality q] [--ref <img>]...
+                                  [--follow <nodeId>] [--no-wait] [--wait=<sec>] [--title "canvas"]
+  gen video "prompt" --model <id> [--ratio r] [--duration s] [--resolution 480p|720p|1080p]
+                                  [--no-audio] [--start <img>] [--end <img>] [--ref <img|mp4|wav>]...
+                                  [--draft] [--follow <nodeId>] [--no-wait] [--wait=<sec>]
+                                    Generates on the active canvas (--canvas <id> to pick one;
+                                    auto-creates one when none is active). Prints the result URL.
+                                    --ref on Seedance 2.x: images/video/audio, referenced in the
+                                    prompt as image1, video1, audio1 (appended if not mentioned).
+  upload <file> [--conv <id>]     Upload image/video/audio/pdf, print its URL
+  list-models [mode] [--refresh]  Models with ratios, sizes, durations, resolutions, limits, prices
+  credits                         Remaining credits
+  --json                          (global) compact single-line JSON output
+
   create-canvas [title]           Create new canvas (auto-switches, adds [Bot] prefix)
   switch <convId>                 Set active canvas
   list                            List recent canvases
   search "query"                  Search canvases by title (case-insensitive)
-  list-models [mode]              List available models (text|image|video|agent)
 
   set-mode <mode>                 Set generation mode (text|image|video|agent|neo)
   set-model <model-id>            Set model
@@ -2637,20 +2784,27 @@ Commands:
 
 First run: browser opens automatically, log in to Flowith, done.
 Journal stored in ~/.flowith/creative-journal.md — edit it directly.
-Session stored in ~/.flowith/bot-session.json, expires in ~1 hour.
+Session stored in ~/.flowith/bot-session.json (access token ~1h; refreshed
+automatically when the frontend handshake provided a refresh token).
 `);
 }
 
 main().catch((e) => {
 	const message = e.message || String(e);
 	const code =
-		e instanceof BrowserConnectionError
+		e instanceof BrowserConnectionError || e instanceof CliError
 			? e.code
 			: message.includes("Timeout")
 				? "TIMEOUT"
 				: "UNKNOWN_ERROR";
 
 	// Structured JSON to stdout so the calling agent can parse it
-	console.log(JSON.stringify({ type: "error", actionId: null, code, message }));
+	out({
+		type: "error",
+		actionId: null,
+		code,
+		message,
+		...(e instanceof CliError && e.data !== undefined ? { data: e.data } : {}),
+	});
 	process.exit(1);
 });

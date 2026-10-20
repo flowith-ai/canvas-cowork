@@ -16,7 +16,7 @@ Errors are returned as structured JSON to stdout (even on exit code 1):
 | Error Code | Meaning | What to do |
 |------------|---------|------------|
 | `NO_CREDITS` | Account has no remaining credits | **Stop immediately. Do NOT retry or switch models.** Send the user the pricing link: https://flowith.io/pricing |
-| `NOT_LOGGED_IN` | Session expired or token revoked | Tell the user to log in at the browser that was opened, then retry |
+| `NOT_LOGGED_IN` | Session expired or token revoked | Tell the user to log in at the browser that was opened, then retry. If the message mentions Safari (macOS), the login page can't connect from Safari: have the user open the printed login URL in Chrome, Arc, Edge or Brave (or make one their default browser), then retry |
 | `BROWSER_NOT_CONNECTED` | Browser opened but didn't respond | Tell the user to ensure the Flowith tab is fully loaded |
 | `TIMEOUT` | Generic timeout | Check network/browser status |
 | `INVALID_SESSION` | Session file corrupted | Delete `~/.flowith/bot-session.json`, re-run |

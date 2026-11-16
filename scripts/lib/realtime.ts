@@ -109,7 +109,7 @@ export const b64url = (bytes: ArrayBuffer | Uint8Array) => Buffer.from(bytes ins
 const fromB64url = (text: string) => new Uint8Array(Buffer.from(text, "base64url"));
 
 export async function loginKeys() {
-	const pair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveKey"]);
+	const pair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
 	const publicKey = b64url(await crypto.subtle.exportKey("raw", pair.publicKey));
 	return { privateKey: pair.privateKey, publicKey };
 }
@@ -117,7 +117,15 @@ export async function loginKeys() {
 /** Opens the browser's sealed session; also returns the shared key, which signs the acknowledgement. */
 export async function openSealed(privateKey: CryptoKey, code: string, sealed: { epk: string; iv: string; ct: string }): Promise<{ message: unknown; key: CryptoKey }> {
 	const sender = await crypto.subtle.importKey("raw", fromB64url(sealed.epk), { name: "ECDH", namedCurve: "P-256" }, false, []);
-	const key = await crypto.subtle.deriveKey({ name: "ECDH", public: sender }, privateKey, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+	// HKDF-SHA-256 over the ECDH secret, bound to this login's code (the page's cli-handshake.ts relayKey).
+	const material = await crypto.subtle.importKey("raw", await crypto.subtle.deriveBits({ name: "ECDH", public: sender }, privateKey, 256), "HKDF", false, ["deriveKey"]);
+	const key = await crypto.subtle.deriveKey(
+		{ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: new TextEncoder().encode(`flowith-cli-login:${code}`) },
+		material,
+		{ name: "AES-GCM", length: 256 },
+		false,
+		["encrypt", "decrypt"],
+	);
 	const plain = await crypto.subtle.decrypt(
 		{ name: "AES-GCM", iv: fromB64url(sealed.iv), additionalData: new TextEncoder().encode(code) },
 		key,

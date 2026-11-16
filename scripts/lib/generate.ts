@@ -326,7 +326,10 @@ export function resultOf(card: Card): Result {
 		status = "failed";
 		code = "MODEL_LOCKED";
 		error = d.errorMessage || "This model needs a higher plan";
-	} else if (status === "failed") code = /content|policy|sensitive|moderation/i.test(error ?? "") ? "CONTENT_POLICY" : "GENERATION_FAILED";
+	} else if (status === "failed")
+		code = ["NO_CREDITS", "MODEL_LOCKED", "RATE_LIMITED", "FORBIDDEN"].includes(String(d.error_code))
+			? String(d.error_code)
+			: /content|policy|sensitive|moderation/i.test(error ?? "") ? "CONTENT_POLICY" : "GENERATION_FAILED";
 
 	if (status === "finished" && (card.kind === "image" || card.kind === "video" || card.kind === "audio") && !card.url) status = "running";
 	return {
@@ -378,9 +381,11 @@ export async function waitFor(
 }
 
 /** Marks a card failed when the request was refused before the worker took it. */
-export async function failCard(api: Api, card: Pick<Card, "id" | "createdAt">, data: Record<string, unknown>, error: string) {
+export async function failCard(api: Api, card: Pick<Card, "id" | "createdAt">, data: Record<string, unknown>, failure: unknown) {
 	const { patch } = await import("./write");
-	await patch(api, card, { data: { ...data, status: "failed", error } }).catch(() => {});
+	const error = failure instanceof Error ? failure.message : String(failure);
+	const code = failure instanceof CliError ? failure.code : undefined;
+	await patch(api, card, { data: { ...data, status: "failed", error, ...(code ? { error_code: code } : {}) } }).catch(() => {});
 }
 
 export type { Catalog };

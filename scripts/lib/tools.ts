@@ -7,6 +7,7 @@
 
 import type { Card } from "./desk";
 import { type Api, CliError, sleep, worker } from "./http";
+import { failCard } from "./generate";
 import { remoteImageSize } from "./media";
 import { type Placed, cardSize, placeCards } from "./write";
 import { placeSingle } from "./placement";
@@ -20,6 +21,17 @@ const finishedMedia = (card: Card, kind: "image" | "video") => {
 
 async function resultCard(api: Api, convId: string, cards: Card[], source: Card, kind: "image" | "video", ratio: string, data: Record<string, unknown>): Promise<Placed> {
 	return placeCards(api, convId, cards, [{ kind, size: cardSize(kind, ratio), data: { value: "", status: "running", ...data } }], { anchor: source });
+}
+
+/** Sends a tool's request for its placed card; a refusal marks the card failed instead of leaving it spinning. */
+async function submit(api: Api, placed: Placed, path: string, json: Record<string, unknown>) {
+	try {
+		await worker(api, path, { json, timeoutMs: 120_000 });
+	} catch (e) {
+		const row = placed.rows.find((r) => r.id === placed.ids[0]);
+		if (row) await failCard(api, { id: row.id, createdAt: row.created_at }, (row.data as Record<string, unknown>) ?? {}, e);
+		throw e;
+	}
 }
 
 // ---------- pictures ----------
@@ -45,10 +57,7 @@ export async function upscaleImage(api: Api, convId: string, cards: Card[], sour
 		baseImageUrl: url,
 		targetFeature: "image_upscale",
 	});
-	await worker(api, "/image_edit/submit", {
-		json: { operation: "upscale", convId, nodeId: placed.ids[0], imageUrl: url, source_width: size.width, source_height: size.height, upscale_tier: tier },
-		timeoutMs: 120_000,
-	});
+	await submit(api, placed, "/image_edit/submit", { operation: "upscale", convId, nodeId: placed.ids[0], imageUrl: url, source_width: size.width, source_height: size.height, upscale_tier: tier });
 	return placed;
 }
 
@@ -64,10 +73,7 @@ export async function cutout(api: Api, convId: string, cards: Card[], source: Ca
 			model: "video-background-removal",
 			baseVideoNodeId: source.id,
 		});
-		await worker(api, "/video_edit/remove-background/submit", {
-			json: { convId, nodeId: placed.ids[0], sourceNodeId: source.id, video_url: url },
-			timeoutMs: 120_000,
-		});
+		await submit(api, placed, "/video_edit/remove-background/submit", { convId, nodeId: placed.ids[0], sourceNodeId: source.id, video_url: url });
 		return placed;
 	}
 	const url = finishedMedia(source, "image");
@@ -81,10 +87,7 @@ export async function cutout(api: Api, convId: string, cards: Card[], source: Ca
 		baseImageUrl: url,
 		targetFeature: "image_background_removal",
 	});
-	await worker(api, "/image_edit/submit", {
-		json: { operation: "edit", convId, nodeId: placed.ids[0], imageUrl: url, prompt: CUTOUT_PROMPT, target_feature: "image_background_removal" },
-		timeoutMs: 120_000,
-	});
+	await submit(api, placed, "/image_edit/submit", { operation: "edit", convId, nodeId: placed.ids[0], imageUrl: url, prompt: CUTOUT_PROMPT, target_feature: "image_background_removal" });
 	return placed;
 }
 
@@ -140,8 +143,7 @@ export async function expand(api: Api, convId: string, cards: Card[], source: Ca
 		expandReferenceOffsetY: f.offsetY,
 		targetFeature: "image_expand",
 	});
-	await worker(api, "/image_edit/submit", {
-		json: {
+	await submit(api, placed, "/image_edit/submit", {
 			operation: "outpaint",
 			convId,
 			nodeId: placed.ids[0],
@@ -154,9 +156,7 @@ export async function expand(api: Api, convId: string, cards: Card[], source: Ca
 			reference_offset_x: f.offsetX,
 			reference_offset_y: f.offsetY,
 			target_feature: "image_expand",
-		},
-		timeoutMs: 120_000,
-	});
+		});
 	return placed;
 }
 
@@ -177,10 +177,7 @@ export async function upscaleVideo(api: Api, convId: string, cards: Card[], sour
 		model,
 		baseVideoNodeId: source.id,
 	});
-	await worker(api, "/video_edit/submit", {
-		json: { convId, nodeId: placed.ids[0], sourceNodeId: source.id, target_resolution: target, video_url: url, model },
-		timeoutMs: 120_000,
-	});
+	await submit(api, placed, "/video_edit/submit", { convId, nodeId: placed.ids[0], sourceNodeId: source.id, target_resolution: target, video_url: url, model });
 	return placed;
 }
 
@@ -210,11 +207,18 @@ export async function makeSound(
 	let submitted = false;
 	const deadline = Date.now() + opts.timeoutMs;
 	for (;;) {
-		const task = submitted
-			? await worker<{ status: string; response?: { status: number; body: any } }>(api, `/canvas-agent/tasks/${id}`)
-			: await worker<{ status: string; response?: { status: number; body: any } }>(api, "/canvas-agent/tasks", {
-					json: { id, kind: "tool", input: { convId, sourceId: source.id, action, position } },
-				});
+		let task: { status: string; response?: { status: number; body: any } };
+		try {
+			// Asking again with the same id never runs it twice: the server picks up the task it has.
+			task = submitted
+				? await worker(api, `/canvas-agent/tasks/${id}`)
+				: await worker(api, "/canvas-agent/tasks", { json: { id, kind: "tool", input: { convId, sourceId: source.id, action, position } } });
+		} catch (e) {
+			if (e instanceof CliError && ["NOT_LOGGED_IN", "NO_CREDITS", "FORBIDDEN", "BAD_REQUEST"].includes(e.code)) throw e;
+			if (Date.now() > deadline) throw e;
+			await sleep(3000);
+			continue;
+		}
 		submitted = true;
 		opts.onTick?.(task.status);
 		if (task.response) {

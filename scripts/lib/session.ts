@@ -9,7 +9,7 @@
  */
 
 import { execFileSync, spawn } from "child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import { type Api, CliError } from "./http";
@@ -50,9 +50,12 @@ export function loadSession(): Session | null {
 	}
 }
 
+/** Written whole or not at all (a temp file renamed over it), owner-only. */
 export function saveSession(s: Session) {
 	mkdirSync(home(), { recursive: true });
-	writeFileSync(sessionFile(), JSON.stringify(s, null, 2), { mode: 0o600 });
+	const tmp = `${sessionFile()}.${process.pid}.tmp`;
+	writeFileSync(tmp, JSON.stringify(s, null, 2), { mode: 0o600 });
+	renameSync(tmp, sessionFile());
 	try {
 		chmodSync(sessionFile(), 0o600);
 	} catch {}
@@ -72,42 +75,54 @@ export function jwtClaims(jwt: string): { sub?: string; exp?: number; email?: st
 	}
 }
 
-const REFRESH_AHEAD_MS = 5 * 60_000;
+/** Renew when this much of the token's life is left: a video wait outlives a few minutes. */
+const REFRESH_AHEAD_MS = 20 * 60_000;
 
-/** The session, refreshed when it is about to expire. Throws NOT_LOGGED_IN when there is none. */
-export async function activeSession(): Promise<Session> {
+/** The session, refreshed when it is about to expire (or `force`). Throws NOT_LOGGED_IN when there is none. */
+export async function activeSession(opts: { force?: boolean } = {}): Promise<Session> {
 	const s = loadSession();
 	if (!s) throw new CliError("Not logged in. Run `login` once (opens Flowith in your browser).", "NOT_LOGGED_IN");
 	// The session belongs to the site it was allowed on; only an explicit FLOWITH_URL elsewhere asks for a new login.
 	if (process.env.FLOWITH_URL && s.site !== siteUrl())
 		throw new CliError(`Logged in to ${s.site}, but FLOWITH_URL is ${siteUrl()}. Run \`login\` again.`, "NOT_LOGGED_IN");
 	const exp = (jwtClaims(s.accessToken).exp ?? 0) * 1000;
-	if (exp - Date.now() > REFRESH_AHEAD_MS) return s;
-	if (!s.refreshToken) throw new CliError("Session expired. Run `login` again.", "NOT_LOGGED_IN");
+	if (!opts.force && exp - Date.now() > REFRESH_AHEAD_MS) return s;
+	if (!s.refreshToken) {
+		if (exp > Date.now()) return s;
+		throw new CliError("Session expired. Run `login` again.", "NOT_LOGGED_IN");
+	}
 	const resp = await fetch(`${s.supabaseUrl}/auth/v1/token?grant_type=refresh_token`, {
 		method: "POST",
 		headers: { apikey: s.supabaseKey, "Content-Type": "application/json" },
 		body: JSON.stringify({ refresh_token: s.refreshToken }),
 		signal: AbortSignal.timeout(20_000),
-	});
-	const body = (await resp.json().catch(() => ({}))) as { access_token?: string; refresh_token?: string; error_description?: string };
-	if (!resp.ok || !body.access_token) {
-		delete s.refreshToken;
-		saveSession(s);
-		throw new CliError(
-			`Session expired and could not be renewed (${body.error_description ?? resp.status}). Run \`login\` again.`,
-			"NOT_LOGGED_IN",
-		);
+	}).catch(() => null);
+	const body = resp ? ((await resp.json().catch(() => ({}))) as { access_token?: string; refresh_token?: string; error_description?: string; error?: string }) : {};
+	if (!resp?.ok || !body.access_token) {
+		// Another command may have renewed it a moment ago: use what it saved.
+		const latest = loadSession();
+		if (latest && latest.accessToken !== s.accessToken && (jwtClaims(latest.accessToken).exp ?? 0) * 1000 > Date.now()) return latest;
+		// Only a refused refresh token is dropped; a network or server error leaves it for the next try.
+		if (resp && (resp.status === 400 || resp.status === 401) && /invalid|revoked|not found|already used/i.test(`${body.error} ${body.error_description}`)) {
+			delete s.refreshToken;
+			saveSession(s);
+			throw new CliError(`The login was revoked (${body.error_description ?? body.error}). Run \`login\` again.`, "NOT_LOGGED_IN");
+		}
+		if (exp > Date.now()) return s;
+		throw new CliError(`Couldn't renew the session (${body.error_description ?? resp?.status ?? "network error"}). Try again, or run \`login\`.`, "NOT_LOGGED_IN");
 	}
-	s.accessToken = body.access_token;
-	if (body.refresh_token) s.refreshToken = body.refresh_token;
-	s.savedAt = new Date().toISOString();
-	saveSession(s);
-	return s;
+	const latest = loadSession() ?? s;
+	const next: Session = { ...latest, accessToken: body.access_token, ...(body.refresh_token ? { refreshToken: body.refresh_token } : {}), savedAt: new Date().toISOString() };
+	saveSession(next);
+	return next;
 }
 
 export function apiOf(s: Session, agent: string): Api {
-	return { supabaseUrl: s.supabaseUrl, supabaseKey: s.supabaseKey, accessToken: s.accessToken, workerURL: s.workerURL, agent };
+	const api: Api = { supabaseUrl: s.supabaseUrl, supabaseKey: s.supabaseKey, accessToken: s.accessToken, workerURL: s.workerURL, agent };
+	api.renew = async () => {
+		api.accessToken = (await activeSession({ force: true })).accessToken;
+	};
+	return api;
 }
 
 export function userIdOf(s: Pick<Session, "accessToken">): string {

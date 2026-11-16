@@ -232,14 +232,15 @@ export async function fetchRowsById(api: Api, ids: string[]): Promise<FlowNodeRo
  * A card by full id, id prefix (≥ 4 hex) or exact title. Throws NOT_FOUND / AMBIGUOUS with the
  * candidates, so the agent can pick.
  */
-export function findCard(cards: Card[], ref: string): Card {
+export function findCard(cards: Card[], ref: string, opts: { strict?: boolean } = {}): Card {
 	const q = ref.trim().replace(/^#/, "");
 	const lower = q.toLowerCase();
 	const exact = cards.find((c) => c.id === lower);
 	if (exact) return exact;
 	let hits = /^[0-9a-f-]{4,}$/i.test(q) ? cards.filter((c) => c.id.startsWith(lower)) : [];
 	if (!hits.length) hits = cards.filter((c) => c.title?.toLowerCase() === lower);
-	if (!hits.length) hits = cards.filter((c) => c.title?.toLowerCase().includes(lower) && lower.length >= 2);
+	// Part of a title is enough to find a card, never to delete one.
+	if (!hits.length && !opts.strict) hits = cards.filter((c) => c.title?.toLowerCase().includes(lower) && lower.length >= 2);
 	if (hits.length === 1) return hits[0]!;
 	if (!hits.length) throw new CliError(`No card "${ref}" on this canvas. Run \`look\` for the refs.`, "NOT_FOUND");
 	throw new CliError(

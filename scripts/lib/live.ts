@@ -52,8 +52,15 @@ export async function runOnCanvas(
 				opts.timeoutMs,
 			);
 			const context = `${agent.sessionId}:${actionId}`;
-			rt.on(topic, "bot_response", async (r: { type: string; actionId: string; sealed?: { iv: string; ct: string } }) => {
+			rt.on(topic, "bot_response", async (r: { type: string; actionId: string; code?: string; sealed?: { iv: string; ct: string } }) => {
 				if (r.actionId !== actionId) return;
+				// The page's rate limit answers in the clear (it can't know the key yet).
+				if (r.type === "error" && r.code === "LOCKED" && !accepted) {
+					clearTimeout(notOpen);
+					clearTimeout(deadline);
+					reject(new CliError("The canvas is busy (too many requests). Wait a few seconds and run it again.", "RATE_LIMITED"));
+					return;
+				}
 				if (r.type === "ack") {
 					accepted = true;
 					clearTimeout(notOpen);

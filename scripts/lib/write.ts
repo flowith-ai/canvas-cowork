@@ -84,11 +84,18 @@ async function insert(api: Api, rows: Array<Record<string, unknown>>): Promise<F
  * `data` replaces the whole object: pass the merged data.
  */
 export async function patch(api: Api, card: Pick<Card, "id" | "createdAt">, fields: Record<string, unknown>) {
-	await rest(api, `flow_node?id=eq.${card.id}&created_at=eq.${encodeURIComponent(card.createdAt)}`, {
+	const rows = await rest<Array<{ id: string }>>(api, `flow_node?id=eq.${card.id}&created_at=eq.${encodeURIComponent(card.createdAt)}&select=id`, {
 		method: "PATCH",
 		json: fields,
-		prefer: "return=minimal",
+		prefer: "return=representation",
 	});
+	if (!rows?.length) throw new CliError(`Card ${card.id.slice(0, 8)} couldn't be changed (gone, or not yours to edit).`, "FORBIDDEN");
+}
+
+/** A card still generating gets its result written by the worker; changing its data now could undo that. */
+export function settled(card: Card, what: string) {
+	if (card.status === "running" || card.status === "init")
+		throw new CliError(`${card.ref} is still generating; ${what} it once it's done (\`wait ${card.ref}\`).`, "BUSY");
 }
 
 /** Places new cards on the canvas, as generating placeholders unless their data says otherwise. */
@@ -165,9 +172,11 @@ async function settle(api: Api, convId: string, row: FlowNodeRow, rect: CanvasRe
 		const others = obstaclesOf(now, [row.id]);
 		if (isClear(rect, others)) return;
 		const free = nearestFree({ width: rect.width, height: rect.height }, rect, others);
-		await patch(api, { id: row.id, createdAt: row.created_at }, { position: centreTop({ ...free, width: rect.width, height: rect.height }) });
+		const position = centreTop({ ...free, width: rect.width, height: rect.height });
+		await patch(api, { id: row.id, createdAt: row.created_at }, { position });
 		rect.x = free.x;
 		rect.y = free.y;
+		row.position = position;
 	} catch {
 		// Placement already holds; a later look shows any overlap.
 	}
@@ -252,6 +261,7 @@ export function arrangePoints(cards: Card[], layout: Layout, gap = 32, columns?:
 /** Groups loose cards into a new group frame laid out around the first of them. */
 export async function groupCards(api: Api, convId: string, all: Card[], members: Card[], name: string): Promise<string> {
 	for (const c of members) {
+		settled(c, "group");
 		if (c.kind === "group") throw new CliError(`${c.ref} is a group; groups can't be nested.`, "INVALID_PARAM");
 		if (c.groupId) throw new CliError(`${c.ref} is already in group ${c.groupId.slice(0, 8)}; ungroup it first.`, "INVALID_PARAM");
 	}
@@ -319,12 +329,14 @@ export async function deleteCards(api: Api, convId: string, ids: string[]) {
 
 /** Draws the line from `from` into `to` (a reference the receiving card uses), or removes it. */
 export async function link(api: Api, to: Card, from: Card, remove = false) {
+	settled(to, "link");
 	const list: Array<{ id: string; value?: string }> = Array.isArray(to.data.promptReferenceNodes) ? to.data.promptReferenceNodes : [];
 	const next = remove ? list.filter((p) => p.id !== from.id) : list.some((p) => p.id === from.id) ? list : [...list, { id: from.id, value: "" }];
 	await patch(api, to, { data: { ...to.data, promptReferenceNodes: next } });
 }
 
 export async function rename(api: Api, card: Card, title: string) {
+	settled(card, "rename");
 	const data = card.kind === "group" ? { ...card.data, name: title } : { ...card.data, customTitle: title, title };
 	await patch(api, card, { data });
 }

@@ -138,6 +138,8 @@ const num = (a: Args, name: string) => {
 
 let quiet = false;
 let jsonOut = false;
+/** --dry-run: nothing is created, uploaded, sent or charged. */
+let dryRun = false;
 /** When this command started: what the canvas was charged from here on is this command's. */
 const STARTED = Date.now();
 const log = (m: string) => {
@@ -147,7 +149,7 @@ const out = (data: unknown) => process.stdout.write(`${JSON.stringify(data, null
 
 /** Which agent writes: shown on the canvas's change feed and on the connect page. */
 function agentName(a: Args): string {
-	const named = flag(a, "as") ?? flag(a, "bot") ?? process.env.FLOWITH_AGENT;
+	const named = flag(a, "agent") ?? flag(a, "bot") ?? process.env.FLOWITH_AGENT;
 	if (named) return named;
 	const e = process.env;
 	if (e.CLAUDECODE || e.CLAUDE_CODE_ENTRYPOINT) return "claude-code";
@@ -187,6 +189,7 @@ async function canvasOf(ctx: Ctx, a: Args, opts: { create?: string } = {}): Prom
 			if (!(e instanceof CliError && e.code === "NOT_FOUND")) throw e;
 		}
 	}
+	if (opts.create !== undefined && dryRun) return { id: "(a new canvas)", title: opts.create, created: true };
 	if (opts.create !== undefined) {
 		const c = await createCanvas(ctx.api, ctx.userId, opts.create || "Untitled");
 		ctx.session.canvas = c.id;
@@ -202,21 +205,23 @@ async function catalogOf(ctx: Ctx, fresh = false): Promise<Catalog> {
 }
 
 /** --ref / --first values: a card ref on this canvas, a local file or a URL. */
-async function toRef(ctx: Ctx, convId: string, cards: Card[], input: string): Promise<Ref> {
+async function toRef(ctx: Ctx, convId: string, cards: Card[], input: string, dry = false): Promise<Ref> {
 	if (!isUrl(input) && !existsSync(resolve(input))) {
 		const card = findCard(cards, input);
 		if (!card.url) throw new CliError(`${card.ref} (${card.kind}) has no finished media to use yet.`, "INVALID_PARAM");
 		const media = card.kind === "image" || card.kind === "video" || card.kind === "audio" ? card.kind : mediaOf(card.url);
 		return { url: card.url, name: card.title ?? card.ref, media, card };
 	}
+	// A dry run uploads nothing: the file stands in for its URL.
+	if (dry && !isUrl(input)) return { url: `file://${resolve(input)}`, name: input.split("/").pop() ?? input, media: mediaOf(input) };
 	const up = await toUrl(ctx.api, input, convId);
 	if (!isUrl(input)) log(`Uploaded ${up.name}`);
 	return up;
 }
 
-async function toRefs(ctx: Ctx, convId: string, cards: Card[], inputs: string[]) {
+async function toRefs(ctx: Ctx, convId: string, cards: Card[], inputs: string[], dry = false) {
 	const refs: Ref[] = [];
-	for (const i of inputs) refs.push(await toRef(ctx, convId, cards, i));
+	for (const i of inputs) refs.push(await toRef(ctx, convId, cards, i, dry));
 	return refs;
 }
 
@@ -245,7 +250,12 @@ async function finish(ctx: Ctx, convId: string, results: Result[], extra: Record
 	// Refunds of a precharge land right after a card finishes.
 	const charged = since !== undefined && !running.length ? (await sleep(1500), await chargedSince(ctx, convId, since)) : undefined;
 	const next = [
-		...(failed.length ? [`Failed: ${failed.map((r) => `${r.ref} (${r.error ?? r.code})`).join("; ")}. Retry in place: \`retry ${failed.map((r) => r.ref).join(" ")}\`.`] : []),
+		...(failed.some((r) => r.code === "NO_CREDITS" || r.code === "MODEL_LOCKED")
+			? ["Stop: not enough credits, or the plan doesn't include this model. Tell the user (https://flowith.io/pricing); don't retry or switch models unasked."]
+			: []),
+		...(failed.some((r) => r.code !== "NO_CREDITS" && r.code !== "MODEL_LOCKED")
+			? [`Failed: ${failed.filter((r) => r.code !== "NO_CREDITS" && r.code !== "MODEL_LOCKED").map((r) => `${r.ref} (${r.error ?? r.code})`).join("; ")}. Transient failures: \`retry <ref>\`; refusals: change the prompt or model.`]
+			: []),
 		...(running.length ? [`Still generating: \`wait ${running.map((r) => r.ref).join(" ")}\` later.`] : []),
 	];
 	out({
@@ -498,7 +508,7 @@ async function cmdSave(a: Args) {
 async function prepare(a: Args, firstPrompt: string) {
 	const ctx = await context(a);
 	const canvas = await canvasOf(ctx, a, { create: titleFrom(firstPrompt, 24) });
-	const [cards, catalog] = await Promise.all([readCanvas(ctx.api, canvas.id), catalogOf(ctx)]);
+	const [cards, catalog] = await Promise.all([canvas.created && dryRun ? ([] as Card[]) : readCanvas(ctx.api, canvas.id), catalogOf(ctx)]);
 	return { ctx, canvas, cards, catalog };
 }
 
@@ -523,7 +533,7 @@ async function cmdImage(a: Args, base?: { source: Card }) {
 	const wanted = flags(a, "model");
 	const models = (wanted.length ? wanted : [undefined]).map((w) => resolveModel(catalog, "image", w));
 	const modelId = models.map((m) => m.id).join(", ");
-	const extraRefs = await toRefs(ctx, canvas.id, cards, flags(a, "ref"));
+	const extraRefs = await toRefs(ctx, canvas.id, cards, flags(a, "ref"), dryRun);
 	const sourceRef: Ref[] = base ? [{ url: base.source.url!, name: base.source.title ?? base.source.ref, media: "image", card: base.source }] : [];
 	const refs = [...sourceRef, ...extraRefs];
 	const n = Math.max(1, Math.min(8, num(a, "n") ?? 1));
@@ -576,7 +586,7 @@ async function cmdImage(a: Args, base?: { source: Card }) {
 				await send(ctx.api, "image", imageRequest(j, id, canvas.id).body);
 			} catch (e) {
 				const row = rows.get(id);
-				if (row) await failCard(ctx.api, { id, createdAt: row.created_at }, (row.data as Record<string, unknown>) ?? {}, (e as Error).message);
+				if (row) await failCard(ctx.api, { id, createdAt: row.created_at }, (row.data as Record<string, unknown>) ?? {}, e);
 				if (jobs.length === 1) throw e;
 			}
 		}),
@@ -592,7 +602,7 @@ async function cmdVideo(a: Args) {
 	if (!prompt && !operation && !flag(a, "first") && !flag(a, "from")) throw new CliError('video "prompt" [--first card|file] [--ref …]', "INVALID_PARAM");
 	if (operation === "edit" && !prompt) throw new CliError('video --edit-video <clip> "what to change"', "INVALID_PARAM");
 	const { ctx, canvas, cards, catalog } = await prepare(a, prompt || "Video");
-	const clip = operation ? await toRef(ctx, canvas.id, cards, extend ?? editVideo!) : undefined;
+	const clip = operation ? await toRef(ctx, canvas.id, cards, extend ?? editVideo!, dryRun) : undefined;
 	if (clip && clip.media !== "video") throw new CliError("--extend / --edit-video take a clip.", "INVALID_PARAM");
 	// Extending or editing a clip: Seedance (the canvas's choice) or Gemini Omni, keeping the clip's own model when it is one.
 	const own = clip?.card?.model && /^(seedance-2\.|gemini-omni)/.test(clip.card.model) ? clip.card.model : undefined;
@@ -620,9 +630,9 @@ async function cmdVideo(a: Args) {
 		} else throw new CliError("Extending or editing a clip works with Seedance 2.x or Gemini Omni models.", "INVALID_PARAM");
 	}
 	const firstIn = flag(a, "first") ?? flag(a, "from");
-	const first = firstIn ? await toRef(ctx, canvas.id, cards, firstIn) : undefined;
-	const last = flag(a, "last") ? await toRef(ctx, canvas.id, cards, flag(a, "last")!) : undefined;
-	const refs = [...opRefs, ...(await toRefs(ctx, canvas.id, cards, flags(a, "ref")))];
+	const first = firstIn ? await toRef(ctx, canvas.id, cards, firstIn, dryRun) : undefined;
+	const last = flag(a, "last") ? await toRef(ctx, canvas.id, cards, flag(a, "last")!, dryRun) : undefined;
+	const refs = [...opRefs, ...(await toRefs(ctx, canvas.id, cards, flags(a, "ref"), dryRun))];
 	const job: VideoJob = {
 		prompt,
 		modelId,
@@ -658,7 +668,7 @@ async function cmdVideo(a: Args) {
 		const { body } = videoRequest(job, id, canvas.id, row.p_id ?? canvas.id, row.position ?? { x: 0, y: 0 });
 		await send(ctx.api, "video", body);
 	} catch (e) {
-		await failCard(ctx.api, { id, createdAt: row.created_at }, (row.data as Record<string, unknown>) ?? {}, (e as Error).message);
+		await failCard(ctx.api, { id, createdAt: row.created_at }, (row.data as Record<string, unknown>) ?? {}, e);
 		throw e;
 	}
 	await waitAndReport(ctx, a, canvas.id, [id], 900, { model: modelId, estimatedCredits: credits });
@@ -670,7 +680,7 @@ async function cmdText(a: Args) {
 	const { ctx, canvas, cards, catalog } = await prepare(a, prompt);
 	const wanted = flags(a, "model");
 	const models = (wanted.length ? wanted : [undefined]).map((w) => resolveModel(catalog, "text", w));
-	const refs = await toRefs(ctx, canvas.id, cards, flags(a, "ref"));
+	const refs = await toRefs(ctx, canvas.id, cards, flags(a, "ref"), dryRun);
 	const title = flag(a, "title") ?? titleFrom(prompt);
 	const jobs: TextJob[] = models.map((m) => ({ prompt, modelId: m.id, system: flag(a, "system"), refs }));
 	if (has(a, "dry-run")) return out({ requests: jobs.map((j) => textRequest(j, "00000000-0000-0000-0000-000000000000", canvas.id)) });
@@ -701,7 +711,7 @@ async function cmdText(a: Args) {
 				await send(ctx.api, "text", textRequest(j, id, canvas.id));
 			} catch (e) {
 				const row = rows.get(id);
-				if (row) await failCard(ctx.api, { id, createdAt: row.created_at }, (row.data as Record<string, unknown>) ?? {}, (e as Error).message);
+				if (row) await failCard(ctx.api, { id, createdAt: row.created_at }, (row.data as Record<string, unknown>) ?? {}, e);
 				if (jobs.length === 1) throw e;
 			}
 		}),
@@ -714,7 +724,7 @@ async function cmdSound(a: Args, tool: "gen_speech" | "gen_music") {
 	if (!words) throw new CliError(tool === "gen_speech" ? 'speech "text to say" [--for card]' : 'music "style / mood" [--for card]', "INVALID_PARAM");
 	const ctx = await context(a);
 	const canvas = await canvasOf(ctx, a, { create: titleFrom(words, 24) });
-	const [cards, catalog] = await Promise.all([readCanvas(ctx.api, canvas.id), catalogOf(ctx)]);
+	const [cards, catalog] = await Promise.all([canvas.created && dryRun ? ([] as Card[]) : readCanvas(ctx.api, canvas.id), catalogOf(ctx)]);
 	const wanted = flag(a, "model") ?? (tool === "gen_speech" ? "elevenlabs-v3" : "suno-chirp-v6");
 	const { id: modelId, model } = resolveModel(catalog, "audio", wanted);
 	const spec = AUDIO_MODELS[modelId];
@@ -751,6 +761,32 @@ async function cmdVary(a: Args) {
 	const canvas = await canvasOf(ctx, a);
 	const cards = await readCanvas(ctx.api, canvas.id);
 	const src = findCard(cards, a.pos[0] ?? "");
+	const req = src.data.agentRequest as { kind?: "image" | "video" | "text"; body?: Record<string, unknown> } | undefined;
+	// A card this CLI made carries its exact request: the same request again, as new cards beside it.
+	if (req?.kind && req.body && !flag(a, "model")) {
+		const n = Math.max(1, Math.min(8, num(a, "n") ?? 1));
+		if (dryRun) return out({ vary: src.ref, copies: n, request: req.body });
+		const { error: _e, error_type: _t, error_code: _c, request_id: _r, group_id: _g, customTitle: _ct, ...data } = src.data;
+		const kind = req.kind === "video" ? "video" : req.kind === "text" ? "text" : "image";
+		const size = kind === "text" ? cardSize("text") : { width: src.rect.width, height: src.rect.height };
+		const items: NewCard[] = Array.from({ length: n }, () => ({ kind, size, data: { ...data, value: "", status: "running", ...(kind === "video" ? { videoId: null } : {}) } }));
+		const placed = await placeCards(ctx.api, canvas.id, cards, items, { anchor: src, group: n > 1 ? flag(a, "group") ?? `${src.title ?? "Variations"}` : undefined });
+		for (const row of placed.rows.filter((r) => placed.ids.includes(r.id))) {
+			const body = {
+				...req.body,
+				nodeId: row.id,
+				convId: canvas.id,
+				...(kind === "video" ? { parentNodeId: row.p_id ?? canvas.id, position: row.position ?? { x: 0, y: 0 } } : {}),
+			};
+			try {
+				await send(ctx.api, req.kind, body);
+			} catch (e) {
+				await failCard(ctx.api, { id: row.id, createdAt: row.created_at }, (row.data as Record<string, unknown>) ?? {}, e);
+				if (n === 1) throw e;
+			}
+		}
+		return waitAndReport(ctx, a, canvas.id, placed.ids, kind === "video" ? 900 : 300, placed.groupId ? { group: placed.groupId.slice(0, 8) } : {});
+	}
 	if (src.kind === "text" && src.prompt && src.model) {
 		const next = parseArgs(["text", src.prompt, "--model", flag(a, "model") ?? src.model, "--near", src.ref]);
 		for (const [k, v] of a.flags) if (k !== "model") next.flags.set(k, v);
@@ -758,7 +794,12 @@ async function cmdVary(a: Args) {
 	}
 	if (src.kind !== "image" && src.kind !== "video") throw new CliError("vary takes a picture, clip or text card.", "INVALID_PARAM");
 	if (!src.prompt || !src.model) throw new CliError(`${src.ref} has no prompt/model to run again.`, "INVALID_PARAM");
-	const refs = (src.data.promptReferenceNodes ?? []).map((p: { id: string }) => cards.find((c) => c.id === p.id)?.ref).filter(Boolean) as string[];
+	// Frames are not references: the first / last frame card goes back as a frame.
+	const frames = [src.data.baseImageNodeId, src.data.lastFrameNodeId].filter(Boolean);
+	const refs = (src.data.promptReferenceNodes ?? [])
+		.filter((p: { id: string }) => !frames.includes(p.id))
+		.map((p: { id: string }) => cards.find((c) => c.id === p.id)?.ref)
+		.filter(Boolean) as string[];
 	const next = parseArgs([src.kind, src.prompt, "--model", flag(a, "model") ?? src.model, "--near", src.ref, ...refs.flatMap((r) => ["--ref", r])]);
 	for (const [k, v] of a.flags) if (k !== "model") next.flags.set(k, v);
 	if (src.ratio && !flag(a, "ratio") && src.kind === "image") next.flags.set("ratio", [src.ratio]);
@@ -784,6 +825,15 @@ async function cmdTool(a: Args, tool: "upscale" | "cutout" | "expand") {
 	const canvas = await canvasOf(ctx, a);
 	const cards = await readCanvas(ctx.api, canvas.id);
 	const source = findCard(cards, a.pos[0] ?? "");
+	if (dryRun)
+		return out({
+			tool,
+			source: source.ref,
+			kind: source.kind,
+			...(tool === "expand" ? { ratio: flag(a, "ratio") ?? a.pos[1] } : {}),
+			...(tool === "upscale" ? { to: flag(a, "to") ?? "next size up", quality: flag(a, "quality") ?? "fast" } : {}),
+			note: "Nothing sent. The canvas prices card tools when they run; `spent` shows the charge afterwards.",
+		});
 	let placed;
 	if (tool === "upscale") placed = source.kind === "video" ? await upscaleVideo(ctx.api, canvas.id, cards, source, flag(a, "to"), flag(a, "quality")) : await upscaleImage(ctx.api, canvas.id, cards, source, flag(a, "to"));
 	else if (tool === "cutout") placed = await cutout(ctx.api, canvas.id, cards, source);
@@ -807,13 +857,20 @@ async function cmdRetry(a: Args) {
 	const ctx = await context(a);
 	const canvas = await canvasOf(ctx, a);
 	const cards = await readCanvas(ctx.api, canvas.id);
-	const chosen = a.pos.length ? a.pos.map((r) => findCard(cards, r)) : cards.filter((c) => c.status === "failed");
-	if (!chosen.length) return out({ canvas: canvas.id, note: "Nothing failed." });
+	const named = a.pos.map((r) => findCard(cards, r));
+	const candidates = named.length ? named : cards.filter((c) => c.status === "failed");
+	const requestOf = (c: Card) => c.data.agentRequest as { kind?: "image" | "video" | "text"; body?: Record<string, unknown> } | undefined;
+	// Checked before anything is sent: only cards carrying their own request run again.
+	const chosen = candidates.filter((c) => requestOf(c)?.kind && requestOf(c)?.body);
+	const skipped = candidates.filter((c) => !chosen.includes(c)).map((c) => c.ref);
+	if (named.length && skipped.length)
+		throw new CliError(`${skipped.join(", ")} weren't made by this CLI's generation, so their request isn't on the card. Use \`vary\` or make them again.`, "INVALID_PARAM");
+	if (!chosen.length) return out({ canvas: canvas.id, note: skipped.length ? `Nothing to retry here (${skipped.join(", ")} weren't made by this CLI).` : "Nothing failed." });
+	if (dryRun) return out({ retry: chosen.map((c) => ({ ref: c.ref, kind: requestOf(c)!.kind, model: requestOf(c)!.body!.model })), ...(skipped.length ? { skipped } : {}) });
 	const ids: string[] = [];
 	for (const card of chosen) {
-		const req = card.data.agentRequest as { kind?: "image" | "video" | "text"; body?: Record<string, unknown> } | undefined;
-		if (!req?.kind || !req.body)
-			throw new CliError(`${card.ref} wasn't made by this CLI's generation, so its request isn't on the card. Use \`vary ${card.ref}\` or make it again.`, "INVALID_PARAM");
+		const req = requestOf(card)!;
+		if (!req.kind || !req.body) continue;
 		const { error: _e, error_type: _t, error_code: _c, request_id: _r, ...data } = card.data;
 		await patch(ctx.api, card, { ...(card.type === "22" || card.type === "25" ? { type: card.kind === "video" ? "13" : "2" } : {}), data: { ...data, value: "", status: "running", ...(req.kind === "video" ? { videoId: null } : {}) } });
 		const body = {
@@ -825,7 +882,7 @@ async function cmdRetry(a: Args) {
 		try {
 			await send(ctx.api, req.kind, body);
 		} catch (e) {
-			await failCard(ctx.api, card, data, (e as Error).message);
+			await failCard(ctx.api, card, data, e);
 			throw e;
 		}
 		ids.push(card.id);
@@ -870,6 +927,7 @@ const noteData = (text: string, title?: string) => ({
 
 async function cmdAdd(a: Args) {
 	if (!a.pos.length) throw new CliError("add <file|url> […]", "INVALID_PARAM");
+	if (dryRun) return out({ add: a.pos, note: "Nothing uploaded or placed." });
 	const ctx = await context(a);
 	const canvas = await canvasOf(ctx, a, { create: "Imports" });
 	const cards = await readCanvas(ctx.api, canvas.id);
@@ -895,6 +953,7 @@ async function cmdAdd(a: Args) {
 async function cmdNote(a: Args) {
 	const text = a.pos.join(" ").trim() || (flag(a, "file") ? readFileSync(flag(a, "file")!, "utf8") : "");
 	if (!text) throw new CliError('note "text" (or --file notes.md)', "INVALID_PARAM");
+	if (dryRun) return out({ note: text.slice(0, 200), chars: text.length });
 	const ctx = await context(a);
 	const canvas = await canvasOf(ctx, a, { create: titleFrom(text, 24) });
 	const cards = await readCanvas(ctx.api, canvas.id);
@@ -1052,8 +1111,9 @@ async function cmdDelete(a: Args) {
 	const ctx = await context(a);
 	const canvas = await canvasOf(ctx, a);
 	const cards = await readCanvas(ctx.api, canvas.id);
-	const chosen = a.pos.map((r) => findCard(cards, r));
+	const chosen = a.pos.map((r) => findCard(cards, r, { strict: true }));
 	if (!chosen.length) throw new CliError("delete <card> […]", "INVALID_PARAM");
+	if (dryRun) return out({ wouldDelete: chosen.map((c) => ({ ref: c.ref, kind: c.kind, title: c.title, ...(c.kind === "group" ? { withCards: cards.filter((m) => m.groupId === c.id).length } : {}) })) });
 	// A group goes with its cards, as on the canvas.
 	const ids = [...new Set(chosen.flatMap((c) => (c.kind === "group" ? [c.id, ...cards.filter((m) => m.groupId === c.id).map((m) => m.id)] : [c.id])))];
 	await deleteCards(ctx.api, canvas.id, ids);
@@ -1243,7 +1303,7 @@ Cards       a card is named by its ref (first 8 hex of its id, shown by look), a
 References  in prompts, name references @image1 @image2 @video1 @audio1 in --ref order; the CLI rewrites
             them to each model's own naming (Seedance 图片1, Kling @image_1, image models 图1/image 1).
 Global      --canvas <ref>  --json  --quiet  --no-wait  --timeout <s>  --dry-run (show request + credits)
-            --as <claude-code|codex|…> (auto-detected)  ·  env FLOWITH_URL, FLOWITH_CANVAS, FLOWITH_HOME
+            --agent <claude-code|codex|…> (auto-detected)  ·  env FLOWITH_URL, FLOWITH_CANVAS, FLOWITH_HOME
 `;
 
 // ---------- main ----------
@@ -1314,6 +1374,7 @@ async function main() {
 	const a = parseArgs(process.argv.slice(2));
 	jsonOut = has(a, "json");
 	quiet = has(a, "quiet") || jsonOut;
+	dryRun = has(a, "dry-run");
 	if (a.cmd === "help") return void process.stdout.write(HELP);
 	if (has(a, "help")) {
 		// The help lines that name this command, with the shared notes.

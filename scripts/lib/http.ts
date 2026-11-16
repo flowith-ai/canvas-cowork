@@ -18,6 +18,8 @@ export interface Api {
 	workerURL: string;
 	/** Who writes: claude-code, codex, cursor… shown to the canvas's change feed. */
 	agent: string;
+	/** Renews the access token (a long wait can outlive it); updates this object. */
+	renew?: () => Promise<void>;
 }
 
 export class CliError extends Error {
@@ -85,15 +87,22 @@ export interface WorkerInit {
 
 export async function worker<T = unknown>(api: Api, path: string, init: WorkerInit = {}): Promise<T> {
 	const method = init.method ?? (init.json !== undefined || init.body ? "POST" : "GET");
-	const resp = await fetch(`${api.workerURL.replace(/\/$/, "")}${path}`, {
-		method,
-		headers: {
-			Authorization: api.accessToken,
-			...(init.json !== undefined ? { "Content-Type": "application/json" } : {}),
-		},
-		body: init.json !== undefined ? JSON.stringify(init.json) : init.body,
-		signal: AbortSignal.timeout(init.timeoutMs ?? 60_000),
-	});
+	const send = () =>
+		fetch(`${api.workerURL.replace(/\/$/, "")}${path}`, {
+			method,
+			headers: {
+				Authorization: api.accessToken,
+				...(init.json !== undefined ? { "Content-Type": "application/json" } : {}),
+			},
+			body: init.json !== undefined ? JSON.stringify(init.json) : init.body,
+			signal: AbortSignal.timeout(init.timeoutMs ?? 60_000),
+		});
+	let resp = await send();
+	// The token ran out during a long run: renew it once and ask again (FormData bodies can't be resent).
+	if (resp.status === 401 && api.renew && !(init.body instanceof FormData)) {
+		await api.renew();
+		resp = await send();
+	}
 	if (!resp.ok) throw await httpFailure(resp, `${method} ${path.split("?")[0]}`);
 	return (await parseBody(resp)) as T;
 }
@@ -108,18 +117,24 @@ export interface RestInit {
 /** PostgREST: `query` is what follows /rest/v1/, e.g. `flow_node?id=eq.<uuid>&select=id,data`. */
 export async function rest<T = unknown>(api: Api, query: string, init: RestInit = {}): Promise<T> {
 	const method = init.method ?? (init.json !== undefined ? "POST" : "GET");
-	const resp = await fetch(`${api.supabaseUrl.replace(/\/$/, "")}/rest/v1/${query}`, {
-		method,
-		headers: {
-			apikey: api.supabaseKey,
-			Authorization: `Bearer ${api.accessToken}`,
-			...(method !== "GET" ? { "x-canvas-agent": api.agent } : {}),
-			...(init.json !== undefined ? { "Content-Type": "application/json" } : {}),
-			...(init.prefer ? { Prefer: init.prefer } : {}),
-		},
-		body: init.json !== undefined ? JSON.stringify(init.json) : undefined,
-		signal: AbortSignal.timeout(init.timeoutMs ?? 30_000),
-	});
+	const send = () =>
+		fetch(`${api.supabaseUrl.replace(/\/$/, "")}/rest/v1/${query}`, {
+			method,
+			headers: {
+				apikey: api.supabaseKey,
+				Authorization: `Bearer ${api.accessToken}`,
+				...(method !== "GET" ? { "x-canvas-agent": api.agent } : {}),
+				...(init.json !== undefined ? { "Content-Type": "application/json" } : {}),
+				...(init.prefer ? { Prefer: init.prefer } : {}),
+			},
+			body: init.json !== undefined ? JSON.stringify(init.json) : undefined,
+			signal: AbortSignal.timeout(init.timeoutMs ?? 30_000),
+		});
+	let resp = await send();
+	if (resp.status === 401 && api.renew) {
+		await api.renew();
+		resp = await send();
+	}
 	if (!resp.ok) throw await httpFailure(resp, `${method} ${query.split("?")[0]}`);
 	return (await parseBody(resp)) as T;
 }

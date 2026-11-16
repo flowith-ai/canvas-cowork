@@ -17,7 +17,7 @@ Requires [Bun](https://bun.sh) ≥ 1.1. No other dependencies.
 ## First run
 
 ```bash
-bun scripts/index.ts login     # opens Flowith; sign in and click Allow — once
+bun scripts/index.ts login     # opens Flowith and prints a code: type it on the page, click Allow — once
 ```
 
 ## What it can do
@@ -47,8 +47,12 @@ cw models video · cw credits
 
 ## How it works
 
-- **Login**: the browser handshake hands the CLI your own session (with a refresh token), after you
-  allow it on Flowith's connect page. Stored in `~/.flowith/canvas-session.json` (mode 600).
+- **Login**: after you type the CLI's code on Flowith's connect page and allow it, the page seals your
+  session to the CLI's one-time key and hands it over Flowith's realtime service (no local ports, so it
+  works in every browser). Stored in `~/.flowith/canvas-session.json` (mode 600); it renews itself.
+- **Canvas tools that live in the page** (split, angles, relight, lip-sync, breakdown, characters, the
+  director stage, Organize…) are handed to your open canvas, sealed with a key that browser gave the
+  agent at login; disconnecting the agent in Flowith revokes it.
 - **Cards** are written to your canvas with your session, labelled with the agent's name; Flowith's
   canvas change feed shows them in any open tab and brings them into view.
 - **Placement** uses Flo's own rules: beside the card a result came from, else in free space; several

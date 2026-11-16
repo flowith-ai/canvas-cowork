@@ -915,11 +915,12 @@ async function cmdSpent(a: Args) {
 
 // ---------- commands: placing & organising ----------
 
-/** A finished text card holding given words (no model ran). */
+/** A finished text card holding given words, as the canvas marks text a person wrote (frontend user-text-node.ts): its footer names the author, not a model. */
 const noteData = (text: string, title?: string) => ({
 	value: text,
 	isImage: false,
-	mode: "General",
+	mode: "text",
+	tag: { text: "User Upload" },
 	status: "finished",
 	title: title ?? titleFrom(text),
 	...(title ? { customTitle: title } : {}),

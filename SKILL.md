@@ -21,10 +21,10 @@ Below, `cw` stands for that.
 
 ## First time
 
-`cw login` opens Flowith in the browser and prints a code (e.g. `K7Q-2MX`). Tell the user to type that
-code on the Flowith page and click **Allow**. The session renews itself afterwards (`cw whoami`). The
-link works in any browser, on any device the user is signed in on — but it is only for them: never
-send it to anyone else.
+`cw login` opens Flowith in the browser and prints a code (e.g. `K7Q-2MX`). The user signs in, types
+that code when the page asks for it, and clicks **Allow** (if the browser asks whether the page may
+connect to apps on this device, they allow that too). The session renews itself afterwards
+(`cw whoami`). The link is only for the user: never send it to anyone else.
 
 ## The loop
 

@@ -78,7 +78,8 @@ const REFRESH_AHEAD_MS = 5 * 60_000;
 export async function activeSession(): Promise<Session> {
 	const s = loadSession();
 	if (!s) throw new CliError("Not logged in. Run `login` once (opens Flowith in your browser).", "NOT_LOGGED_IN");
-	if (s.site !== siteUrl())
+	// The session belongs to the site it was allowed on; only an explicit FLOWITH_URL elsewhere asks for a new login.
+	if (process.env.FLOWITH_URL && s.site !== siteUrl())
 		throw new CliError(`Logged in to ${s.site}, but FLOWITH_URL is ${siteUrl()}. Run \`login\` again.`, "NOT_LOGGED_IN");
 	const exp = (jwtClaims(s.accessToken).exp ?? 0) * 1000;
 	if (exp - Date.now() > REFRESH_AHEAD_MS) return s;
@@ -298,6 +299,7 @@ export async function login(agent: string, log: (m: string) => void, opts: { ope
 			[
 				opened ? "Opened Flowith in your browser — sign in if asked, then click Allow." : "Open this link in a browser, sign in and click Allow:",
 				relayReady ? `When the page asks, type this code: ${verificationCode(code)}` : "",
+				"(If the browser asks whether the page may connect to apps on this device, allow it.)",
 				opened ? `If nothing opened, visit: ${url}` : url,
 			]
 				.filter(Boolean)

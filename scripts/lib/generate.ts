@@ -1,618 +1,381 @@
 /**
- * Headless image / video generation.
- *
- * What the web app does on submit, minus the UI:
- *   1. insert the question node (type "1") under the canvas root or a --follow node
- *   2. insert the response node with status "init" (image: type "2", video: type "13")
- *   3. POST /image_gen/async or /video/async — the backend generates and
- *      writes the result into that node row
- *   4. poll the row until status is finished / failed
- *
- * `buildImageRequest` / `buildVideoRequest` are pure so they can be unit-tested.
+ * Generation, the way a card's own composer does it (hypergpt-frontend image-node-prompt-composer,
+ * api.ts sendImageGenAsync / sendVideoGenAsync / sendCompletionAsync): place the generating card,
+ * send the request with the user's session (the canvas's credit check, price and charge), and let
+ * the worker fill the card. Waiting reads the cards until they settle.
  */
 
-import { type ApiSession, CliError, workerFetch } from "./http";
+import { type Catalog, type Model, imageSizing, videoParams } from "./catalog";
+import type { Card, FlowNodeRow } from "./desk";
+import { cardsFrom, fetchRowsById } from "./desk";
+import { type Api, CliError, sleep, worker } from "./http";
+import type { Uploaded } from "./media";
 import {
-	type ModelMap,
-	type RemoteModel,
-	isSeedanceMultiMedia,
-	requireModel,
-	resolveImageSizing,
-	resolveVideoParams,
-	seedanceLimits,
-} from "./models";
-import {
-	type FlowNodeRow,
-	type Position,
-	NODE_TYPE,
-	childPosition,
-	fetchNode,
-	fetchNodes,
-	nowTimestamp,
-	patchNodeData,
-	pollNode,
-	rootQuestionPosition,
-	upsertNodes,
-} from "./canvas";
-import type { UploadedMedia } from "./upload";
+	type MediaKind,
+	type MediaNamer,
+	geminiOmniReferenceName,
+	imageReferenceNameFor,
+	klingReferenceName,
+	minimaxH3ReferenceName,
+	nameMediaReferences,
+	seedanceReferenceName,
+} from "./reference-names";
 
-export type GenKind = "text" | "image" | "video";
+export const hasHan = (s: string) => /\p{Script=Han}/u.test(s);
 
-export interface GenResult {
-	status: "finished" | "failed" | "submitted" | "timeout";
-	kind: GenKind;
-	model: string;
-	convId: string;
-	questionNodeId: string;
-	nodeId: string;
-	/** image / video result */
-	url?: string;
-	/** text result */
-	text?: string;
-	reasoning?: string;
-	ratio?: string;
-	duration?: string;
-	resolution?: string;
-	elapsedMs?: number;
-	error?: string;
-	errorCode?: string;
-	/** the node's `data` as last seen (status, refund_amount, resolution, ...) */
-	data?: Record<string, unknown>;
-	/** Seedance reference tokens → URLs, so the caller can explain the mapping */
-	references?: Record<string, string>;
+/** A short card title from the prompt when none is given. */
+export function titleFrom(prompt: string, max = hasHan(prompt) ? 14 : 28): string {
+	const flat = prompt.replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/\s+/g, " ").trim();
+	const first = flat.split(/(?<=[。！？.!?])\s*/u)[0] ?? flat;
+	const s = first.length <= max ? first : first.slice(0, max).replace(/[，,、\s]+\S*$/u, "") || first.slice(0, max);
+	return s.replace(/[。.!！?？,，:：;；]+$/u, "") || "Untitled";
 }
 
-/** Trim a result to what an agent needs by default (`--verbose` keeps `data`). */
-export function compactResult(r: GenResult): GenResult {
-	const { data, ...rest } = r;
-	if (r.status !== "failed" || !data) return rest;
-	const keep: Record<string, unknown> = {};
-	for (const k of ["error", "error_type", "error_code", "refund_amount", "request_id"])
-		if (data[k] !== undefined && data[k] !== null) keep[k] = data[k];
-	return Object.keys(keep).length ? { ...rest, data: keep } : rest;
+/** A reference: a card on this canvas, or an uploaded / linked file. */
+export interface Ref extends Uploaded {
+	card?: Card;
 }
 
-interface FileListEntry {
-	id: string;
-	name: string;
-	url: string;
-	type?: string;
+// ---------- reference naming ----------
+
+/** How a video model's request names what it is sent (frontend video-model-capabilities mediaReferenceFormatFor). */
+export function videoNamer(id: string, m: Model): MediaNamer | undefined {
+	if (/seedance-2\.(0|5)/.test(id)) return seedanceReferenceName;
+	if (id === "muse-video") return seedanceReferenceName;
+	if (id.startsWith("kling-video/v4")) return klingReferenceName;
+	if (!m.referenceAssetLimits) return undefined;
+	if (id.startsWith("gemini-omni")) return geminiOmniReferenceName;
+	if (id.startsWith("minimax-h3")) return minimaxH3ReferenceName;
+	return undefined;
 }
 
-function fileEntry(m: UploadedMedia, type?: string): FileListEntry {
-	return { id: crypto.randomUUID(), name: m.name, url: m.url, type: type ?? m.type };
+/**
+ * Rewrites every spelling that can only mean a sent item (@image1, image1, @图片1, <Image_1>) to the
+ * model's own name, and names the items the words leave out at the end, so every sent item is named
+ * once. Refuses words that name an item not sent.
+ */
+export function nameReferences(
+	prompt: string,
+	namer: MediaNamer,
+	counts: Record<MediaKind, number>,
+	offset: Partial<Record<MediaKind, number>> = {},
+): string {
+	const shifted: MediaNamer = (kind, index) => namer(kind, index + (offset[kind] ?? 0));
+	const { text, references } = nameMediaReferences(prompt, shifted);
+	const unsent = references.filter((r) => r.index < 1 || r.index > counts[r.kind]);
+	if (unsent.length) {
+		const sent = (["image", "video", "audio"] as const).filter((k) => counts[k]).map((k) => `${counts[k]} ${k}`);
+		throw new CliError(
+			`The prompt names ${unsent.map((r) => `${r.kind}${r.index}`).join(", ")}, but only ${sent.join(", ") || "no references"} are sent. Number references per kind in --ref order (@image1, @video1, @audio1).`,
+			"INVALID_PARAM",
+		);
+	}
+	const named = new Set(references.map((r) => `${r.kind}${r.index}`));
+	const missing: string[] = [];
+	for (const kind of ["image", "video", "audio"] as const)
+		for (let i = 1; i <= counts[kind]; i++) if (!named.has(`${kind}${i}`)) missing.push(shifted(kind, i));
+	return [text.trim(), missing.join(" ")].filter(Boolean).join(" ");
 }
 
-function parseAspectRatio(r?: string): number | undefined {
-	const m = r?.match(/^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/);
-	return m ? Number(m[1]) / Number(m[2]) : undefined;
-}
+// ---------- requests ----------
 
-// ---------- image ----------
-
-export interface ImageOpts {
+export interface ImageJob {
 	prompt: string;
-	model: string;
+	modelId: string;
+	model: Model;
 	ratio?: string;
 	size?: string;
 	quality?: string;
-	refs?: UploadedMedia[];
-	convId: string;
-	/** parent node id (follow-up); defaults to the canvas root */
-	follow?: string;
+	transparent?: boolean;
+	refs: Ref[];
 }
 
-export interface BuiltRequest {
-	questionNode: Omit<FlowNodeRow, "created_at" | "is_delete">;
-	responseNode: Omit<FlowNodeRow, "created_at" | "is_delete">;
-	path: string;
-	body: Record<string, unknown>;
-}
-
-export function buildImageRequest(
-	opts: ImageOpts,
-	model: RemoteModel,
-	questionPos: Position,
-): BuiltRequest {
-	const refs = opts.refs ?? [];
-	const nonImage = refs.filter((r) => r.media !== "image");
-	if (nonImage.length)
-		throw new CliError(
-			`Image models only take image references (got ${nonImage.map((r) => r.name).join(", ")}).`,
-			"INVALID_PARAM",
-		);
-	if (model.maxReferenceImages !== undefined && refs.length > model.maxReferenceImages)
-		throw new CliError(
-			`${opts.model} accepts at most ${model.maxReferenceImages} reference image(s); got ${refs.length}.`,
-			"INVALID_PARAM",
-		);
-	const sizing = resolveImageSizing(opts.model, model, opts.ratio, opts.size, opts.quality);
-	const ts = nowTimestamp();
-	const questionId = crypto.randomUUID();
-	const nodeId = crypto.randomUUID();
-	const questionNode: BuiltRequest["questionNode"] = {
-		id: questionId,
-		conv_id: opts.convId,
-		p_id: opts.follow ?? opts.convId,
-		c_ids: [],
-		type: NODE_TYPE.question,
-		position: questionPos,
-		data: {
-			timestamp: ts,
-			value: opts.prompt,
-			...(refs.length ? { fileList: refs.map((r) => fileEntry(r)) } : {}),
-		},
+export function imageCardData(job: ImageJob, title: string, ratio: string) {
+	const refCards = job.refs.flatMap((r) => (r.card ? [r.card.id] : []));
+	return {
+		value: "",
+		title,
+		isImage: true,
+		mode: "image_generation",
+		status: "running",
+		model: job.modelId,
+		prompt: job.prompt,
+		aspect_ratio: ratio,
+		...(refCards.length ? { promptReferenceNodes: refCards.map((id) => ({ id, value: "" })) } : {}),
 	};
-	const responseNode: BuiltRequest["responseNode"] = {
-		id: nodeId,
-		conv_id: opts.convId,
-		p_id: questionId,
-		c_ids: [],
-		type: NODE_TYPE.response,
-		position: childPosition(questionNode),
-		data: {
-			title: "AI",
-			value: "",
-			mode: "image_generation",
-			timestamp: ts,
-			isImage: true,
-			status: "init",
-			model: opts.model,
-			ratio: sizing.aspect_ratio,
-			aspect_ratio: sizing.aspect_ratio,
-			resolution: sizing.image_size,
-			image_size: sizing.image_size,
+}
+
+/** The `/image_gen/async` body: pictures go in the message as Markdown images, named 图N / image N by place. */
+export function imageRequest(job: ImageJob, nodeId: string, convId: string) {
+	const images = job.refs.filter((r) => r.media === "image");
+	if (images.length !== job.refs.length) throw new CliError("Image models take only pictures as references.", "INVALID_PARAM");
+	if (job.model.maxReferenceImages !== undefined && images.length > job.model.maxReferenceImages)
+		throw new CliError(`${job.modelId} takes at most ${job.model.maxReferenceImages} reference pictures; ${images.length} given.`, "INVALID_PARAM");
+	if (images.length && job.model.supportsImageInput === false)
+		throw new CliError(`${job.modelId} does not take reference pictures.`, "INVALID_PARAM");
+	const sizing = imageSizing(job.modelId, job.model, job.ratio, job.size, job.quality);
+	const words = images.length
+		? nameReferences(job.prompt, imageReferenceNameFor(hasHan(job.prompt) ? "zh" : "en"), { image: images.length, video: 0, audio: 0 })
+		: job.prompt.trim();
+	const content = [words, images.map((r, i) => `![${hasHan(job.prompt) ? `图${i + 1}` : `image ${i + 1}`}](${r.url})`).join("\n")]
+		.filter(Boolean)
+		.join("\n\n");
+	if (job.transparent && !job.model.supportedImageBackgrounds?.includes("transparent"))
+		throw new CliError(`${job.modelId} can't make transparent backgrounds; use dola-seedream-5-5-261028.`, "INVALID_PARAM");
+	return {
+		ratio: sizing.ratio,
+		body: {
+			target_feature: "image_generation",
+			model: job.modelId,
+			nodeId,
+			convId,
+			messages: [{ role: "user", content }],
+			...(sizing.aspect_ratio ? { aspect_ratio: sizing.aspect_ratio } : {}),
+			...(sizing.image_size ? { image_size: sizing.image_size } : {}),
 			...(sizing.quality ? { quality: sizing.quality } : {}),
+			...(job.transparent ? { background: "transparent", output_format: "png" } : {}),
 		},
 	};
-	const body: Record<string, unknown> = {
-		target_feature: "image_generation",
-		model: opts.model,
-		nodeId,
-		convId: opts.convId,
-		messages: [{ role: "user", content: opts.prompt }],
-		...(sizing.aspect_ratio ? { aspect_ratio: sizing.aspect_ratio } : {}),
-		...(sizing.image_size ? { image_size: sizing.image_size } : {}),
-		...(sizing.quality ? { quality: sizing.quality } : {}),
-		...(refs.length ? { styleUrls: refs.map((r) => r.url) } : {}),
-	};
-	return { questionNode, responseNode, path: "/image_gen/async", body };
 }
 
-// ---------- video ----------
-
-export interface VideoOpts {
+export interface VideoJob {
 	prompt: string;
-	model: string;
+	modelId: string;
+	model: Model;
 	ratio?: string;
-	duration?: string | number;
+	duration?: string;
 	resolution?: string;
-	/** default: on when the model supports audio */
 	audio?: boolean;
-	start?: UploadedMedia;
-	end?: UploadedMedia;
-	/** Seedance 2.x reference media (images / video / audio) */
-	refs?: UploadedMedia[];
 	draft?: boolean;
-	convId: string;
-	follow?: string;
+	first?: Ref;
+	last?: Ref;
+	refs: Ref[];
+	/** Gemini Omni only: work on the one clip in refs instead of generating from references. */
+	operation?: "edit" | "extend";
 }
 
-/**
- * Seedance prompt convention: references are addressed as `image1`, `video2`,
- * `audio1` (1-based per type). If the prompt doesn't already mention a
- * reference, its token is appended — exactly what the app does for attached
- * files. Returns the possibly-extended prompt and the token→URL map.
- */
-export function applySeedanceReferences(
-	prompt: string,
-	refs: UploadedMedia[],
-): { prompt: string; urls: { image_urls: string[]; video_urls: string[]; audio_urls: string[] }; tokens: Record<string, string> } {
+export function videoRequest(job: VideoJob, nodeId: string, convId: string, parentNodeId: string, position: { x: number; y: number }) {
+	const { model: m, modelId: id } = job;
+	const params = videoParams(id, m, { ratio: job.ratio, duration: job.duration, resolution: job.resolution, draft: job.draft });
+	for (const f of [job.first, job.last]) if (f && f.media !== "image") throw new CliError("--first / --last take pictures.", "INVALID_PARAM");
+	if (job.last && !job.first) throw new CliError("--last needs --first.", "INVALID_PARAM");
+	if (job.last && !m.supportedKeyframe) throw new CliError(`${id} doesn't take a last frame.`, "INVALID_PARAM");
+	if (job.first && m.supportsImageInput === false) throw new CliError(`${id} is text-to-video only; drop --first.`, "INVALID_PARAM");
+	const kling = id.startsWith("kling-video/v4");
+	if (!kling && (job.first || job.last) && job.refs.length)
+		throw new CliError("Frames (--first/--last) and --ref can't be combined on this model; use one or the other.", "INVALID_PARAM");
+
+	const counts = { image: 0, video: 0, audio: 0 } as Record<MediaKind, number>;
 	const urls = { image_urls: [] as string[], video_urls: [] as string[], audio_urls: [] as string[] };
-	const tokens: Record<string, string> = {};
-	const unmentioned: string[] = [];
-	for (const r of refs) {
-		if (r.media === "file") throw new CliError(`Unsupported reference type: ${r.name}`, "INVALID_PARAM");
-		const list = urls[`${r.media}_urls`];
-		let idx = list.indexOf(r.url);
-		if (idx < 0) idx = list.push(r.url) - 1;
-		const token = `${r.media}${idx + 1}`;
-		tokens[token] = r.url;
-		if (!new RegExp(`\\b${token}\\b`).test(prompt) && !unmentioned.includes(token)) unmentioned.push(token);
+	for (const r of job.refs) {
+		if (r.media === "file") throw new CliError(`${r.name}: references are pictures, clips or sounds.`, "INVALID_PARAM");
+		counts[r.media]++;
+		urls[`${r.media}_urls`].push(r.url);
 	}
-	return { prompt: [prompt.trim(), ...unmentioned].join(" ").trim(), urls, tokens };
-}
-
-export function buildVideoRequest(
-	opts: VideoOpts,
-	model: RemoteModel,
-	questionPos: Position,
-): BuiltRequest & { references?: Record<string, string> } {
-	const params = resolveVideoParams(opts.model, model, {
-		ratio: opts.ratio,
-		duration: opts.duration,
-		resolution: opts.resolution,
-		draft: opts.draft,
-	});
-	const refs = opts.refs ?? [];
-	const frames = [opts.start, opts.end].filter(Boolean) as UploadedMedia[];
-	for (const f of frames)
-		if (f.media !== "image") throw new CliError(`--start/--end must be images (got ${f.name}).`, "INVALID_PARAM");
-	if (opts.end && !opts.start) throw new CliError("--end requires --start.", "INVALID_PARAM");
-	if (opts.end && !model.supportedKeyframe)
-		throw new CliError(`${opts.model} does not support start+end keyframes.`, "INVALID_PARAM");
-	if (frames.length && refs.length)
-		throw new CliError("Start/end frames can't be combined with --ref references (app rule).", "INVALID_PARAM");
-
-	const multimodal = isSeedanceMultiMedia(opts.model);
-	let prompt = opts.prompt;
-	let imageURL: string | undefined = opts.start?.url;
-	let mediaUrls: { image_urls: string[]; video_urls: string[]; audio_urls: string[] } | undefined;
-	let references: Record<string, string> | undefined;
-	if (refs.length) {
-		if (!multimodal) {
-			const nonImage = refs.filter((r) => r.media !== "image");
-			if (nonImage.length)
-				throw new CliError(
-					`${opts.model} only takes image references (video/audio refs need Seedance 2.x).`,
-					"INVALID_PARAM",
-				);
-			if (refs.length > 1)
-				throw new CliError(`${opts.model} takes a single reference image; pass it as --start.`, "INVALID_PARAM");
-			imageURL = refs[0].url;
+	let prompt = job.prompt.trim();
+	let imageURL: string | undefined = job.first?.url;
+	const namer = videoNamer(id, m);
+	if (job.refs.length) {
+		const limits = m.referenceAssetLimits;
+		if (!namer || !limits) {
+			// Image-to-video models without named references take one picture: it is the first frame.
+			if (job.refs.length > 1 || counts.image !== 1) throw new CliError(`${id} takes one reference picture (as its first frame); use --first.`, "INVALID_PARAM");
+			imageURL = urls.image_urls[0];
+			urls.image_urls = [];
 		} else {
-			const limits = seedanceLimits(model);
-			const count = { image: 0, video: 0, audio: 0 };
-			for (const r of refs) if (r.media !== "file") count[r.media]++;
-			if (refs.length > limits.total)
-				throw new CliError(`Too many references (${refs.length} > ${limits.total}).`, "INVALID_PARAM");
+			if (job.refs.length > limits.total) throw new CliError(`${id} takes at most ${limits.total} references.`, "INVALID_PARAM");
 			for (const k of ["image", "video", "audio"] as const)
-				if (count[k] > limits[k])
-					throw new CliError(`Too many ${k} references (${count[k]} > ${limits[k]}).`, "INVALID_PARAM");
-			const applied = applySeedanceReferences(prompt, refs);
-			prompt = applied.prompt;
-			mediaUrls = applied.urls;
-			references = applied.tokens;
+				if (counts[k] > limits[k]) throw new CliError(`${id} takes at most ${limits[k]} ${k} references; ${counts[k]} given.`, "INVALID_PARAM");
+			// Kling numbers its keyframes first, then the references of the same kind.
+			const offset = kling ? { image: Number(Boolean(job.first)) + Number(Boolean(job.last)) } : {};
+			prompt = nameReferences(prompt, namer, counts, offset);
 		}
 	}
-	const keyFrames = opts.start && opts.end ? [opts.start.url, opts.end.url] : undefined;
-	const audio = opts.audio ?? model.supportsAudio === true;
-
-	const ts = nowTimestamp();
-	const questionId = crypto.randomUUID();
-	const nodeId = crypto.randomUUID();
-	const fileList: FileListEntry[] = [
-		...(opts.start ? [fileEntry(opts.start, "video-start-frame")] : []),
-		...(opts.end ? [fileEntry(opts.end, "video-end-frame")] : []),
-		...refs.map((r) => fileEntry(r)),
-	];
-	const questionNode: BuiltRequest["questionNode"] = {
-		id: questionId,
-		conv_id: opts.convId,
-		p_id: opts.follow ?? opts.convId,
-		c_ids: [],
-		type: NODE_TYPE.question,
-		position: questionPos,
-		data: {
-			timestamp: ts,
-			value: opts.prompt,
-			...(fileList.length ? { fileList } : {}),
-		},
-	};
-	const position = childPosition(questionNode);
-	const responseNode: BuiltRequest["responseNode"] = {
-		id: nodeId,
-		conv_id: opts.convId,
-		p_id: questionId,
-		c_ids: [],
-		type: NODE_TYPE.video,
-		position,
-		data: {
-			title: "AI",
-			value: "",
-			timestamp: ts,
-			model: opts.model,
-			mode: "image_generation",
-			status: "init",
-			draft: Boolean(opts.draft),
-			duration: params.duration,
-			audio,
-			fileList: fileList.filter((f) => f.type === "video-start-frame" || f.type === "video-end-frame"),
-			ratio: params.aspect_ratio,
-			resolution: params.resolution,
-			aspect_ratio: params.aspect_ratio,
-			aspectRatio: parseAspectRatio(params.aspect_ratio),
-		},
-	};
-	const body: Record<string, unknown> = {
+	if (job.operation) {
+		if (!id.startsWith("gemini-omni")) throw new CliError("--extend / --edit-video work with Gemini Omni models.", "INVALID_PARAM");
+		if (urls.video_urls.length !== 1) throw new CliError("--extend / --edit-video take exactly one clip.", "INVALID_PARAM");
+	}
+	const keyFrames = job.first && job.last ? [job.first.url, job.last.url] : undefined;
+	// Kling 4 always makes its own sound and refuses an audio switch.
+	// Models without a sound switch get none sent (they keep their own default).
+	const audio = kling ? undefined : (job.audio ?? (m.supportsAudio ? true : undefined));
+	const body = {
 		target_feature: "video_generation",
 		nodeId,
-		convId: opts.convId,
-		parentNodeId: questionId,
+		convId,
+		parentNodeId,
 		position,
-		model: opts.model,
+		model: id,
 		prompt,
-		...(imageURL ? { imageURL } : {}),
-		...(keyFrames ? { keyFrames } : {}),
+		...(keyFrames ? { keyFrames } : imageURL ? { imageURL } : {}),
+		...(urls.image_urls.length ? { image_urls: urls.image_urls } : {}),
+		...(urls.video_urls.length ? { video_urls: urls.video_urls } : {}),
+		...(urls.audio_urls.length ? { audio_urls: urls.audio_urls } : {}),
 		...(params.aspect_ratio ? { aspect_ratio: params.aspect_ratio } : {}),
 		...(params.duration ? { duration: params.duration } : {}),
-		audio,
 		...(params.resolution ? { resolution: params.resolution } : {}),
-		...(mediaUrls ? mediaUrls : {}),
-		...(opts.draft ? { draft: true } : {}),
+		...(audio !== undefined ? { audio } : {}),
+		...(job.draft ? { draft: true } : {}),
+		...(job.operation ? { video_operation: job.operation } : {}),
 	};
-	return { questionNode, responseNode, path: "/video/async", body, references };
+	return { body, params, audio };
 }
 
-// ---------- text ----------
-
-export interface ChatMessage {
-	role: "system" | "user" | "assistant";
-	content: string;
-}
-
-export interface TextOpts {
-	prompt: string;
-	model: string;
-	system?: string;
-	convId: string;
-	follow?: string;
-}
-
-/**
- * Conversation history for a follow-up: walk `p_id` from the follow node up
- * to the canvas root, questions → user, responses → assistant (image nodes
- * become "[image: url]"), oldest first, capped at `maxTurns` messages. This
- * is the text-only core of the app's getHistoryMessageList.
- */
-export function buildHistoryMessages(
-	nodes: Array<Pick<FlowNodeRow, "id" | "p_id" | "type" | "data">>,
-	followId: string | undefined,
-	maxTurns = 20,
-): ChatMessage[] {
-	if (!followId) return [];
-	const byId = new Map(nodes.map((n) => [n.id, n]));
-	const out: ChatMessage[] = [];
-	const seen = new Set<string>();
-	let cur = byId.get(followId);
-	while (cur && !seen.has(cur.id) && out.length < maxTurns) {
-		seen.add(cur.id);
-		const d = cur.data ?? {};
-		if (cur.type === NODE_TYPE.question) {
-			const v = typeof d.value === "string" ? d.value : "";
-			if (v) out.push({ role: "user", content: v });
-		} else if (cur.type === NODE_TYPE.response || cur.type === NODE_TYPE.video) {
-			const v = typeof d.value === "string" ? d.value : "";
-			if (v) {
-				const isMedia = d.isImage === true || cur.type === NODE_TYPE.video || /^https?:\/\/\S+$/.test(v);
-				out.push({ role: "assistant", content: isMedia ? `[${cur.type === NODE_TYPE.video ? "video" : "image"}: ${v}]` : v });
-			}
-		}
-		cur = cur.p_id ? byId.get(cur.p_id) : undefined;
-	}
-	return out.reverse();
-}
-
-export function buildTextRequest(
-	opts: TextOpts,
-	questionPos: Position,
-	history: ChatMessage[],
-): BuiltRequest {
-	const ts = nowTimestamp();
-	const questionId = crypto.randomUUID();
-	const nodeId = crypto.randomUUID();
-	const questionNode: BuiltRequest["questionNode"] = {
-		id: questionId,
-		conv_id: opts.convId,
-		p_id: opts.follow ?? opts.convId,
-		c_ids: [],
-		type: NODE_TYPE.question,
-		position: questionPos,
-		data: { timestamp: ts, value: opts.prompt },
-	};
-	const responseNode: BuiltRequest["responseNode"] = {
-		id: nodeId,
-		conv_id: opts.convId,
-		p_id: questionId,
-		c_ids: [],
-		type: NODE_TYPE.response,
-		position: childPosition(questionNode),
-		data: {
-			title: "AI",
-			value: "",
-			mode: "General",
-			timestamp: ts,
-			isImage: false,
-			status: "init",
-			model: opts.model,
-		},
-	};
-	const messages: ChatMessage[] = [
-		...(opts.system ? [{ role: "system" as const, content: opts.system }] : []),
-		...history,
-		{ role: "user", content: opts.prompt },
-	];
-	const body: Record<string, unknown> = {
-		target_feature: "text_completion",
-		model: opts.model,
-		messages,
-		nodeId,
-		convId: opts.convId,
-	};
-	return { questionNode, responseNode, path: "/completion/async?mode=general", body };
-}
-
-// ---------- run ----------
-
-export interface RunOpts {
-	wait: boolean;
-	timeoutMs: number;
-	onProgress?: (msg: string) => void;
-	/** Pre-computed question position (batch runs plan these up front so nodes don't overlap). */
-	questionPos?: Position;
-}
-
-/** Vertical space one question+response pair takes; batch jobs are stacked by this. */
-export const BATCH_ROW_HEIGHT = 650;
-
-export async function questionPositionFor(s: ApiSession, convId: string, follow?: string): Promise<Position> {
-	if (follow) {
-		const parent = await fetchNode(s, follow);
-		if (!parent || parent.conv_id !== convId)
-			throw new CliError(`--follow node ${follow} not found on canvas ${convId}.`, "NOT_FOUND");
-		return childPosition(parent);
-	}
-	return rootQuestionPosition(await fetchNodes(s, convId));
-}
-
-function failureInfo(node: FlowNodeRow | null): { error: string; code: string } {
-	const d = node?.data ?? {};
-	if (node?.type === NODE_TYPE.noCredits)
-		return { error: d.errorMessage || d.creditFailureReason || "No credits", code: "NO_CREDITS" };
-	if (node?.type === NODE_TYPE.locked)
-		return { error: d.errorMessage || "Model locked for this account (upgrade required)", code: "MODEL_LOCKED" };
-	let msg: string = d.error || "";
-	if (!msg && typeof d.value === "string" && d.value) {
-		try {
-			const parsed = JSON.parse(d.value);
-			msg = parsed.error || parsed.value || parsed.error_type || d.value;
-		} catch {
-			msg = d.value;
-		}
-	}
-	return { error: msg || "Generation failed", code: "GENERATION_FAILED" };
-}
-
-async function run(
-	s: ApiSession,
-	kind: GenKind,
-	built: BuiltRequest & { references?: Record<string, string> },
-	runOpts: RunOpts,
-): Promise<GenResult> {
-	const started = Date.now();
-	const rd = built.responseNode.data ?? {};
-	const base: Omit<GenResult, "status"> = {
-		kind,
-		model: built.body.model as string,
-		convId: built.questionNode.conv_id,
-		questionNodeId: built.questionNode.id,
-		nodeId: built.responseNode.id,
-		...(rd.aspect_ratio ? { ratio: rd.aspect_ratio as string } : {}),
-		...(kind === "video" && rd.duration ? { duration: String(rd.duration) } : {}),
-		...(kind === "video" && rd.resolution ? { resolution: rd.resolution as string } : {}),
-		...(built.references ? { references: built.references } : {}),
-	};
-	await upsertNodes(s, [built.questionNode, built.responseNode]);
-	runOpts.onProgress?.(`Submitting ${kind} to ${base.model}...`);
-	try {
-		await workerFetch(s, built.path, { json: built.body, timeoutMs: 120_000 });
-	} catch (e) {
-		// The backend usually marks the node failed itself (with error_type /
-		// refund info); only fill it in when it didn't, so the canvas shows what
-		// happened without a duplicate row.
-		if (e instanceof CliError) {
-			const current = await fetchNode(s, base.nodeId).catch(() => null);
-			if (current && current.data?.status !== "failed") {
-				await patchNodeData(s, base.nodeId, {
-					...current.data,
-					status: "failed",
-					error: e.message,
-				}).catch(() => {});
-			}
-		}
-		throw e;
-	}
-	if (!runOpts.wait) return { ...base, status: "submitted", elapsedMs: Date.now() - started };
-
-	runOpts.onProgress?.(`Waiting for generation (timeout ${Math.round(runOpts.timeoutMs / 1000)}s)...`);
-	const res = await pollNode(s, base.nodeId, {
-		timeoutMs: runOpts.timeoutMs,
-		onTick: (n, i) => {
-			if (i === 1 || i % 5 === 0) runOpts.onProgress?.(`  poll #${i}: status: ${n?.data?.status ?? "pending"}`);
-		},
-	});
-	const data = res.node?.data ?? undefined;
-	const elapsedMs = Date.now() - started;
-	if (res.status === "finished") {
-		if (kind === "text") {
-			const text = typeof data?.value === "string" ? data.value : "";
-			const reasoning = typeof data?.reasoning === "string" && data.reasoning ? data.reasoning : undefined;
-			return { ...base, status: "finished", text, ...(reasoning ? { reasoning } : {}), elapsedMs, data };
-		}
-		const url = (data?.videoId as string) || (data?.value as string) || undefined;
-		return {
-			...base,
-			status: "finished",
-			url,
-			...(data?.resolution ? { resolution: data.resolution as string } : {}),
-			elapsedMs,
-			data,
-		};
-	}
-	if (res.status === "timeout") {
-		return {
-			...base,
-			status: "timeout",
-			error: `Timed out after ${Math.round(runOpts.timeoutMs / 1000)}s; check later with: read-db ${base.nodeId}`,
-			elapsedMs,
-			data,
-		};
-	}
-	const { error, code } = failureInfo(res.node);
-	return { ...base, status: "failed", error, errorCode: code, elapsedMs, data };
-}
-
-async function positionFor(s: ApiSession, convId: string, follow: string | undefined, runOpts: RunOpts) {
-	return runOpts.questionPos ?? (await questionPositionFor(s, convId, follow));
-}
-
-export async function genImage(
-	s: ApiSession,
-	models: ModelMap,
-	opts: ImageOpts,
-	runOpts: RunOpts,
-): Promise<GenResult> {
-	const model = requireModel(models, opts.model, "image");
-	const pos = await positionFor(s, opts.convId, opts.follow, runOpts);
-	return run(s, "image", buildImageRequest(opts, model, pos), runOpts);
-}
-
-/** Defaults an agent would otherwise have to look up: 16:9, 5 s, 720p when the model offers them. */
-export function applyVideoDefaults(opts: VideoOpts, model: RemoteModel): VideoOpts {
-	const has = (list: string[] | undefined, v: string) => list?.some((x) => x.toLowerCase() === v) ?? false;
+export function videoCardData(job: VideoJob, title: string, params: { aspect_ratio?: string; duration?: string; resolution?: string }, audio?: boolean) {
+	const refCards = [job.first, job.last, ...job.refs].flatMap((r) => (r?.card ? [r.card.id] : []));
+	const base = job.first?.card ?? (job.operation ? job.refs[0]?.card : undefined);
 	return {
-		...opts,
-		ratio: opts.ratio ?? (has(model.supportedAspectRatios, "16:9") ? "16:9" : undefined),
-		duration: opts.duration ?? (has(model.supportedDurations, "5") ? "5" : undefined),
-		resolution:
-			opts.resolution ?? (opts.draft ? undefined : has(model.supportedResolutions, "720p") ? "720p" : undefined),
+		value: "",
+		title,
+		isImage: false,
+		mode: "video_generation",
+		status: "running",
+		model: job.modelId,
+		prompt: job.prompt,
+		aspect_ratio: params.aspect_ratio && params.aspect_ratio !== "adaptive" && params.aspect_ratio !== "auto" ? params.aspect_ratio : "16:9",
+		...(params.duration ? { duration: params.duration } : {}),
+		...(params.resolution ? { resolution: params.resolution } : {}),
+		...(audio !== undefined ? { audio } : {}),
+		...(job.draft ? { draft: true } : {}),
+		...(base ? { [base.kind === "video" ? "baseVideoNodeId" : "baseImageNodeId"]: base.id } : {}),
+		...(refCards.length ? { promptReferenceNodes: [...new Set(refCards)].map((id) => ({ id, value: "" })) } : {}),
 	};
 }
 
-export async function genVideo(
-	s: ApiSession,
-	models: ModelMap,
-	opts: VideoOpts,
-	runOpts: RunOpts,
-): Promise<GenResult> {
-	const model = requireModel(models, opts.model, "video");
-	const pos = await positionFor(s, opts.convId, opts.follow, runOpts);
-	return run(s, "video", buildVideoRequest(applyVideoDefaults(opts, model), model, pos), runOpts);
+export interface TextJob {
+	prompt: string;
+	modelId: string;
+	system?: string;
+	refs: Ref[];
 }
 
-export async function genText(
-	s: ApiSession,
-	models: ModelMap,
-	opts: TextOpts,
-	runOpts: RunOpts,
-): Promise<GenResult> {
-	requireModel(models, opts.model, "text");
-	const nodes = opts.follow ? await fetchNodes(s, opts.convId) : [];
-	if (opts.follow && !nodes.some((n) => n.id === opts.follow))
-		throw new CliError(`--follow node ${opts.follow} not found on canvas ${opts.convId}.`, "NOT_FOUND");
-	const history = buildHistoryMessages(nodes, opts.follow);
-	const pos =
-		runOpts.questionPos ??
-		(opts.follow ? childPosition(nodes.find((n) => n.id === opts.follow)!) : rootQuestionPosition(nodes.length ? nodes : await fetchNodes(s, opts.convId)));
-	return run(s, "text", buildTextRequest(opts, pos, history), runOpts);
+/** A named card keeps its name (`customTitle`); otherwise the worker titles it from the answer. */
+export function textCardData(job: TextJob, title: string, named = false) {
+	const refCards = job.refs.flatMap((r) => (r.card ? [r.card.id] : []));
+	return {
+		value: "",
+		title,
+		...(named ? { customTitle: title } : {}),
+		isImage: false,
+		mode: "General",
+		status: "running",
+		model: job.modelId,
+		prompt: job.prompt,
+		slot: false,
+		...(refCards.length ? { promptReferenceNodes: refCards.map((id) => ({ id, value: "" })) } : {}),
+	};
 }
+
+/** The `/completion/async` body; text cards it reads go first, pictures as Markdown images. */
+export function textRequest(job: TextJob, nodeId: string, convId: string) {
+	const blocks = job.refs.map((r) => {
+		const c = r.card;
+		if (c && c.text) return `### ${c.title ?? c.ref}\n${c.text}`;
+		if (r.media === "image") return `![${c?.title ?? r.name}](${r.url})`;
+		return `${c?.title ?? r.name}: ${r.url}`;
+	});
+	const content = [...blocks, job.prompt].join("\n\n");
+	return {
+		target_feature: "text_completion",
+		model: job.modelId,
+		nodeId,
+		convId,
+		stream: true,
+		messages: [...(job.system ? [{ role: "system", content: job.system }] : []), { role: "user", content }],
+	};
+}
+
+// ---------- sending and waiting ----------
+
+const PATH = { image: "/image_gen/async", video: "/video/async", text: "/completion/async?mode=general" } as const;
+
+export async function send(api: Api, kind: keyof typeof PATH, body: Record<string, unknown>) {
+	await worker(api, PATH[kind], { json: body, timeoutMs: 180_000 });
+}
+
+export interface Result {
+	ref: string;
+	id: string;
+	kind: string;
+	status: "finished" | "failed" | "running" | "removed";
+	title?: string;
+	model?: string;
+	url?: string;
+	preview?: string;
+	text?: string;
+	error?: string;
+	code?: string;
+	ratio?: string;
+	groupId?: string;
+}
+
+export function resultOf(card: Card): Result {
+	const d = card.data;
+	let status: Result["status"] = card.status === "finished" ? "finished" : card.status === "failed" ? "failed" : "running";
+	let code: string | undefined;
+	let error = card.error;
+	if (card.type === "22") {
+		status = "failed";
+		code = "NO_CREDITS";
+		error = d.errorMessage || d.creditFailureReason || "Not enough credits";
+	} else if (card.type === "25") {
+		status = "failed";
+		code = "MODEL_LOCKED";
+		error = d.errorMessage || "This model needs a higher plan";
+	} else if (status === "failed" && !error && typeof d.value === "string" && d.value) error = d.value.slice(0, 300);
+	if (status === "finished" && (card.kind === "image" || card.kind === "video" || card.kind === "audio") && !card.url) status = "running";
+	return {
+		ref: card.ref,
+		id: card.id,
+		kind: card.kind,
+		status,
+		...(card.title ? { title: card.title } : {}),
+		...(card.model ? { model: card.model } : {}),
+		...(card.url ? { url: card.url } : {}),
+		...(card.preview ? { preview: card.preview } : {}),
+		...(card.text && status === "finished" ? { text: card.text } : {}),
+		...(error && status === "failed" ? { error } : {}),
+		...(code ? { code } : {}),
+		...(card.ratio ? { ratio: card.ratio } : {}),
+		...(card.groupId ? { groupId: card.groupId.slice(0, 8) } : {}),
+	};
+}
+
+/** Reads the cards until each is finished or failed (or the time is up). */
+export async function waitFor(
+	api: Api,
+	ids: string[],
+	opts: { timeoutMs: number; onTick?: (done: number, total: number) => void },
+): Promise<Result[]> {
+	const deadline = Date.now() + opts.timeoutMs;
+	let delay = 2500;
+	let latest = new Map<string, Result>();
+	for (;;) {
+		let rows: FlowNodeRow[] = [];
+		try {
+			rows = await fetchRowsById(api, ids);
+		} catch (e) {
+			if (e instanceof CliError && e.code === "NOT_LOGGED_IN") throw e;
+		}
+		if (rows.length) {
+			const cards = cardsFrom(rows);
+			latest = new Map(cards.map((c) => [c.id, resultOf(c)]));
+		}
+		const results = ids.map(
+			(id) => latest.get(id) ?? ({ ref: id.slice(0, 8), id, kind: "?", status: rows.length ? "removed" : "running" } as Result),
+		);
+		const settled = results.filter((r) => r.status !== "running").length;
+		opts.onTick?.(settled, ids.length);
+		if (settled === ids.length || Date.now() >= deadline) return results;
+		await sleep(delay);
+		delay = Math.min(delay + 500, 6000);
+	}
+}
+
+/** Marks a card failed when the request was refused before the worker took it. */
+export async function failCard(api: Api, card: Pick<Card, "id" | "createdAt">, data: Record<string, unknown>, error: string) {
+	const { patch } = await import("./write");
+	await patch(api, card, { data: { ...data, status: "failed", error } }).catch(() => {});
+}
+
+export type { Catalog };

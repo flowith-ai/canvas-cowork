@@ -1,6 +1,10 @@
 # Canvas Cowork
 
-Generate images and videos on [Flowith](https://flowith.io)'s spatial canvas from the CLI — **headless** (plain HTTP, for agents and pipelines) or **live** (a cursor on the canvas the user watches). Create canvases, read results, recall past work, manage nodes.
+Let Claude Code, Codex, Cursor or any agent with a shell **work directly on your
+[Flowith](https://flowith.io) 3.0 canvas** — generate and edit pictures, clips, text, voice and music,
+extend and vary them, upscale / cut out / expand, and organise the canvas — the way Flowith's own
+in-app agent, Flo, does. Every result is a card on your canvas, priced and billed exactly like the
+cards you make by hand, and an open canvas shows the agent's cards arrive live.
 
 ## Install
 
@@ -8,56 +12,55 @@ Generate images and videos on [Flowith](https://flowith.io)'s spatial canvas fro
 npx skills add flowith-ai/canvas-cowork
 ```
 
-## What It Does
+Requires [Bun](https://bun.sh) ≥ 1.1. No other dependencies.
 
-- **Generate** images and videos directly — every model parameter (ratio, size, quality, duration, resolution, audio, start/end frames, Seedance image/video/audio references), no browser needed
-- **Upload** images, video, audio, PDFs
-- **Read** results back — images as markdown, video as links, nodes from the database
-- **Recall** past work across all canvases with semantic search
-- **Live mode**: a cursor on the canvas, `submit` through the composer, batch submits, comments, Agent Neo
-
-## Quick Start
+## First run
 
 ```bash
-S=scripts/index.ts
-bun $S --bot claude-code login                      # once: opens Flowith, log in
-
-bun $S --bot claude-code gen video "a red roadster on a coastal road at sunset"
-# → {"type":"result","data":{"status":"finished","url":"https://vg.flowith.net/....mp4", "model":"seedance-2.0-fast", ...}}
-bun $S --bot claude-code gen video "..." --model best --resolution 1080p --duration 10   # seedance-2.5
-
-bun $S --bot claude-code gen image "a golden retriever in a wheat field" --ratio 16:9 --size 2K   # gpt-image-2.5-flare
-bun $S --bot claude-code gen text "Summarise the three films above" --follow <nodeId>          # Claude Opus 5.5, with the thread as history
-bun $S --bot claude-code gen image "apple" "pear" "lemon" --json --out ./fruit/              # batch → one array, files saved
-
-bun $S --bot claude-code models video               # compact table with ratios, durations, resolutions, credits
-bun $S --bot claude-code models --aliases           # what best / fast resolve to (override in ~/.flowith/defaults.json)
-
-# Seedance 2.x: reference audio / video / images
-bun $S --bot claude-code gen video "the orb pulses to audio1, palette of image1" \
-  --model seedance-2.5 --ref ./beat.wav --ref ./palette.png --duration 5
-
-# Live mode (a Flowith tab open): many at once, with a cursor the user sees
-bun $S --bot claude-code create-canvas "Dog Artwork"
-bun $S --bot claude-code submit-batch --mode image --models gemini-3.1-flash-image "husky" "corgi" "poodle"
-bun $S --bot claude-code read-db --full
+bun scripts/index.ts login     # opens Flowith; sign in and click Allow — once
 ```
 
-## Requirements
+## What it can do
 
-- A [Flowith](https://flowith.io) account (log in once through the browser handshake)
-- [Bun](https://bun.sh) — or call the HTTP API directly, see [references/api.md](./references/api.md)
+```bash
+cw() { bun scripts/index.ts "$@"; }
 
-## Documentation
+cw new "Orange Cat Café"                                  # a canvas (or: cw use <canvas>)
+cw image "an orange cat asleep on a café windowsill, morning light" --ratio 4:3 --title "Window cat"
+cw edit <ref> "give the cat a small red beret, keep everything else"   # a new card beside it
+cw image "latte with paw-print art" "chalkboard menu reading 「猫咪拿铁」" --group "Café set"
+cw image "café logo" --model dola-seedream-5-5-261028,gpt-image-2.6-flare   # compare models
+cw video "the cat lifts its head and blinks" --first <ref> --duration 5
+cw video "pull back to reveal the whole bar" --extend <clip>
+cw text "a 10-word slogan for this café" --model claude-opus-5-5,gemini-3.8-flash --ref <ref>
+cw speech "Welcome to the Orange Cat Café." --for <clip>
+cw upscale <ref> --to 4k · cw cutout <ref> · cw expand <ref> --ratio 9:16
+cw look                                                   # every card with its ref, model, status, place
+cw shots <ref…>                                           # previews to look at
+cw group <refs…> --name "Finals" · cw arrange <group> · cw move <ref> --right-of <ref>
+cw models video · cw credits
+```
 
-- [SKILL.md](./SKILL.md) — full command reference and how an agent should work on the canvas
-- [references/api.md](./references/api.md) — raw HTTP recipes (models, upload, image/video generation, polling)
-- [references/troubleshooting.md](./references/troubleshooting.md) — error codes and fixes
+`bun scripts/index.ts help` lists every command; [SKILL.md](./SKILL.md) is the agent's guide, with
+[models](./references/models.md), [prompting](./references/prompting.md),
+[workflows](./references/workflows.md) and [troubleshooting](./references/troubleshooting.md).
+
+## How it works
+
+- **Login**: the browser handshake hands the CLI your own session (with a refresh token), after you
+  allow it on Flowith's connect page. Stored in `~/.flowith/canvas-session.json` (mode 600).
+- **Cards** are written to your canvas with your session, labelled with the agent's name; Flowith's
+  canvas change feed shows them in any open tab and brings them into view.
+- **Placement** uses Flo's own rules: beside the card a result came from, else in free space; several
+  results of one request form a group.
+- **Generation** goes through the canvas's own routes (`/image_gen/async`, `/video/async`,
+  `/completion/async`, card tools), so models, limits, prices and credits are exactly the canvas's.
+- **Models** come live from the canvas catalogue; every parameter is validated against it.
 
 ## Development
 
 ```bash
-bun test scripts/__tests__      # request builders, model validation, layout — no network
+bun test scripts/__tests__      # request building, reference naming, layout, canvas reading
 ```
 
 ## License

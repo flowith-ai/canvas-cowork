@@ -11,7 +11,7 @@ import { failCard } from "./generate";
 import { remoteImageSize } from "./media";
 import { type Placed, cardSize, placeCards } from "./write";
 import { placeSingle } from "./placement";
-import { obstaclesOf } from "./write";
+import { anchorRect, obstaclesOf } from "./write";
 
 const finishedMedia = (card: Card, kind: "image" | "video") => {
 	if (card.kind !== kind || !card.url || card.status === "running")
@@ -201,7 +201,7 @@ export async function makeSound(
 	opts: { timeoutMs: number; onTick?: (status: string) => void },
 ): Promise<{ ids: string[]; taskId: string }> {
 	const size = cardSize("audio");
-	const rect = placeSingle({ width: 320, height: 104 }, { obstacles: obstaclesOf(cards), anchor: source.rect });
+	const rect = placeSingle({ width: 320, height: 104 }, { obstacles: obstaclesOf(cards), anchor: anchorRect(cards, source) });
 	const position = { x: Math.round(rect.x + size.width / 2), y: Math.round(rect.y) };
 	const id = crypto.randomUUID();
 	let submitted = false;

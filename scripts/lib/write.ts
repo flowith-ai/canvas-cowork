@@ -35,6 +35,10 @@ export function cardSize(kind: CardKindToMake | "group", ratio?: string): Canvas
 const stamps = () => ({ createdAt: new Date().toISOString(), timestamp: Math.floor(Date.now() / 1000).toString() });
 const centreTop = (r: CanvasRect) => ({ x: Math.round(r.x + r.width / 2), y: Math.round(r.y) });
 
+/** Where to sit beside a card: its group's frame when it is in one (inside the frame there is no room to sit). */
+export const anchorRect = (cards: Card[], card: Card | undefined) =>
+	card ? (card.groupId ? cards.find((c) => c.id === card.groupId)?.rect : undefined) ?? card.rect : undefined;
+
 /** Top-level boxes: ungrouped cards and whole groups (members sit inside their group). */
 export const obstaclesOf = (cards: Card[], except: string[] = []) =>
 	cards.filter((c) => !c.groupId && !except.includes(c.id)).map((c) => c.rect);
@@ -115,7 +119,7 @@ export async function placeCards(api: Api, convId: string, cards: Card[], items:
 	if (where.into) return addToGroup(api, convId, cards, where.into, items, ids, base);
 
 	if (items.length === 1 && !where.group) {
-		const rect = placeSingle(items[0]!.size, { obstacles: obstaclesOf(cards), anchor: where.anchor?.rect });
+		const rect = placeSingle(items[0]!.size, { obstacles: obstaclesOf(cards), anchor: anchorRect(cards, where.anchor) });
 		const rows = await insert(api, [{ ...base(items[0]!, 0), p_id: convId, position: centreTop(rect), data: { ...stamps(), ...items[0]!.data } }]);
 		await markHasCards(api, convId).catch(() => {});
 		await settle(api, convId, rows[0]!, rect);
@@ -123,7 +127,7 @@ export async function placeCards(api: Api, convId: string, cards: Card[], items:
 	}
 
 	const layout = groupLayout(items.map((i) => i.size));
-	const frame = placeSingle({ width: layout.width, height: layout.height }, { obstacles: obstaclesOf(cards), anchor: where.anchor?.rect });
+	const frame = placeSingle({ width: layout.width, height: layout.height }, { obstacles: obstaclesOf(cards), anchor: anchorRect(cards, where.anchor) });
 	const groupId = crypto.randomUUID();
 	const group = {
 		id: groupId,

@@ -268,13 +268,17 @@ export function textCardData(job: TextJob, title: string, named = false) {
 
 /** The `/completion/async` body; text cards it reads go first, pictures as Markdown images. */
 export function textRequest(job: TextJob, nodeId: string, convId: string) {
+	const images = job.refs.filter((r) => r.media === "image" && !r.card?.text).length;
+	const prompt = images ? nameReferences(job.prompt, imageReferenceNameFor(hasHan(job.prompt) ? "zh" : "en"), { image: images, video: 0, audio: 0 }) : job.prompt;
 	const blocks = job.refs.map((r) => {
 		const c = r.card;
 		if (c && c.text) return `### ${c.title ?? c.ref}\n${c.text}`;
 		if (r.media === "image") return `![${c?.title ?? r.name}](${r.url})`;
 		return `${c?.title ?? r.name}: ${r.url}`;
 	});
-	const content = [...blocks, job.prompt].join("\n\n");
+	let n = 0;
+	const named = blocks.map((b, i) => (job.refs[i]!.media === "image" && !job.refs[i]!.card?.text ? b.replace(/^!\[[^\]]*\]/, `![${hasHan(job.prompt) ? `图${++n}` : `image ${++n}`}]`) : b));
+	const content = [...named, prompt].join("\n\n");
 	return {
 		target_feature: "text_completion",
 		model: job.modelId,
@@ -322,7 +326,8 @@ export function resultOf(card: Card): Result {
 		status = "failed";
 		code = "MODEL_LOCKED";
 		error = d.errorMessage || "This model needs a higher plan";
-	} else if (status === "failed" && !error && typeof d.value === "string" && d.value) error = d.value.slice(0, 300);
+	} else if (status === "failed") code = /content|policy|sensitive|moderation/i.test(error ?? "") ? "CONTENT_POLICY" : "GENERATION_FAILED";
+
 	if (status === "finished" && (card.kind === "image" || card.kind === "video" || card.kind === "audio") && !card.url) status = "running";
 	return {
 		ref: card.ref,

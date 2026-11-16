@@ -21,9 +21,10 @@ Below, `cw` stands for that.
 
 ## First time
 
-`cw login` opens Flowith in the browser; the user signs in and clicks **Allow**. The session renews
-itself afterwards (`cw whoami` to check). If the browser is on another machine, give the user the
-printed URL — it must be opened on this computer.
+`cw login` opens Flowith in the browser and prints a code (e.g. `K7Q-2MX`). Tell the user to type that
+code on the Flowith page and click **Allow**. The session renews itself afterwards (`cw whoami`). The
+link works in any browser, on any device the user is signed in on — but it is only for them: never
+send it to anyone else.
 
 ## The loop
 
@@ -53,8 +54,9 @@ exact title also works. Commands print JSON (`--json` for one line). Errors exit
 4. **Keep the canvas tidy.** Related work goes together (`--near`, `--group "name"`, `--into <group>`);
    give every card a short `--title` (≤ 12 字 / 5 words) — it is what the user reads on the canvas.
    Never delete or rewrite the user's own cards unless asked.
-5. **Mind credits** (1 credit = $0.001; `cw credits`). Every result reports `estimatedCredits`;
-   `--dry-run` prices a request without sending it. Ask the user before anything over ~1,000 credits
+5. **Mind credits** (1 credit = $0.001; `cw credits`). Every result reports `estimatedCredits` and,
+   once done, `chargedCredits` (what the canvas actually billed, refunds included); `cw spent` totals a
+   canvas. `--dry-run` prices a request without sending it. Ask the user before anything over ~1,000 credits
    (a batch of videos, 1080p/long clips, Kling 4.0, Wan). Test video ideas cheaply first (Muse Video,
    480p, 4–5 s), then make the final. `NO_CREDITS` / `MODEL_LOCKED`: stop and tell the user
    (top up at https://flowith.io/pricing); don't silently switch models.
@@ -70,7 +72,8 @@ exact title also works. Commands print JSON (`--json` for one line). Errors exit
 | Need | Command |
 |---|---|
 | Pictures | `image "p" ["p2"…] [--model] [--ratio 16:9] [--size 2k] [--quality high] [--n 4] [--ref card\|file\|url]… [--transparent]` |
-| Change a picture | `edit <ref> "change" [--model] [--ref more…]` · `vary <ref> [--n 3]` (same prompt again) |
+| Change a picture | `edit <ref> "change" ["change2"…] [--model] [--ratio] [--size] [--title] [--ref more…]` (one new card per change) · `vary <ref> [--n 3]` (same prompt again; pictures, clips, text) |
+| Failed card | `retry [refs]` — runs it again in place (no refs: every failed card on the canvas) |
 | Clips | `video "p" [--model] [--first ref] [--last ref] [--ref …]… [--duration 5] [--resolution 720p] [--ratio] [--no-audio] [--draft]` |
 | Continue / edit a clip | `video "what happens next" --extend <clip>` · `video "change" --edit-video <clip>` (Seedance or Gemini Omni) |
 | Text from models | `text "p" [--model a,b,c] [--ref card…] [--system "…"]` |
@@ -79,9 +82,22 @@ exact title also works. Commands print JSON (`--json` for one line). Errors exit
 | Your files | `add <file\|url…> [--group]` (pictures, clips, sounds become cards) · `note "text" [--title]` · `write <text card> "new text"` |
 | Organise | `move <ref> --to x,y \| --right-of r \| --below r` · `arrange <refs…> --as row\|column\|grid` · `arrange <group>` · `group <refs…> --name "…"` · `ungroup <g>` · `rename <ref> "title"` · `link <from> <to>` / `unlink` · `copy <ref>` · `delete <refs…>` |
 | Read | `look [words] [--kind image]` · `read <ref…> [--full]` · `shots [refs] [--full]` · `save <refs…> --out dir` · `wait [refs]` |
-| Account | `credits` · `models [image\|video\|text\|audio]` · `models <id>` · `whoami` · `open` |
+| Account | `credits` · `spent [--since 30m]` · `models [image\|video\|text\|audio]` · `models <id>` · `whoami` · `open` · `<command> --help` |
 
-Placement: new cards sit beside `--near <ref>` (else the first card reference, else free space, right
+**Run by the open canvas** — the canvas's own tools, exactly as Flo uses them. They need the canvas open
+in the browser where the user ran `login` (`cw open`); otherwise the command says so (`CANVAS_NOT_OPEN`).
+
+| Need | Command |
+|---|---|
+| Show the user | `focus <refs…>` (selects and centres them in their view) |
+| Tidy | `tidy` (the canvas's Organize: removes overlaps) · `tidy <refs…> --as row\|column\|grid\|left\|top\|hdistribute\|vdistribute` |
+| Picture tools | `split <ref> --rows 2 --cols 2` (grid → cells) · `angles <ref> [--angles low,closeUp,wide,side,back,high,overShoulder]` · `relight <ref> --preset window\|golden\|blueHour\|neon\|rim\|noir\|studio\|candle` |
+| Clip tools | `lipsync <clip> --with <sound>` · `motion <clip> --with <character picture>` · `soundtrack <clip> [--voice "line"]` (music by default) |
+| Film tools | `breakdown <clip>` (拉片: shots, frames, prompts) · `character <picture> --name "Mia" [--subject human\|animal\|anthro\|creature] [--style …]` (角色卡) · `cut <refs…> [--into <cut>]` (加入剪辑) · `stage "scene, cast, cameras" [--cast refs]` (导演台 previs) · `shoot <stage> [--shots all]` |
+| Anything else Flo can do on the canvas | `do <operation> --input '{…}'` (ids are full card ids) |
+
+Most commands wait for their result; a failed card makes the command exit 1 with `next` saying what to
+do. Placement: new cards sit beside `--near <ref>` (else the first card reference, else free space, right
 then down — Flo's own placement rules). Geometry in `look` is top-left `@x,y` and `w×h` in canvas units.
 
 ## Prompting essentials

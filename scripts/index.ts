@@ -31,6 +31,7 @@ import {
 	fetchRowsById,
 	findCard,
 	getCanvas,
+	isUuid,
 	listCanvases,
 	readCanvas,
 	resolveCanvas,
@@ -54,7 +55,7 @@ import {
 	videoRequest,
 	waitFor,
 } from "./lib/generate";
-import { type Api, CliError, worker } from "./lib/http";
+import { type Api, CliError, sleep, worker } from "./lib/http";
 import { download, fileFor, isUrl, mediaOf, toUrl } from "./lib/media";
 import {
 	type Session,
@@ -68,6 +69,7 @@ import {
 	userIdOf,
 } from "./lib/session";
 import { cutout, expand, makeSound, upscaleImage, upscaleVideo } from "./lib/tools";
+import { runOnCanvas } from "./lib/live";
 import {
 	type Layout,
 	type NewCard,
@@ -136,6 +138,8 @@ const num = (a: Args, name: string) => {
 
 let quiet = false;
 let jsonOut = false;
+/** When this command started: what the canvas was charged from here on is this command's. */
+const STARTED = Date.now();
 const log = (m: string) => {
 	if (!quiet) process.stderr.write(`${m}\n`);
 };
@@ -218,23 +222,47 @@ async function toRefs(ctx: Ctx, convId: string, cards: Card[], inputs: string[])
 
 const timeoutOf = (a: Args, fallbackSec: number) => (num(a, "timeout") ?? fallbackSec) * 1000;
 
-function finish(ctx: Ctx, convId: string, results: Result[], extra: Record<string, unknown> = {}) {
+/** What this canvas was actually charged since `since` (model_usage, refunds included), in credits. */
+async function chargedSince(ctx: Ctx, convId: string, since: number): Promise<number | undefined> {
+	try {
+		const res = await worker<{ data?: Array<{ tokens_used: number; billing_unit_price: number | null; created_at: string }> }>(
+			ctx.api,
+			`/user/model-usage/group-records?groupIds=${convId}`,
+		);
+		const rows = (res?.data ?? []).filter((r) => Date.parse(r.created_at) >= since - 2000);
+		return Math.round(rows.reduce((sum, r) => sum + creditsOf(r), 0) * 100) / 100;
+	} catch {
+		return undefined;
+	}
+}
+
+const creditsOf = (r: { tokens_used: number; billing_unit_price: number | null }) =>
+	r.billing_unit_price != null ? (r.tokens_used * r.billing_unit_price) / 1000 : r.tokens_used / 1000;
+
+async function finish(ctx: Ctx, convId: string, results: Result[], extra: Record<string, unknown> = {}, since?: number) {
 	const failed = results.filter((r) => r.status === "failed");
 	const running = results.filter((r) => r.status === "running");
+	// Refunds of a precharge land right after a card finishes.
+	const charged = since !== undefined && !running.length ? (await sleep(1500), await chargedSince(ctx, convId, since)) : undefined;
+	const next = [
+		...(failed.length ? [`Failed: ${failed.map((r) => `${r.ref} (${r.error ?? r.code})`).join("; ")}. Retry in place: \`retry ${failed.map((r) => r.ref).join(" ")}\`.`] : []),
+		...(running.length ? [`Still generating: \`wait ${running.map((r) => r.ref).join(" ")}\` later.`] : []),
+	];
 	out({
 		canvas: convId,
 		url: canvasUrl(ctx.site, convId),
 		...extra,
+		...(charged !== undefined ? { chargedCredits: charged } : {}),
 		cards: results,
-		...(running.length ? { next: `Still generating: run \`wait ${running.map((r) => r.ref).join(" ")}\` later.` } : {}),
+		...(next.length ? { next: next.join(" ") } : {}),
 	});
-	if (failed.length === results.length && results.length) process.exitCode = 1;
+	if (failed.length) process.exitCode = 1;
 }
 
-async function waitAndReport(ctx: Ctx, a: Args, convId: string, ids: string[], fallbackSec: number, extra: Record<string, unknown> = {}) {
+async function waitAndReport(ctx: Ctx, a: Args, convId: string, ids: string[], fallbackSec: number, extra: Record<string, unknown> = {}, since = STARTED) {
 	if (has(a, "no-wait")) {
 		const rows = await fetchRowsById(ctx.api, ids);
-		finish(ctx, convId, cardsFrom(rows).map(resultOf), extra);
+		await finish(ctx, convId, cardsFrom(rows).map(resultOf), extra);
 		return;
 	}
 	let last = -1;
@@ -245,7 +273,7 @@ async function waitAndReport(ctx: Ctx, a: Args, convId: string, ids: string[], f
 			last = done;
 		},
 	});
-	finish(ctx, convId, results, extra);
+	await finish(ctx, convId, results, extra, since);
 }
 
 // ---------- commands: session ----------
@@ -479,7 +507,8 @@ function intoOf(a: Args, cards: Card[]) {
 }
 
 async function cmdImage(a: Args, base?: { source: Card }) {
-	const prompts = base ? [a.pos.slice(1).join(" ").trim()] : a.pos;
+	// edit <card> "change A" "change B": one new picture per change, all from the same card.
+	const prompts = (base ? a.pos.slice(1) : a.pos).map((p) => p.trim()).filter(Boolean);
 	if (!prompts.length || !prompts[0]) throw new CliError(base ? 'edit <card> "what to change"' : 'image "prompt" ["prompt" …]', "INVALID_PARAM");
 	const { ctx, canvas, cards, catalog } = await prepare(a, prompts[0]!);
 	// --model a,b,c: the same prompt on several models (a comparison), one card each.
@@ -503,7 +532,13 @@ async function cmdImage(a: Args, base?: { source: Card }) {
 		}))),
 	);
 	const built = jobs.map((j) => imageRequest(j, "00000000-0000-0000-0000-000000000000", canvas.id));
-	const credits = Math.round(jobs.reduce((sum, j) => sum + (estimateCredits(j.model) ?? 0), 0));
+	const credits = Math.round(
+		jobs.reduce((sum, j, i) => {
+			const body = built[i]!.body as { quality?: string; aspect_ratio?: string };
+			const pixels = /^\d+x\d+$/.test(body.aspect_ratio ?? "") ? body.aspect_ratio : undefined;
+			return sum + (estimateCredits(j.model, { quality: body.quality, pixels }) ?? 0);
+		}, 0),
+	);
 	if (has(a, "dry-run")) return out({ model: modelId, jobs: jobs.length, estimatedCredits: credits, requests: built.map((b) => b.body) });
 	const title = flag(a, "title");
 	const items: NewCard[] = jobs.map((j, i) => {
@@ -514,7 +549,12 @@ async function cmdImage(a: Args, base?: { source: Card }) {
 		return {
 			kind: "image",
 			size: cardSize("image", ratio),
-			data: { ...imageCardData(j, t, ratio), ...(title ? { customTitle: t } : {}), ...(base ? { baseImageNodeId: base.source.id, baseImageUrl: base.source.url } : {}) },
+			data: {
+				...imageCardData(j, t, ratio),
+				...(title ? { customTitle: t } : {}),
+				...(base ? { baseImageNodeId: base.source.id, baseImageUrl: base.source.url } : {}),
+				agentRequest: { kind: "image", body: requestTemplate(built[i]!.body) },
+			},
 		};
 	});
 	const groupName = flag(a, "group") ?? (items.length > 1 ? title ?? titleFrom(prompts[0]!, 20) : undefined);
@@ -600,7 +640,7 @@ async function cmdVideo(a: Args) {
 		canvas.id,
 		cards,
 		// Named, or the worker names a finished clip by its prompt's first five characters.
-		[{ kind: "video", size: cardSize("video", ratio), data: { ...videoCardData(job, title, preview.params, preview.audio), customTitle: title } }],
+		[{ kind: "video", size: cardSize("video", ratio), data: { ...videoCardData(job, title, preview.params, preview.audio), customTitle: title, agentRequest: { kind: "video", body: requestTemplate(preview.body) } } }],
 		{ anchor, group: flag(a, "group"), into: intoOf(a, cards) },
 	);
 	const id = placed.ids[0]!;
@@ -626,10 +666,18 @@ async function cmdText(a: Args) {
 	const title = flag(a, "title") ?? titleFrom(prompt);
 	const jobs: TextJob[] = models.map((m) => ({ prompt, modelId: m.id, system: flag(a, "system"), refs }));
 	if (has(a, "dry-run")) return out({ requests: jobs.map((j) => textRequest(j, "00000000-0000-0000-0000-000000000000", canvas.id)) });
+	// Several models: each card names its model, so the comparison reads at a glance.
 	const items: NewCard[] = jobs.map((j) => ({
 		kind: "text",
 		size: cardSize("text"),
-		data: textCardData(j, models.length > 1 && flag(a, "title") ? `${title} · ${catalog[j.modelId]?.title ?? j.modelId}` : title, Boolean(flag(a, "title"))),
+		data: {
+			...textCardData(
+				j,
+				models.length > 1 ? `${flag(a, "title") ?? titleFrom(prompt, 10)} · ${catalog[j.modelId]?.title ?? j.modelId}` : title,
+				Boolean(flag(a, "title")) || models.length > 1,
+			),
+			agentRequest: { kind: "text", body: requestTemplate(textRequest(j, "x", "x")) },
+		},
 	}));
 	const placed = await placeCards(ctx.api, canvas.id, cards, items, {
 		anchor: anchorOf(a, cards, refs),
@@ -687,7 +735,7 @@ async function cmdSound(a: Args, tool: "gen_speech" | "gen_music") {
 	log(`Making ${tool === "gen_speech" ? "speech" : "music"} with ${modelId} (~${credits ?? "?"} credits)…`);
 	const made = await makeSound(ctx.api, canvas.id, cards, source, { name: tool, args }, { timeoutMs: timeoutOf(a, 600), onTick: () => {} });
 	const rows = await fetchRowsById(ctx.api, made.ids);
-	finish(ctx, canvas.id, cardsFrom(rows).map(resultOf), { model: modelId, estimatedCredits: credits, source: source.ref });
+	await finish(ctx, canvas.id, cardsFrom(rows).map(resultOf), { model: modelId, estimatedCredits: credits, source: source.ref }, STARTED);
 }
 
 async function cmdVary(a: Args) {
@@ -695,7 +743,12 @@ async function cmdVary(a: Args) {
 	const canvas = await canvasOf(ctx, a);
 	const cards = await readCanvas(ctx.api, canvas.id);
 	const src = findCard(cards, a.pos[0] ?? "");
-	if (src.kind !== "image" && src.kind !== "video") throw new CliError("vary takes a picture or clip card.", "INVALID_PARAM");
+	if (src.kind === "text" && src.prompt && src.model) {
+		const next = parseArgs(["text", src.prompt, "--model", flag(a, "model") ?? src.model, "--near", src.ref]);
+		for (const [k, v] of a.flags) if (k !== "model") next.flags.set(k, v);
+		return cmdText(next);
+	}
+	if (src.kind !== "image" && src.kind !== "video") throw new CliError("vary takes a picture, clip or text card.", "INVALID_PARAM");
 	if (!src.prompt || !src.model) throw new CliError(`${src.ref} has no prompt/model to run again.`, "INVALID_PARAM");
 	const refs = (src.data.promptReferenceNodes ?? []).map((p: { id: string }) => cards.find((c) => c.id === p.id)?.ref).filter(Boolean) as string[];
 	const next = parseArgs([src.kind, src.prompt, "--model", flag(a, "model") ?? src.model, "--near", src.ref, ...refs.flatMap((r) => ["--ref", r])]);
@@ -735,6 +788,66 @@ async function cmdTool(a: Args, tool: "upscale" | "cutout" | "expand") {
 	await waitAndReport(ctx, a, canvas.id, placed.ids, source.kind === "video" ? 1200 : 600);
 }
 
+
+/** A request as stored on its card (for `retry`): without the ids and placement it gets when sent. */
+function requestTemplate(body: Record<string, unknown>) {
+	const { nodeId: _n, convId: _c, parentNodeId: _p, position: _pos, ...rest } = body;
+	return rest;
+}
+
+async function cmdRetry(a: Args) {
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a);
+	const cards = await readCanvas(ctx.api, canvas.id);
+	const chosen = a.pos.length ? a.pos.map((r) => findCard(cards, r)) : cards.filter((c) => c.status === "failed");
+	if (!chosen.length) return out({ canvas: canvas.id, note: "Nothing failed." });
+	const ids: string[] = [];
+	for (const card of chosen) {
+		const req = card.data.agentRequest as { kind?: "image" | "video" | "text"; body?: Record<string, unknown> } | undefined;
+		if (!req?.kind || !req.body)
+			throw new CliError(`${card.ref} wasn't made by this CLI's generation, so its request isn't on the card. Use \`vary ${card.ref}\` or make it again.`, "INVALID_PARAM");
+		const { error: _e, error_type: _t, error_code: _c, request_id: _r, ...data } = card.data;
+		await patch(ctx.api, card, { ...(card.type === "22" || card.type === "25" ? { type: card.kind === "video" ? "13" : "2" } : {}), data: { ...data, value: "", status: "running", ...(req.kind === "video" ? { videoId: null } : {}) } });
+		const body = {
+			...req.body,
+			nodeId: card.id,
+			convId: canvas.id,
+			...(req.kind === "video" ? { parentNodeId: card.row.p_id ?? canvas.id, position: card.row.position ?? { x: 0, y: 0 }, rerun: true } : {}),
+		};
+		try {
+			await send(ctx.api, req.kind, body);
+		} catch (e) {
+			await failCard(ctx.api, card, data, (e as Error).message);
+			throw e;
+		}
+		ids.push(card.id);
+		log(`Retrying ${card.ref} (${req.kind}, ${String(req.body.model)})…`);
+	}
+	await waitAndReport(ctx, a, canvas.id, ids, chosen.some((c) => c.kind === "video") ? 900 : 300);
+}
+
+async function cmdSpent(a: Args) {
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a);
+	const res = await worker<{ data?: Array<{ model: string; tokens_used: number; billing_unit_price: number | null; created_at: string }> }>(
+		ctx.api,
+		`/user/model-usage/group-records?groupIds=${canvas.id}`,
+	);
+	const sinceArg = flag(a, "since");
+	const since = sinceArg ? Date.now() - (Number(sinceArg.replace(/[^0-9.]/g, "")) || 0) * (/h$/.test(sinceArg) ? 3_600_000 : /s$/.test(sinceArg) ? 1000 : 60_000) : 0;
+	const rows = (res?.data ?? []).filter((r) => Date.parse(r.created_at) >= since);
+	const byModel: Record<string, number> = {};
+	for (const r of rows) byModel[r.model] = (byModel[r.model] ?? 0) + creditsOf(r);
+	const total = Object.values(byModel).reduce((x, y) => x + y, 0);
+	out({
+		canvas: canvas.id,
+		...(sinceArg ? { since: new Date(since).toISOString() } : {}),
+		chargedCredits: Math.round(total * 100) / 100,
+		byModel: Object.fromEntries(Object.entries(byModel).sort((p, q) => q[1] - p[1]).map(([k, v]) => [k, Math.round(v * 100) / 100])),
+		note: "Actual charges on this canvas (refunds included; 1 credit = $0.001).",
+	});
+}
+
 // ---------- commands: placing & organising ----------
 
 /** A finished text card holding given words (no model ran). */
@@ -768,7 +881,7 @@ async function cmdAdd(a: Args) {
 		log(`Uploaded ${up.name}`);
 	}
 	const placed = await placeCards(ctx.api, canvas.id, cards, items, { anchor: anchorOf(a, cards, []), group: flag(a, "group"), into: intoOf(a, cards) });
-	finish(ctx, canvas.id, cardsFrom(placed.rows).filter((c) => c.kind !== "group").map(resultOf), placed.groupId ? { group: placed.groupId.slice(0, 8) } : {});
+	await finish(ctx, canvas.id, cardsFrom(placed.rows).filter((c) => c.kind !== "group").map(resultOf), placed.groupId ? { group: placed.groupId.slice(0, 8) } : {});
 }
 
 async function cmdNote(a: Args) {
@@ -784,7 +897,7 @@ async function cmdNote(a: Args) {
 		[{ kind: "note", size: cardSize("note"), data: noteData(text, flag(a, "title")) }],
 		{ anchor: anchorOf(a, cards, []), into: intoOf(a, cards) },
 	);
-	finish(ctx, canvas.id, cardsFrom(placed.rows).map(resultOf));
+	await finish(ctx, canvas.id, cardsFrom(placed.rows).map(resultOf));
 }
 
 async function cmdWrite(a: Args) {
@@ -834,9 +947,13 @@ async function cmdArrange(a: Args) {
 		const group = chosen[0]!;
 		const members = cards.filter((c) => c.groupId === group.id).sort((p, q) => p.rect.y - q.rect.y || p.rect.x - q.rect.x);
 		const layout = groupLayout(members.map((m) => ({ width: m.rect.width, height: m.rect.height })));
+		// The frame keeps its corner unless its new size would cover a card; then it moves to the nearest free place.
+		const others = obstaclesOf(cards, [group.id, ...members.map((m) => m.id)]);
+		let corner = { x: group.rect.x, y: group.rect.y };
+		if (!isClear({ ...corner, width: layout.width, height: layout.height }, others)) corner = nearestFree({ width: layout.width, height: layout.height }, corner, others);
 		await Promise.all(members.map((m, i) => patch(ctx.api, m, { position: { x: Math.round(layout.members[i]!.x + m.rect.width / 2), y: Math.round(layout.members[i]!.y) } })));
 		await patch(ctx.api, group, {
-			position: { x: Math.round(group.rect.x + layout.width / 2), y: group.rect.y },
+			position: { x: Math.round(corner.x + layout.width / 2), y: corner.y },
 			width: layout.width,
 			height: layout.height,
 			data: { ...group.data, width: layout.width, height: layout.height },
@@ -944,6 +1061,119 @@ async function cmdWait(a: Args) {
 	await waitAndReport(ctx, a, canvas.id, chosen.map((c) => c.id), 900);
 }
 
+// ---------- commands: run by the open canvas ----------
+
+/**
+ * Hands an operation to the browser window that has this canvas open (see lib/live.ts): the canvas's own layout,
+ * toolbar, storyboard, character and director tools, exactly as Flo runs them.
+ */
+async function onCanvas(a: Args, operation: string, build: (cards: Card[]) => Record<string, unknown>, waitSec = 0) {
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a);
+	const cards = await readCanvas(ctx.api, canvas.id);
+	const input = build(cards);
+	if (has(a, "dry-run")) return out({ operation, input });
+	const url = canvasUrl(ctx.site, canvas.id);
+	log(`Asking the open canvas to run ${operation}…`);
+	const res = await runOnCanvas(ctx.api, { sessionId: ctx.session.botSessionId, key: ctx.session.agentKey }, ctx.userId, canvas.id, operation, input, {
+		timeoutMs: timeoutOf(a, 600),
+		canvasUrl: url,
+		onAccepted: () => log("The canvas took it on."),
+	});
+	if (!res.ok) throw new CliError(res.error || `${operation} failed on the canvas.`, "CANVAS_ERROR");
+	const ids = (res.nodeIds ?? []).filter((id) => isUuid(id));
+	const { kind: _k, operationId: _o, ok: _ok, nodeIds: _n, ...extra } = res;
+	if (waitSec && ids.length && !has(a, "no-wait")) {
+		const rows = cardsFrom(await fetchRowsById(ctx.api, ids));
+		const generating = rows.filter((c) => c.status === "running" || c.status === "init").map((c) => c.id);
+		if (generating.length) return waitAndReport(ctx, a, canvas.id, ids, waitSec, { operation, ...extra });
+	}
+	const rows = ids.length ? cardsFrom(await fetchRowsById(ctx.api, ids)) : [];
+	out({ canvas: canvas.id, url, operation, ...extra, cards: rows.length ? rows.map(resultOf) : ids.map((id) => id.slice(0, 8)) });
+}
+
+const idOf = (cards: Card[], ref: string | undefined, what = "card") => {
+	if (!ref) throw new CliError(`Name the ${what}.`, "INVALID_PARAM");
+	return findCard(cards, ref).id;
+};
+
+const ON_CANVAS: Record<string, (a: Args) => Promise<unknown>> = {
+	focus: (a) => onCanvas(a, "focusCanvasNodes", (cards) => ({ nodeIds: a.pos.map((r) => idOf(cards, r)) })),
+	tidy: (a) =>
+		onCanvas(a, "arrangeCanvasNodes", (cards) => ({
+			...(a.pos.length ? { nodeIds: a.pos.map((r) => idOf(cards, r)) } : {}),
+			...(flag(a, "as") ? { layout: flag(a, "as") } : {}),
+		})),
+	split: (a) =>
+		onCanvas(a, "cardTool", (cards) => ({ nodeId: idOf(cards, a.pos[0]), tool: "split", rows: num(a, "rows") ?? 2, cols: num(a, "cols") ?? 2 }), 300),
+	angles: (a) =>
+		onCanvas(a, "cardTool", (cards) => ({ nodeId: idOf(cards, a.pos[0]), tool: "angles", ...(flags(a, "angles").length ? { angles: flags(a, "angles") } : {}) }), 600),
+	relight: (a) => onCanvas(a, "cardTool", (cards) => ({ nodeId: idOf(cards, a.pos[0]), tool: "relight", relightPreset: flag(a, "preset") ?? "golden" }), 600),
+	lipsync: (a) => onCanvas(a, "cardTool", (cards) => ({ nodeId: idOf(cards, a.pos[0], "clip"), tool: "lipsync", withNodeId: idOf(cards, flag(a, "with"), "sound card (--with)") }), 1200),
+	motion: (a) =>
+		onCanvas(a, "cardTool", (cards) => ({ nodeId: idOf(cards, a.pos[0], "clip"), tool: "motion-transfer", withNodeId: idOf(cards, flag(a, "with"), "character picture (--with)") }), 1200),
+	soundtrack: (a) =>
+		onCanvas(
+			a,
+			"cardTool",
+			(cards) => ({
+				nodeId: idOf(cards, a.pos[0], "clip"),
+				tool: "soundtrack",
+				soundtrack: flag(a, "voice") ? "voice" : "music",
+				...(flag(a, "voice") && flag(a, "voice") !== "true" ? { text: flag(a, "voice") } : {}),
+			}),
+			1200,
+		),
+	breakdown: (a) => onCanvas(a, "breakdownVideo", (cards) => ({ nodeId: idOf(cards, a.pos[0], "clip"), layoutReference: has(a, "layout") }), 900),
+	character: (a) =>
+		onCanvas(a, "makeCharacter", (cards) => {
+			const name = flag(a, "name");
+			if (!name) throw new CliError('character <picture> --name "Mia" [--subject human|animal|anthro|creature] [--style auto|realistic|anime|cartoon3d|picturebook|mascot|pixel]', "INVALID_PARAM");
+			return {
+				nodeId: idOf(cards, a.pos[0], "picture"),
+				name,
+				description: flag(a, "description") ?? "",
+				subject: flag(a, "subject") ?? "human",
+				style: flag(a, "style") ?? "auto",
+			};
+		}, 900),
+	cut: (a) =>
+		onCanvas(a, "addToCut", (cards) => ({
+			nodeIds: a.pos.map((r) => idOf(cards, r)),
+			...(flag(a, "into") ? { cutNodeId: idOf(cards, flag(a, "into"), "cut") } : {}),
+			start: num(a, "start") ?? 0,
+		})),
+	stage: (a) =>
+		onCanvas(a, "buildDirectorStage", (cards) => {
+			const idea = a.pos.join(" ").trim();
+			if (!idea) throw new CliError('stage "who is where, what they do, how each shot frames and moves" [--cast <character cards>] [--into <stage>] [--add]', "INVALID_PARAM");
+			return {
+				idea,
+				mode: has(a, "add") ? "add" : "replace",
+				...(flag(a, "into") ? { nodeId: idOf(cards, flag(a, "into"), "stage") } : {}),
+				...(flag(a, "title") ? { title: flag(a, "title") } : {}),
+				characterNodeIds: flags(a, "cast").map((r) => idOf(cards, r)),
+			};
+		}, 300),
+	shoot: (a) =>
+		onCanvas(a, "shootDirectorShot", (cards) => ({
+			nodeId: idOf(cards, a.pos[0], "stage"),
+			...(flag(a, "shots") ? { shots: flag(a, "shots") === "all" ? "all" : flags(a, "shots") } : {}),
+		})),
+	do: (a) => {
+		const operation = a.pos[0];
+		if (!operation) throw new CliError("do <operation> --json '{…}'  (an operation the canvas runs for Flo; ids are full card ids)", "INVALID_PARAM");
+		const raw = flag(a, "input") ?? a.pos[1] ?? "{}";
+		let input: Record<string, unknown>;
+		try {
+			input = JSON.parse(raw);
+		} catch {
+			throw new CliError("--input must be JSON.", "INVALID_PARAM");
+		}
+		return onCanvas(a, operation, () => input, 900);
+	},
+};
+
 // ---------- commands: models ----------
 
 async function cmdModels(a: Args) {
@@ -971,15 +1201,16 @@ const HELP = `canvas-cowork — work on a Flowith 3.0 canvas. Every card you mak
 
   bun scripts/index.ts <command> [args] [--flags]
 
-SET UP      login · whoami · credits · logout
+SET UP      login · whoami · credits · spent [--since 30m] · logout
 CANVASES    canvases [search] · new "title" · use <canvas|url> · open · rename canvas "title"
 SEE         look [words] [--kind image]  every card: ref, kind, title, model, status, place, links
             read <card…> [--full]        full prompt / text / media of cards
             shots [card…] [--full]       download previews to look at (Read the files)
             save <card…> [--out dir]     download originals / text
 MAKE        image "prompt" ["prompt"…]   [--model] [--ratio 16:9] [--size 2k] [--n 4] [--ref card|file|url]… [--transparent]
-            edit <card> "change"          a new picture made from that one, beside it
-            vary <card> [--n 3]           run a card's prompt again
+            edit <card> "change" ["change2"…]  new pictures made from that one, beside it [--model] [--ratio] [--size] [--title]
+            vary <card> [--n 3]           run a picture, clip or text card's prompt again, beside it
+            retry [card…]                 run failed cards again in place (all failed cards when none named)
             video "prompt"               [--model] [--first card|file] [--last …] [--ref …]… [--duration 5] [--resolution 720p]
                                          [--ratio] [--no-audio] [--draft] [--extend clip] [--edit-video clip]
             text "prompt"                [--model a,b,c] [--ref card]… [--system "…"]
@@ -989,6 +1220,13 @@ ARRANGE     add <file|url…> · note "text" · write <card> "text" · move <car
             arrange <cards…> --as row|column|grid  ·  arrange <group>  ·  group <cards…> --name "…" · ungroup <group>
             rename <card> "title" · link <from> <to> · unlink <from> <to> · copy <card> · delete <card…>
             wait [card…]
+ON CANVAS   (run by the user's open canvas window, as Flo's operations are)
+            focus <refs…> · tidy [refs…] [--as row|column|grid|left|top|hdistribute…] (no refs: Organize)
+            split <ref> --rows 2 --cols 2 · angles <ref> [--angles low,closeUp,wide,side,back,high,overShoulder]
+            relight <ref> --preset window|golden|blueHour|neon|rim|noir|studio|candle
+            lipsync <clip> --with <sound> · motion <clip> --with <picture> · soundtrack <clip> [--voice "text"]
+            breakdown <clip> [--layout] · character <picture> --name "Mia" [--subject animal] · cut <refs…>
+            stage "scene idea" [--cast refs] · shoot <stage> [--shots all] · do <operation> --input '{…}'
 MODELS      models [image|video|text|audio] · models <id>
 
 Placement   new cards sit beside --near <card> (or the first --ref card), else in free space; several
@@ -1044,7 +1282,10 @@ const COMMANDS: Record<string, (a: Args) => Promise<unknown>> = {
 	copy: cmdCopy,
 	delete: cmdDelete,
 	wait: cmdWait,
+	retry: cmdRetry,
+	spent: cmdSpent,
 	models: cmdModels,
+	...ON_CANVAS,
 };
 
 /** Commands of the previous canvas-cowork and what replaced them. */
@@ -1065,7 +1306,12 @@ async function main() {
 	const a = parseArgs(process.argv.slice(2));
 	jsonOut = has(a, "json");
 	quiet = has(a, "quiet") || jsonOut;
-	if (a.cmd === "help" || has(a, "help")) return void process.stdout.write(HELP);
+	if (a.cmd === "help") return void process.stdout.write(HELP);
+	if (has(a, "help")) {
+		// The help lines that name this command, with the shared notes.
+		const lines = HELP.split("\n").filter((l) => new RegExp(`(^|[\\s·(])${a.cmd}\\b`).test(l));
+		return void process.stdout.write(`${lines.join("\n") || HELP}\n\n${HELP.slice(HELP.indexOf("Placement"))}`);
+	}
 	const run = COMMANDS[a.cmd];
 	if (!run) {
 		const moved = RENAMED[a.cmd];

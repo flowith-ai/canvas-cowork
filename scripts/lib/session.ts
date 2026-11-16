@@ -26,6 +26,9 @@ export interface Session {
 	workerURL: string;
 	/** The canvas commands act on unless told otherwise. */
 	canvas?: string;
+	/** The browser's name for this connection, and the key it gave it for canvas operations (lib/live.ts). */
+	botSessionId?: string;
+	agentKey?: string;
 	savedAt: string;
 }
 
@@ -171,21 +174,91 @@ interface HandshakeSession {
 	refreshToken?: string;
 	workerURL?: string;
 	activeConvId?: string;
+	sessionId?: string;
+	agentKey?: string;
 }
 
-/** Opens Flowith, waits for the user to allow the agent, saves the session. */
+/** Flowith's Supabase project and its public (publishable) key, as the web app ships them. */
+const SUPABASE_URL = process.env.FLOWITH_SUPABASE_URL || "https://aibdxsebwhalbnugsqel.supabase.co";
+const SUPABASE_KEY = process.env.FLOWITH_SUPABASE_KEY || "sb_publishable_qPCinc8LE8ChpdT7Pf79tQ_eryz5udr";
+
+/**
+ * Opens Flowith, waits for the user to allow the agent, saves the session.
+ *
+ * The page hands the session back sealed to this process's one-time key over the Realtime topic
+ * `cli-login:<code>` (works in every browser: nothing touches the computer's own network). Pages
+ * from before that also find a WebSocket on 127.0.0.1 here.
+ */
 export async function login(agent: string, log: (m: string) => void, opts: { open?: boolean } = {}): Promise<Session> {
+	const { Realtime, loginKeys, openSealed, ackProof, loginCode, verificationCode } = await import("./realtime");
 	const site = siteUrl();
 	const nonce = crypto.randomUUID();
+	const code = loginCode();
+	const keys = await loginKeys();
+	const topic = `cli-login:${code}`;
+	const relay = new Realtime(SUPABASE_URL, SUPABASE_KEY);
+	let relayReady = false;
+	try {
+		await relay.connect();
+		await relay.join(topic);
+		relayReady = true;
+	} catch (e) {
+		log(`(Couldn't reach Flowith's realtime service: ${(e as Error).message}; using the local connection only.)`);
+	}
+
 	return new Promise<Session>((resolve, reject) => {
 		let done = false;
 		const finish = (fn: () => void) => {
 			if (done) return;
 			done = true;
 			clearTimeout(timer);
-			setTimeout(() => server.stop(true), 50);
+			setTimeout(() => {
+				server.stop(true);
+				relay.close();
+			}, 300);
 			fn();
 		};
+		const accept = (d: HandshakeSession) => {
+			if (!d || d.nonce !== nonce || !d.accessToken) return false;
+			const s: Session = {
+				site,
+				supabaseUrl: d.supabaseUrl,
+				supabaseKey: d.supabaseKey,
+				accessToken: d.accessToken,
+				...(d.refreshToken ? { refreshToken: d.refreshToken } : {}),
+				workerURL: (d.workerURL || "https://edge.flowith.io").replace(/\/$/, ""),
+				...(d.activeConvId ? { canvas: d.activeConvId } : {}),
+				...(d.sessionId && d.agentKey ? { botSessionId: d.sessionId, agentKey: d.agentKey } : {}),
+				savedAt: new Date().toISOString(),
+			};
+			saveSession(s);
+			finish(() => resolve(s));
+			return true;
+		};
+		const refuse = (type: string) => {
+			if (type === "denied") finish(() => reject(new CliError("You declined the connection in the browser.", "LOGIN_DENIED")));
+			if (type === "not_logged_in")
+				finish(() => reject(new CliError("Not signed in to Flowith in that browser. Sign in, then run `login` again.", "NOT_LOGGED_IN")));
+		};
+
+		if (relayReady) {
+			relay.on(topic, "cli_login", async (payload: { type?: string; epk?: string; iv?: string; ct?: string }) => {
+				if (payload?.type === "sealed" && payload.epk && payload.iv && payload.ct) {
+					try {
+						const opened = await openSealed(keys.privateKey, code, payload as { epk: string; iv: string; ct: string });
+						const message = opened.message as { type?: string; data?: HandshakeSession };
+						if (message.type === "session" && message.data && accept(message.data))
+							relay.broadcast(topic, "cli_login_ack", await ackProof(opened.key, code, nonce));
+					} catch {
+						// Not sealed to our key: ignore.
+					}
+				} else if (payload?.type === "denied" || payload?.type === "not_logged_in") {
+					relay.broadcast(topic, "cli_login_ack", { ok: true });
+					refuse(payload.type);
+				}
+			});
+		}
+
 		const server = Bun.serve({
 			port: 0,
 			hostname: "127.0.0.1",
@@ -201,55 +274,34 @@ export async function login(agent: string, log: (m: string) => void, opts: { ope
 					} catch {
 						return;
 					}
-					if (msg.type === "denied") {
+					if (msg.type === "denied" || msg.type === "not_logged_in") {
 						ws.send(JSON.stringify({ ok: true }));
-						finish(() => reject(new CliError("You declined the connection in the browser.", "LOGIN_DENIED")));
+						refuse(msg.type);
 						return;
 					}
-					if (msg.type === "not_logged_in") {
-						ws.send(JSON.stringify({ ok: true }));
-						finish(() => reject(new CliError("Not signed in to Flowith in that browser. Sign in, then run `login` again.", "NOT_LOGGED_IN")));
-						return;
-					}
-					if (msg.type !== "session" || !msg.data || msg.data.nonce !== nonce) {
-						ws.send(JSON.stringify({ error: "bad request" }));
-						return;
-					}
-					const d = msg.data;
-					const s: Session = {
-						site,
-						supabaseUrl: d.supabaseUrl,
-						supabaseKey: d.supabaseKey,
-						accessToken: d.accessToken,
-						...(d.refreshToken ? { refreshToken: d.refreshToken } : {}),
-						workerURL: (d.workerURL || "https://edge.flowith.io").replace(/\/$/, ""),
-						...(d.activeConvId ? { canvas: d.activeConvId } : {}),
-						savedAt: new Date().toISOString(),
-					};
-					saveSession(s);
-					ws.send(JSON.stringify({ ok: true }));
-					finish(() => resolve(s));
+					if (msg.type === "session" && msg.data && accept(msg.data)) ws.send(JSON.stringify({ ok: true }));
+					else ws.send(JSON.stringify({ error: "bad request" }));
 				},
 			},
 		});
-		const url = `${site}/?cli_port=${server.port}&cli_nonce=${nonce}&cli_bot=${encodeURIComponent(agent)}`;
+		const params = new URLSearchParams({ cli_nonce: nonce, cli_bot: agent, cli_port: String(server.port), ...(relayReady ? { cli_code: code, cli_key: keys.publicKey } : {}) });
+		const url = `${site}/?${params}`;
 		const timer = setTimeout(
 			() =>
 				finish(() =>
-					reject(
-						new CliError(
-							`No answer from the browser within 2 minutes. Open this URL in a browser on this computer (not Safari), sign in and click Allow:\n${url}`,
-							"LOGIN_TIMEOUT",
-						),
-					),
+					reject(new CliError(`No answer from the browser within 2.5 minutes. Run \`login\` again and click Allow on the Flowith page.`, "LOGIN_TIMEOUT")),
 				),
 			150_000,
 		);
 		const opened = opts.open !== false && openBrowser(url);
 		log(
-			opened
-				? `Opened Flowith in your browser — sign in if asked, then click Allow.\nIf nothing opened, visit: ${url}`
-				: `Open this URL in a browser on this computer, sign in and click Allow:\n${url}`,
+			[
+				opened ? "Opened Flowith in your browser — sign in if asked, then click Allow." : "Open this link in a browser, sign in and click Allow:",
+				relayReady ? `When the page asks, type this code: ${verificationCode(code)}` : "",
+				opened ? `If nothing opened, visit: ${url}` : url,
+			]
+				.filter(Boolean)
+				.join("\n"),
 		);
 	});
 }

@@ -95,6 +95,7 @@ export async function patch(api: Api, card: Pick<Card, "id" | "createdAt">, fiel
 export async function placeCards(api: Api, convId: string, cards: Card[], items: NewCard[], where: Placement = {}): Promise<Placed> {
 	if (!items.length) throw new CliError("Nothing to place.", "INVALID_PARAM");
 	const ids = items.map(() => crypto.randomUUID());
+	for (const item of items) item.data = { madeBy: api.agent, ...item.data };
 	const base = (item: NewCard, i: number) => ({
 		id: ids[i],
 		conv_id: convId,
@@ -110,6 +111,7 @@ export async function placeCards(api: Api, convId: string, cards: Card[], items:
 		const rect = placeSingle(items[0]!.size, { obstacles: obstaclesOf(cards), anchor: where.anchor?.rect });
 		const rows = await insert(api, [{ ...base(items[0]!, 0), p_id: convId, position: centreTop(rect), data: { ...stamps(), ...items[0]!.data } }]);
 		await markHasCards(api, convId).catch(() => {});
+		await settle(api, convId, rows[0]!, rect);
 		return { ids, rows };
 	}
 
@@ -147,7 +149,28 @@ export async function placeCards(api: Api, convId: string, cards: Card[], items:
 	});
 	const rows = await insert(api, [group, ...members]);
 	await markHasCards(api, convId).catch(() => {});
+	const groupRow = rows.find((r) => r.id === groupId);
+	if (groupRow) await settle(api, convId, groupRow, frame);
 	return { ids, groupId, rows };
+}
+
+/**
+ * Two agents (or two commands) placing at once can pick the same free spot. After writing, look again: if something
+ * written meanwhile now covers this box, move it to the nearest free place.
+ */
+async function settle(api: Api, convId: string, row: FlowNodeRow, rect: CanvasRect) {
+	try {
+		const { readCanvas } = await import("./desk");
+		const now = await readCanvas(api, convId);
+		const others = obstaclesOf(now, [row.id]);
+		if (isClear(rect, others)) return;
+		const free = nearestFree({ width: rect.width, height: rect.height }, rect, others);
+		await patch(api, { id: row.id, createdAt: row.created_at }, { position: centreTop({ ...free, width: rect.width, height: rect.height }) });
+		rect.x = free.x;
+		rect.y = free.y;
+	} catch {
+		// Placement already holds; a later look shows any overlap.
+	}
 }
 
 /** New cards join a group: the group is laid out again with them last and grows (or moves, if it would cover something). */

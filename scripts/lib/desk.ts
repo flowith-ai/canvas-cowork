@@ -49,8 +49,8 @@ export interface Card {
 	follows?: string;
 	madeFrom?: string[];
 	references?: string[];
-	/** Who placed it: the in-app Creator Agent, or a person / outside agent. */
-	placedBy: "flo" | "other";
+	/** Who placed it: "flo" (the in-app Creator Agent), an outside agent's name (claude-code, codex…), or "you". */
+	placedBy: string;
 	error?: string;
 	row: FlowNodeRow;
 	data: Record<string, any>;
@@ -117,6 +117,28 @@ function textOf(v: unknown): string | undefined {
 	}
 }
 
+/** A failure as one readable sentence: providers' errors arrive as JSON, sometimes nested in the card's value. */
+export function readableError(raw: unknown): string | undefined {
+	if (raw == null || raw === "") return undefined;
+	let v: unknown = raw;
+	for (let i = 0; i < 3 && typeof v === "string" && /^\s*\{/.test(v); i++) {
+		try {
+			v = JSON.parse(v);
+		} catch {
+			break;
+		}
+	}
+	if (v && typeof v === "object") {
+		const o = v as Record<string, unknown>;
+		const nested = o.request_error && typeof o.request_error === "object" ? (o.request_error as Record<string, unknown>).message : undefined;
+		const text = [o.error_message, o.message, nested, o.error, o.reason].find((x) => typeof x === "string" && x.trim());
+		const kind = typeof o.error_type === "string" ? o.error_type : typeof o.value === "string" && /^[a-z_]+$/.test(o.value) ? o.value : undefined;
+		const msg = typeof text === "string" ? text : kind;
+		return msg ? `${kind && msg !== kind ? `${kind}: ` : ""}${msg}`.replace(/\s+/g, " ").slice(0, 300) : undefined;
+	}
+	return String(v).replace(/\s+/g, " ").trim().slice(0, 300) || undefined;
+}
+
 /** Rows → cards, with group members placed absolutely. */
 export function cardsFrom(rows: FlowNodeRow[]): Card[] {
 	const byId = new Map(rows.map((r) => [r.id, r]));
@@ -157,7 +179,7 @@ export function cardsFrom(rows: FlowNodeRow[]): Card[] {
 		] as string[];
 		const prompt = typeof d.prompt === "string" ? d.prompt : typeof r.prompt === "string" ? r.prompt : undefined;
 		const preview = typeof d.mediaPreview?.url === "string" ? d.mediaPreview.url : undefined;
-		const error = typeof d.error === "string" && d.error ? d.error : undefined;
+		const error = d.status === "failed" || r.type === "22" || r.type === "25" ? readableError(d.error ?? d.errorMessage ?? d.value) : undefined;
 		return {
 			id: r.id,
 			ref: r.id.slice(0, 8),
@@ -182,7 +204,7 @@ export function cardsFrom(rows: FlowNodeRow[]): Card[] {
 			...(follows ? { follows } : {}),
 			...(madeFrom.length ? { madeFrom } : {}),
 			...(references.length ? { references } : {}),
-			placedBy: d.creatorMedia ? "flo" : "other",
+			placedBy: d.creatorMedia ? "flo" : typeof d.madeBy === "string" ? d.madeBy : "you",
 			...(error ? { error } : {}),
 			row: r,
 			data: d,

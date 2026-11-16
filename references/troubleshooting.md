@@ -5,7 +5,9 @@ Errors print one JSON line `{"error": CODE, "message": …}` and exit 1.
 | Code | Meaning | What to do |
 |---|---|---|
 | `NOT_LOGGED_IN` | No session, or it expired and couldn't renew | `cw login` (the user clicks Allow in the browser) |
-| `LOGIN_TIMEOUT` | Nobody allowed the connection within 2 minutes | Open the printed URL in Chrome / Edge / Arc / Firefox **on this computer**, sign in, Allow. Safari blocks the local handshake |
+| `LOGIN_TIMEOUT` | Nobody allowed the connection within 2.5 minutes | Run `login` again; the user opens the link, types the printed code and clicks Allow |
+| `CANVAS_NOT_OPEN` | A "run by the open canvas" command found no window with that canvas | `cw open`, in the browser where `login` was allowed (each browser that allowed the agent holds its key); then run it again |
+| `CANVAS_ERROR` | The canvas refused the operation (wrong card kind, still generating…) | Read the message; `cw look` |
 | `LOGIN_DENIED` | The user clicked Deny | Ask before trying again |
 | `NO_CANVAS` | No canvas chosen | `cw use <ref|title|url>` or `cw new "title"` (generation commands create one when none is active) |
 | `NOT_FOUND` / `AMBIGUOUS` | A card or canvas ref didn't match exactly one | `cw look` / `cw canvases` and use the 8-hex ref |
@@ -14,12 +16,14 @@ Errors print one JSON line `{"error": CODE, "message": …}` and exit 1.
 | `NO_CREDITS` | Not enough credits, or the plan's credits don't cover that model tier | Tell the user (https://flowith.io/pricing); don't switch models silently |
 | `MODEL_LOCKED` | The model needs a higher plan | Tell the user; offer a standard model |
 | `RATE_LIMITED` | Too many requests | Wait a minute; batch prompts in one call |
-| `GENERATION_FAILED` / `CONTENT_POLICY` / `INVALID_INPUT` | The provider refused or failed (credits are refunded) | Read `error` on the card (`cw read <ref>`); rephrase, use another reference, or another model |
+| `GENERATION_FAILED` / `CONTENT_POLICY` / `INVALID_INPUT` | The provider refused or failed (credits are refunded) | The card's `error` says why (`cw read <ref>`). Transient ("Workflow delivery failed", timeouts): `cw retry <ref>`. Refusals: rephrase, another reference, or another model |
 | `TIMEOUT` | The command stopped waiting | The work continues on the server: `cw wait <ref>` |
 
 Other things worth knowing:
 
 - **A card shows "…" for a long time**: video providers queue; Muse Video can take 5–10 minutes. `cw wait`.
+- **`shots`** downloads each card's preview when the canvas made one (clips: a frame), else the original
+  picture; `--full` always downloads originals.
 - **A cut-out looks like it still has a background**: transparent PNGs keep their colours under zero
   alpha and some viewers draw them; on the canvas it is transparent.
 - **The user doesn't see new cards**: they appear live in an open canvas tab of the same account; ask

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { estimateCredits, imageSizing, resolveModel, videoParams, type Catalog } from "../lib/catalog";
-import { cardsFrom, findCard, type FlowNodeRow } from "../lib/desk";
+import { cardsFrom, findCard, readableError, type FlowNodeRow } from "../lib/desk";
 import { imageRequest, nameReferences, titleFrom, videoRequest, type Ref } from "../lib/generate";
 import { imageSize } from "../lib/media";
 import { klingReferenceName, seedanceReferenceName } from "../lib/reference-names";
@@ -34,12 +34,18 @@ describe("models", () => {
 		expect(() => resolveModel(catalog, "image", "nope")).toThrow(/not a image model/);
 	});
 	test("size-matrix models get a pixel size from ratio × tier", () => {
-		expect(imageSizing("gpt-image-2.6-flare", catalog["gpt-image-2.6-flare"]!, "16:9").aspect_ratio).toBe("2048x1152");
-		expect(imageSizing("gpt-image-2.6-flare", catalog["gpt-image-2.6-flare"]!, "16:9", "1K").aspect_ratio).toBe("1280x720");
+		// The canvas's defaults: 1K and the first quality (left out, GPT Image runs and bills at "max").
+		expect(imageSizing("gpt-image-2.6-flare", catalog["gpt-image-2.6-flare"]!, "16:9")).toMatchObject({ aspect_ratio: "1280x720", quality: "low" });
+		expect(imageSizing("gpt-image-2.6-flare", catalog["gpt-image-2.6-flare"]!, "16:9", "2K", "high")).toMatchObject({ aspect_ratio: "2048x1152", quality: "high" });
 		expect(() => imageSizing("dola-seedream-5-5-261028", catalog["dola-seedream-5-5-261028"]!, "5:4")).toThrow(/Choose one of/);
 	});
 	test("video defaults: 16:9, 5 s, 720p when offered", () => {
 		expect(videoParams("seedance-2.5-flash", catalog["seedance-2.5-flash"]!, {})).toEqual({ aspect_ratio: "16:9", duration: "5", resolution: "720p" });
+	});
+	test("token-billed pictures are priced by quality and area", () => {
+		const m = { media: "image", estimatedPrice: 20, estimatedBreakdown: [{ quality: "low", price: 20 }, { quality: "max", price: 174 }] };
+		expect(estimateCredits(m, { quality: "low", pixels: "1024x1024" })).toBe(20);
+		expect(estimateCredits(m, { quality: "max", pixels: "2048x2048" })).toBe(696);
 	});
 	test("credit estimates", () => {
 		expect(estimateCredits(catalog["seedance-2.5-flash"]!, { duration: "5" })).toBe(404);
@@ -122,6 +128,11 @@ describe("reading the canvas", () => {
 		expect(cards.find((c) => c.id === g)!.title).toBe("Shots");
 		expect(cards.find((c) => c.id === b)!.references).toEqual([a]);
 		expect(cards.find((c) => c.id === b)!.kind).toBe("video");
+	});
+	test("provider failures read as one sentence", () => {
+		const raw = JSON.stringify({ value: "provider_error", error_type: "provider_error", error_message: "Workflow delivery failed: -1", request_error: { message: "x" } });
+		expect(readableError(raw)).toBe("provider_error: Workflow delivery failed: -1");
+		expect(readableError("Generation failed\n\nPlease try again.")).toBe("Generation failed Please try again.");
 	});
 	test("cards are found by ref, prefix or title", () => {
 		expect(findCard(cards, "bbbb").id).toBe(b);

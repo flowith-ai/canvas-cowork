@@ -35,6 +35,8 @@ export interface Model {
 	referenceAssetLimits?: { total: number; image: number; audio: number; video: number };
 	consume_num?: number;
 	estimatedPrice?: number;
+	/** Token-billed pictures: the price of one 1024×1024 picture at each quality. */
+	estimatedBreakdown?: Array<{ quality: string; price: number }>;
 	estimatedPricePer5s?: number;
 	pricePerSecond?: { audioOff?: number; audioOn?: number };
 	pricePerSecondByResolution?: Record<string, { audioOff?: number; audioOn?: number }>;
@@ -85,6 +87,8 @@ export function defaultModel(catalog: Catalog, kind: Kind): string {
 	if (kind === "video") {
 		for (const id of ["seedance-2.5-flash", "seedance-2.5"]) if (catalog[id] && !catalog[id]!.comingSoon) return id;
 	}
+	// Text cards default to a fast, current model every plan's credits cover; name a flagship when it matters.
+	if (kind === "text" && catalog["gemini-3.8-flash"] && !catalog["gemini-3.8-flash"]!.comingSoon) return "gemini-3.8-flash";
 	const first = modelsOf(catalog, kind)[0]?.[0];
 	if (!first) throw new CliError(`No ${kind} models are offered right now.`, "INVALID_MODEL");
 	return first;
@@ -148,7 +152,7 @@ export function imageSizing(
 			} else {
 				const key = ratios.find((x) => x.toLowerCase() === ratio.toLowerCase());
 				if (!key) throw new CliError(`--ratio "${ratio}" is not offered by ${id}. Choose one of: ${ratios.join(", ")}`, "INVALID_PARAM");
-				const tier = pick("size", size, tiers) ?? tiers.find((t) => /2k/i.test(t)) ?? tiers[0]!;
+				const tier = pick("size", size, tiers) ?? tiers.find((t) => /^1k$/i.test(t)) ?? tiers[0]!;
 				out.aspect_ratio = sizes[key]![tier] ?? Object.values(sizes[key]!)[0];
 			}
 		} else if (size) {
@@ -158,7 +162,10 @@ export function imageSizing(
 		out.aspect_ratio = pick("ratio", ratio, m.supportedAspectRatios);
 		out.image_size = pick("size", size, m.supportedImageSizes);
 	}
+	// The canvas sends a quality whenever the model has them, its first one unless chosen: left out, GPT Image
+	// runs (and bills) at "max".
 	if (quality !== undefined) out.quality = pick("quality", quality, m.supportedQualities);
+	else if (m.supportedQualities?.length) out.quality = m.supportedQualities[0];
 	return out;
 }
 
@@ -185,8 +192,19 @@ export function videoParams(
 }
 
 /** Credits a run is expected to cost, from the catalogue (1 credit = $0.001). */
-export function estimateCredits(m: Model, p: { duration?: string; resolution?: string; audio?: boolean; chars?: number } = {}): number | undefined {
-	if (m.media === "image") return m.estimatedPrice ?? (m.price?.completion ? m.price.completion / 1000 : undefined);
+export function estimateCredits(
+	m: Model,
+	p: { duration?: string; resolution?: string; audio?: boolean; chars?: number; quality?: string; pixels?: string } = {},
+): number | undefined {
+	if (m.media === "image") {
+		// Token-billed pictures (GPT Image): the quality's 1024² price, scaled by the picture's area.
+		const byQuality = p.quality ? m.estimatedBreakdown?.find((b) => b.quality === p.quality)?.price : undefined;
+		if (byQuality !== undefined) {
+			const [w, h] = (p.pixels ?? "1024x1024").split("x").map(Number);
+			return Math.round(byQuality * (w && h ? (w * h) / (1024 * 1024) : 1));
+		}
+		return m.estimatedPrice ?? (m.price?.completion ? m.price.completion / 1000 : undefined);
+	}
 	if (m.media === "video") {
 		const seconds = Number(p.duration);
 		const perSec = (p.resolution && m.pricePerSecondByResolution?.[p.resolution]) || m.pricePerSecond;

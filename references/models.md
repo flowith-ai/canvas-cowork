@@ -3,20 +3,22 @@
 `cw models [image|video|text|audio]` is the live list (the same catalogue the canvas picker shows) with
 ratios, sizes, durations, reference limits and approximate credits; `cw models <id>` gives one model's
 full limits. Every value you pass is checked against it, and a wrong one answers with the allowed list.
-Prices below are approximate, in credits (1 credit = $0.001), as of 2026-11.
+Prices below are what the canvas actually charged in tests, in credits (1 credit = $0.001), 2026-11;
+`cw spent` shows yours. "advanced" models (tier t1) need paid credits; free / trial credits cover only
+the others.
 
 When you name no model, a card starts on the canvas's own default: **Seedream 5.5** for pictures,
-**Seedance 2.5 Flash** for clips, the first text model for text. Pass `--model <id>`; the display name
+**Seedance 2.5 Flash** for clips, **Gemini 3.8 Flash** for text. Pass `--model <id>`; the display name
 also works (`--model "Nano Banana 2"`).
 
 ## Pictures
 
 | Job | Model | Why |
 |---|---|---|
-| Default; edits, lettering, transparent stickers | `dola-seedream-5-5-261028` (Seedream 5.5, ~12) | Cheapest at 2K, best at step-by-step edits without blur, renders quoted text verbatim, native transparency (`--transparent`), ≤ 10 refs |
-| Hero shots, posters, complex composition | `gpt-image-2.6-flare` (~20) | Strong layout and typography, ≤ 16 refs, `--quality` up to `max`, ratio × size (`--ratio 16:9 --size 4K`) |
+| Default; edits, lettering, transparent stickers | `dola-seedream-5-5-261028` (Seedream 5.5, ~21 at its default 2K) | Cheapest at 2K, best at step-by-step edits without blur, renders quoted text verbatim, native transparency (`--transparent`), ≤ 10 refs |
+| Hero shots, posters, complex composition | `gpt-image-2.6-flare` (~20 at 1K low) | Strong layout and typography, ≤ 16 refs. Billed by quality × area: the CLI sends `low` at 1K unless you ask; `--quality high --size 2K` is ~170, `max` at 2K ~700 — ask first |
 | Photoreal people, product fidelity | `gemini-3-pro-image` (Nano Banana Pro, ~80) / `gemini-3.1-flash-image` (Nano Banana 2, ~45) | Skin and materials; extreme ratios (1:4, 8:1) |
-| Many cheap drafts | `gpt-image-2.5-flare` (~6) · `z-image-turbo` (~5) | Exploration before the final |
+| Many cheap drafts | `gpt-image-2.5-flare` (~6 at 1K low) · `z-image-turbo` (~5) | Exploration before the final |
 
 ## Clips
 
@@ -34,8 +36,10 @@ longer clip. Frames (`--first/--last`) and `--ref` can't be mixed except on Klin
 
 ## Text (cards on the canvas)
 
-Any of `cw models text` — Claude, GPT, Gemini, DeepSeek, Kimi, Grok, MiniMax. For "compare N models"
-use `cw text "…" --model a,b,c`: one card per model, one group, each card shows its model.
+Any of `cw models text` — Claude, GPT, Gemini, DeepSeek, Kimi, Grok, MiniMax. Without `--model`, text
+cards use `gemini-3.8-flash` (fast, cheap, every plan's credits cover it); name a flagship
+(`claude-opus-5-5`, `gpt-6.1-sol`, `gemini-4-argon`) when the writing matters. For "compare N models"
+use `cw text "…" --model a,b,c`: one card per model, one group, each card titled with its model.
 
 ## Sound
 

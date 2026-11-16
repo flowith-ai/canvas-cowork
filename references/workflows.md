@@ -17,7 +17,10 @@ what misses, then tell the user what is on the canvas (refs + url).
    Test on `--model muse-video` or `--draft` (Seedance 2.5, 480p) first when the user is price-sensitive.
 6. Continue a shot: `cw video "接着…" --extend <clip>`. Voice-over / music for the cut:
    `cw speech "旁白…" --for <clip>` · `cw music "warm acoustic, 90 bpm" --for <clip> --duration 30`.
-7. Put the clips in order: `cw group <clip refs…> --name "成片"` then `cw arrange <group>`.
+7. Put the clips in order: `cw group <clip refs…> --name "成片"` then `cw arrange <group>`; with the canvas
+   open, `cw cut <clip refs…>` lays them on a track in the canvas's editor (加入剪辑).
+8. Learning from a reference film: `cw add ref.mp4` then `cw breakdown <clip>` (拉片) lays out its shots,
+   frames and prompts as cards you can reuse.
 
 ## Product shots for every channel
 
@@ -30,7 +33,9 @@ what misses, then tell the user what is on the canvas (refs + url).
 
 ## The same character everywhere
 
-1. Reference sheet: `cw image "角色设定：同一个女孩的正面、侧面、背面全身，白底" --ratio 16:9 --title "角色设定"`.
+1. Reference sheet: `cw image "角色设定：同一个女孩的正面、侧面、背面全身，白底" --ratio 16:9 --title "角色设定"`,
+   or, with the canvas open, `cw character <best portrait> --name "Mia"` makes a canvas character card
+   (its own reference boards, used by the storyboard and Flo).
 2. Every later picture or clip passes it: `--ref <sheet>` and says "same girl as @image1".
 3. For clips with dialogue keep one speaker per shot and quote the line.
 
@@ -44,7 +49,8 @@ what misses, then tell the user what is on the canvas (refs + url).
 
 ## Tidy a canvas
 
-1. `cw look` — read groups, loose cards and their links.
+1. `cw look` — read groups, loose cards, their links, and which cards overlap. If only overlaps bother
+   the user and the canvas is open, `cw tidy` runs the canvas's own Organize.
 2. Decide groups by meaning (characters, scenes, drafts, finals), then
    `cw group <refs…> --name "…"` per set; `cw arrange <group>` lays a group out on Flo's grid.
 3. Line up loose cards: `cw arrange <refs…> --as row|column|grid` (the block moves to free space if it

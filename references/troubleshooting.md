@@ -31,4 +31,6 @@ Other things worth knowing:
 - **Several machines / accounts**: `FLOWITH_HOME=/path` keeps a separate session; `FLOWITH_URL` points
   at another Flowith site (default https://beta.flowith.io while 3.0 is in beta).
 - Session and caches live in `~/.flowith/` (`canvas-session.json`, mode 600, holds the login token —
-  never print or share it).
+  never print or share it). The CLI gets a sign-in of its own (it never shares the browser's), so it can
+  renew itself without signing the browser out. `logout` forgets it here; "Disconnect" in Flowith stops
+  the agent's on-canvas operations at once.

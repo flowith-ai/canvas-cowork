@@ -534,9 +534,9 @@ async function cmdImage(a: Args, base?: { source: Card }) {
 	const built = jobs.map((j) => imageRequest(j, "00000000-0000-0000-0000-000000000000", canvas.id));
 	const credits = Math.round(
 		jobs.reduce((sum, j, i) => {
-			const body = built[i]!.body as { quality?: string; aspect_ratio?: string };
+			const body = built[i]!.body as { quality?: string; aspect_ratio?: string; image_size?: string };
 			const pixels = /^\d+x\d+$/.test(body.aspect_ratio ?? "") ? body.aspect_ratio : undefined;
-			return sum + (estimateCredits(j.model, { quality: body.quality, pixels }) ?? 0);
+			return sum + (estimateCredits(j.model, { quality: body.quality, pixels, size: body.image_size, refs: j.refs.length }) ?? 0);
 		}, 0),
 	);
 	if (has(a, "dry-run")) return out({ model: modelId, jobs: jobs.length, estimatedCredits: credits, requests: built.map((b) => b.body) });

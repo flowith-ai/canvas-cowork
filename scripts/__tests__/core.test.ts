@@ -47,9 +47,16 @@ describe("models", () => {
 		expect(estimateCredits(m, { quality: "low", pixels: "1024x1024" })).toBe(20);
 		expect(estimateCredits(m, { quality: "max", pixels: "2048x2048" })).toBe(696);
 	});
+	test("Seedream 5.5 is priced by tier and input pictures, with its launch discount", () => {
+		const m = { media: "image", title: "Seedream 5.5", discount: 40, launchCampaignUntil: "2999-01-01T00:00:00Z" };
+		expect(estimateCredits(m)).toBe(21);
+		expect(estimateCredits(m, { refs: 1 })).toBe(25.8);
+		expect(estimateCredits(m, { size: "1k" })).toBe(12);
+		expect(estimateCredits({ ...m, launchCampaignUntil: "2000-01-01T00:00:00Z" })).toBe(35);
+	});
 	test("credit estimates", () => {
 		expect(estimateCredits(catalog["seedance-2.5-flash"]!, { duration: "5" })).toBe(404);
-		expect(estimateCredits(catalog["dola-seedream-5-5-261028"]!)).toBe(12);
+		expect(estimateCredits(catalog["seedance-2.5-flash"]!, { duration: "10" })).toBe(807);
 	});
 });
 

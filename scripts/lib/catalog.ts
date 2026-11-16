@@ -192,10 +192,19 @@ export function videoParams(
 }
 
 /** Credits a run is expected to cost, from the catalogue (1 credit = $0.001). */
+/** Seedream 5.5's list price in credits (flo-workers SEEDREAM_55_PRICING): by output tier, plus each input picture. */
+const SEEDREAM_55_LIST = { low: 20, high: 35, input: 8 };
+
 export function estimateCredits(
 	m: Model,
-	p: { duration?: string; resolution?: string; audio?: boolean; chars?: number; quality?: string; pixels?: string } = {},
+	p: { duration?: string; resolution?: string; audio?: boolean; chars?: number; quality?: string; pixels?: string; size?: string; refs?: number } = {},
 ): number | undefined {
+	if (m.media === "image" && m.title === "Seedream 5.5") {
+		// 1K / 1.5K are the low tier; the default (2K) the high one. A launch discount applies until its end date.
+		const discounted = m.discount && (!m.launchCampaignUntil || Date.parse(String(m.launchCampaignUntil)) > Date.now()) ? 1 - m.discount / 100 : 1;
+		const tier = p.size && /^1(\.5)?k$/i.test(p.size) ? SEEDREAM_55_LIST.low : SEEDREAM_55_LIST.high;
+		return Math.round((tier + (p.refs ?? 0) * SEEDREAM_55_LIST.input) * discounted * 10) / 10;
+	}
 	if (m.media === "image") {
 		// Token-billed pictures (GPT Image): the quality's 1024² price, scaled by the picture's area.
 		const byQuality = p.quality ? m.estimatedBreakdown?.find((b) => b.quality === p.quality)?.price : undefined;

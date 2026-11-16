@@ -406,6 +406,14 @@ async function cmdLook(a: Args) {
 		.join(", ");
 	console.log(`Canvas "${canvas.title ?? "(untitled)"}" ${canvas.id}\n${canvasUrl(ctx.site, canvas.id)}\n${counts || "empty"}${groups.length ? `, ${groups.length} group${groups.length > 1 ? "s" : ""}` : ""}  (@x,y = top-left; ← = made from / uses)\n`);
 	const top = [...groups, ...loose].sort((p, q) => p.rect.y - q.rect.y || p.rect.x - q.rect.x);
+	// What a tidy-up should fix: top-level boxes that cover each other.
+	const overlaps: string[] = [];
+	for (let i = 0; i < top.length; i++)
+		for (let j = i + 1; j < top.length; j++) {
+			const [p, q] = [top[i]!.rect, top[j]!.rect];
+			if (p.x < q.x + q.width && q.x < p.x + p.width && p.y < q.y + q.height && q.y < p.y + p.height) overlaps.push(`${top[i]!.ref}×${top[j]!.ref}`);
+		}
+	if (overlaps.length) console.log(`Overlapping: ${overlaps.slice(0, 12).join(", ")}${overlaps.length > 12 ? " …" : ""}  (tidy, arrange or move fixes it)\n`);
 	for (const c of top) {
 		if (c.kind === "group") {
 			const members = cards.filter((m) => m.groupId === c.id).sort((p, q) => p.rect.y - q.rect.y || p.rect.x - q.rect.x);

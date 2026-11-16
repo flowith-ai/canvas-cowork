@@ -312,13 +312,17 @@ async function cmdWhoami(a: Args) {
 async function cmdCredits(a: Args) {
 	const ctx = await context(a);
 	const rows = await worker<Array<Record<string, any>>>(ctx.api, "/user/credits");
-	const live = (rows ?? []).filter((r) => !r.canceled && (!r.to_date || new Date(r.to_date) > new Date()));
-	const total = live.reduce((s, r) => s + Math.max(0, Number(r.remain_quota) || 0), 0);
+	const now = Date.now();
+	const live = (rows ?? []).filter(
+		(r) => !r.canceled && (!r.from_date || Date.parse(r.from_date) <= now) && (!r.to_date || Date.parse(r.to_date) > now),
+	);
+	// The balance Flowith shows: grants overdrawn by a run that cost more than they held go negative and count.
+	const total = live.reduce((s, r) => s + (Number(r.remain_quota) || 0), 0);
 	out({
 		credits: Math.round(total * 100) / 100,
-		note: "1 credit = $0.001. Some grants only cover certain model tiers.",
+		note: "1 credit = $0.001. Some grants only cover certain model tiers; a negative grant is owed and comes off the rest.",
 		grants: live
-			.filter((r) => Number(r.remain_quota) > 0)
+			.filter((r) => Number(r.remain_quota) !== 0)
 			.map((r) => ({ kind: r.sub_type, left: r.remain_quota, until: r.to_date?.slice(0, 10), ...(r.policy_summary ? { limits: r.policy_summary } : {}) })),
 	});
 }

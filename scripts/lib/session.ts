@@ -153,19 +153,23 @@ export async function activeSession(opts: { force?: boolean } = {}): Promise<Ses
 		body: JSON.stringify({ refresh_token: s.refreshToken }),
 		signal: AbortSignal.timeout(20_000),
 	}).catch(() => null);
-	const body = resp ? ((await resp.json().catch(() => ({}))) as { access_token?: string; refresh_token?: string; error_description?: string; error?: string }) : {};
+	const body = resp
+		? ((await resp.json().catch(() => ({}))) as { access_token?: string; refresh_token?: string; error_description?: string; error?: string; error_code?: string; msg?: string })
+		: {};
+	// Supabase Auth answers {error, error_description} or, newer, {code, error_code, msg}.
+	const why = [body.error_code, body.msg, body.error, body.error_description].filter(Boolean).join(": ");
 	if (!resp?.ok || !body.access_token) {
 		// Another command may have renewed it a moment ago: use what it saved.
 		const latest = loadSession();
 		if (latest && latest.accessToken !== s.accessToken && (jwtClaims(latest.accessToken).exp ?? 0) * 1000 > Date.now()) return latest;
 		// Only a refused refresh token is dropped; a network or server error leaves it for the next try.
-		if (resp && (resp.status === 400 || resp.status === 401) && /invalid|revoked|not found|already used/i.test(`${body.error} ${body.error_description}`)) {
+		if (resp && (resp.status === 400 || resp.status === 401) && /invalid|not valid|revoked|not.found|already.used|expired/i.test(why)) {
 			delete s.refreshToken;
 			saveSession(s);
-			throw new CliError(`The login was revoked (${body.error_description ?? body.error}). Run \`login\` again.`, "NOT_LOGGED_IN", { ended: true });
+			throw new CliError(`The login was ended (${why}). Run \`login\` again.`, "NOT_LOGGED_IN", { ended: true });
 		}
 		if (exp > Date.now()) return s;
-		throw new CliError(`Couldn't renew the session (${body.error_description ?? resp?.status ?? "network error"}). Try again, or run \`login\`.`, "NOT_LOGGED_IN");
+		throw new CliError(`Couldn't renew the session (${why || resp?.status || "network error"}). Try again, or run \`login\`.`, "NOT_LOGGED_IN");
 	}
 	const latest = loadSession() ?? s;
 	const next: Session = { ...latest, accessToken: body.access_token, ...(body.refresh_token ? { refreshToken: body.refresh_token } : {}), checkedAt: Date.now(), savedAt: new Date().toISOString() };
@@ -188,7 +192,8 @@ async function confirmed(s: Session): Promise<Session> {
 	}).catch(() => null);
 	// Only a definite "no such session" ends it here; a network blip is checked again next time.
 	if (resp && (resp.status === 401 || resp.status === 403)) {
-		forgetSession();
+		// Unless another command logged in again meanwhile.
+		if (loadSession()?.accessToken === s.accessToken) forgetSession();
 		throw new CliError("This sign-in was ended (Disconnected in Flowith, or `logout`). Run `login` again.", "NOT_LOGGED_IN", { ended: true });
 	}
 	if (!resp?.ok) return s;

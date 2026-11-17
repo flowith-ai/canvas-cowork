@@ -108,12 +108,17 @@ describe("a send whose answer is lost", () => {
 		const f = fake({ submit: "drop" });
 		const card = (await f.run("video", "a cat walks", "--model", "seedance-2.5-flash")).json.cards[0].ref as string;
 		// The provider took the job after the CLI stopped waiting: the worker charged it then.
-		await Bun.sleep(2_500);
+		await Bun.sleep(4_000);
 		f.usage.unshift(precharge(915)("seedance-2.5-flash"));
 		const r = await f.run("retry", card, "--no-wait");
 		expect(r.json.error).toBe("BUSY");
 		expect(r.json.message).toContain("did reach Flowith");
 		expect(f.writes().filter((w) => w.path.startsWith("/video/async")).length).toBe(1);
+	});
+	test("two retries of one card at once send it once", async () => {
+		const f = fake();
+		await Promise.all([f.run("retry", ref(ids.failed), "--no-wait"), f.run("retry", ref(ids.failed), "--no-wait")]);
+		expect(f.writes().filter((w) => w.path.startsWith("/image_gen")).length).toBe(1);
 	});
 	test("retry sends a card named twice only once", async () => {
 		const f = fake();

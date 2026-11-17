@@ -56,6 +56,32 @@ export function noteSent(sent: Sent) {
 	}
 }
 
+/**
+ * Claims a card for one retry (a lock file created only if absent; a claim older than a few minutes is stale). False
+ * when another command holds it.
+ */
+export function claimRetry(card: string): boolean {
+	mkdirSync(dir(), { recursive: true });
+	const lock = fileOf(card).replace(/\.json$/, ".retry");
+	try {
+		if (Date.now() - statSync(lock).mtimeMs < 5 * 60_000) return false;
+		unlinkSync(lock);
+	} catch {}
+	try {
+		writeFileSync(lock, String(process.pid), { flag: "wx" });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Gives up a retry claim once its send is done. */
+export function releaseRetry(card: string) {
+	try {
+		unlinkSync(fileOf(card).replace(/\.json$/, ".retry"));
+	} catch {}
+}
+
 export function sentOf(cards: string[]): Sent[] {
 	return cards.flatMap((card) => {
 		try {

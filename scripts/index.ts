@@ -56,7 +56,7 @@ import {
 	waitFor,
 } from "./lib/generate";
 import { type Api, CliError, forbidWrites, serverNow, sleep, worker } from "./lib/http";
-import { type Sent, SETTLE_MS, chargeOf, chargedSince, creditsOf, noteSent, sentOf, usageOf } from "./lib/ledger";
+import { type Sent, SETTLE_MS, chargeOf, chargedSince, claimRetry, creditsOf, noteSent, releaseRetry, sentOf, usageOf } from "./lib/ledger";
 import { download, fileFor, isUrl, mediaOf, toUrl } from "./lib/media";
 import {
 	type Session,
@@ -909,8 +909,6 @@ async function cmdRetry(a: Args) {
 		if (card.status === "finished") throw new CliError(`${card.ref} is finished; \`vary ${card.ref}\` makes another take beside it.`, "INVALID_PARAM");
 		const sent = sentOf([card.id])[0];
 		const kind = requestOf(card)!.kind!;
-		// Refused (Flowith answered no) but never marked failed: nothing was taken, it can run.
-		if (sent?.answer === "refused") continue;
 		if (sent?.answer !== "lost") throw new CliError(`${card.ref} is still generating: \`wait ${card.ref}\`.`, "BUSY");
 		if (canvas.team)
 			throw new CliError(`No answer came back for ${card.ref}, and on a team canvas the team's charges can't be read to tell whether it arrived, so it isn't sent again. \`wait ${card.ref}\`; if it never finishes, delete it and make it again.`, "BUSY");
@@ -921,6 +919,13 @@ async function cmdRetry(a: Args) {
 			throw new CliError(`No charge for ${card.ref} so far, but it may still be on its way. \`wait ${card.ref}\`; if it is still generating in ${Math.ceil(left / 60_000)} min, retry then.`, "BUSY");
 	}
 	if (dryRun) return out({ retry: chosen.map((c) => ({ ref: c.ref, kind: requestOf(c)!.kind, model: requestOf(c)!.body!.model })), ...(skipped.length ? { skipped } : {}) });
+	// Two retries of one card at once would both send it: the second finds it taken.
+	const claimed: string[] = [];
+	const busy = chosen.find((c) => (claimRetry(c.id) ? (claimed.push(c.id), false) : true));
+	if (busy) {
+		claimed.forEach(releaseRetry);
+		throw new CliError(`${busy.ref} is being retried by another command: \`wait ${busy.ref}\`.`, "BUSY");
+	}
 	const ids: string[] = [];
 	const lost: string[] = [];
 	for (const card of chosen) {
@@ -939,7 +944,11 @@ async function cmdRetry(a: Args) {
 			convId: canvas.id,
 			...(req.kind === "video" ? { parentNodeId: card.row.p_id ?? canvas.id, position: card.row.position ?? { x: 0, y: 0 }, rerun: true } : {}),
 		};
-		if ((await sendFor(ctx, req.kind!, body, { id: card.id, createdAt: card.createdAt, type, data })) === "lost") lost.push(card.id);
+		try {
+			if ((await sendFor(ctx, req.kind!, body, { id: card.id, createdAt: card.createdAt, type, data })) === "lost") lost.push(card.id);
+		} finally {
+			releaseRetry(card.id);
+		}
 		ids.push(card.id);
 		log(`Retrying ${card.ref} (${req.kind}, ${String(req.body!.model)})…`);
 	}

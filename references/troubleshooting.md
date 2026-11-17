@@ -37,5 +37,10 @@ Other things worth knowing:
 - Session and caches live in `~/.flowith/` (`canvas-session.json`, mode 600, holds the login token —
   never print or share it). The CLI gets a sign-in of its own (it never shares the browser's), so it can
   renew itself without signing the browser out. `logout` ends that sign-in and forgets it here;
-  "Disconnect" in Flowith ends it too (operations stop at once; Supabase drops the sign-in, so the next
-  command says `NOT_LOGGED_IN`).
+  on sites with the Disconnect update, the page can end it too. New commands check Auth with a
+  two-minute cache; running commands do not periodically check. Existing access tokens may still
+  work until expiry (up to one hour), and accepted generations are not cancelled. Until beta has
+  hypergpt-frontend #753, use CLI `logout` there to end the independent sign-in.
+- **Retry says the card changed**: another client edited, deleted or claimed it after it was read.
+  Run `look` again. Updated CLIs coordinate retries through a conditional database claim; the page's
+  Retry button and older CLIs do not, so avoid retrying the same card from both at once.

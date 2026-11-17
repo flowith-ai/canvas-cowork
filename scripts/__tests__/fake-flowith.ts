@@ -5,6 +5,7 @@
 import { mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { isDeepStrictEqual } from "node:util";
 
 export const USER = "11111111-1111-4111-8111-111111111111";
 export const CONV = "22222222-2222-4222-8222-222222222222";
@@ -100,6 +101,12 @@ export interface UsageRecord {
 }
 
 export interface FakeOptions {
+	/** Pause a snapshotted read, or a PATCH before it checks its condition, to exercise real CLI races. */
+	afterNodeRead?: () => Promise<void>;
+	nodeReadStatus?: number;
+	beforeNodePatch?: () => Promise<void>;
+	patchStatus?: number;
+	dropPatchReply?: boolean;
 	/**
 	 * How a generation submit is answered: ok; an HTTP refusal; the gateway giving up on the worker (504); or the
 	 * connection breaking off mid-answer (the CLI sees a network error).
@@ -144,9 +151,12 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 			}
 			if (p.startsWith("/rest/v1/flow_node")) {
 				if (req.method === "GET") {
+					if (opts.nodeReadStatus) return new Response("read unavailable", { status: opts.nodeReadStatus });
 					const only = url.searchParams.get("id");
 					const want = only?.startsWith("in.(") ? only.slice(4, -1).split(",") : undefined;
-					return Response.json(want ? rows.filter((r) => want.includes(r.id)) : rows);
+					const snapshot = Response.json((want ? rows.filter((r) => want.includes(r.id)) : rows).filter((r) => !(r as any).is_delete));
+					await opts.afterNodeRead?.();
+					return snapshot;
 				}
 				// Placed cards are kept (and read back) like the real table; a PATCH changes the card it names.
 				if (req.method === "POST") {
@@ -155,8 +165,17 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 					return Response.json(placed);
 				}
 				const id = url.searchParams.get("id")?.replace(/^eq\./, "");
-				const hit = rows.filter((r) => r.id === id);
+				await opts.beforeNodePatch?.();
+				if (opts.patchStatus) return Response.json({ message: "patch refused" }, { status: opts.patchStatus });
+				const previous = url.searchParams.get("data");
+				const hit = rows.filter((r) => r.id === id
+					&& (!url.searchParams.has("created_at") || url.searchParams.get("created_at") === `eq.${r.created_at}`)
+					&& (!url.searchParams.has("type") || url.searchParams.get("type") === `eq.${r.type}`)
+					&& (!url.searchParams.has("conv_id") || url.searchParams.get("conv_id") === `eq.${r.conv_id}`)
+					&& (!url.searchParams.has("is_delete") || !(r as any).is_delete)
+					&& (!previous || (previous === "is.null" ? r.data === null : isDeepStrictEqual(r.data, JSON.parse(previous.slice(3))))));
 				for (const r of hit) Object.assign(r, body);
+				if (opts.dropPatchReply) return new Response("reply lost after write", { status: 504 });
 				return Response.json(hit);
 			}
 			if (p === "/user/model-usage/group-records") return Response.json({ success: true, data: usage });
@@ -195,15 +214,19 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 		},
 	});
 	const origin = `http://localhost:${server.port}`;
-	const home = mkdtempSync(join(tmpdir(), "cw-test-"));
-	writeFileSync(
-		join(home, "canvas-session.json"),
-		JSON.stringify({ site: origin, supabaseUrl: origin, supabaseKey: "k", accessToken: jwt(), refreshToken: "r1", workerURL: origin, canvas: CONV, savedAt: at }),
-		{ mode: 0o600 },
-	);
+	const newHome = () => {
+		const directory = mkdtempSync(join(tmpdir(), "cw-test-"));
+		writeFileSync(
+			join(directory, "canvas-session.json"),
+			JSON.stringify({ site: origin, supabaseUrl: origin, supabaseKey: "k", accessToken: jwt(), refreshToken: "r1", workerURL: origin, canvas: CONV, savedAt: at }),
+			{ mode: 0o600 },
+		);
+		return directory;
+	};
+	const home = newHome();
 	/** Runs the real CLI against this fake; resolves with its JSON output (or error line) and exit code. */
-	const run = async (...args: string[]) => {
-		const env = { ...process.env, FLOWITH_HOME: home, FLOWITH_AGENT: "claude-code" } as Record<string, string | undefined>;
+	const runFrom = async (directory: string, ...args: string[]) => {
+		const env = { ...process.env, FLOWITH_HOME: directory, FLOWITH_AGENT: "claude-code" } as Record<string, string | undefined>;
 		delete env.FLOWITH_URL;
 		delete env.FLOWITH_CANVAS;
 		const proc = Bun.spawn(["bun", join(import.meta.dir, "..", "index.ts"), ...args, "--json", "--quiet"], { env, stdout: "pipe", stderr: "pipe" });
@@ -212,8 +235,9 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 		try { json = JSON.parse(stdout.trim().split("\n").at(-1) ?? ""); } catch { json = stdout; }
 		return { json, code };
 	};
+	const run = (...args: string[]) => runFrom(home, ...args);
 	const writes = () => requests.filter((r) => r.method !== "GET" && !r.path.startsWith("/auth/v1/"));
-	return { origin, home, requests, writes, usage, opts, run, stop: () => (server.stop(true), hangUp.stop(true)) };
+	return { origin, home, newHome, rows, requests, writes, usage, opts, run, runFrom, stop: () => (server.stop(true), hangUp.stop(true)) };
 }
 
 /** A token the CLI accepts as unexpired (it only reads the claims). */

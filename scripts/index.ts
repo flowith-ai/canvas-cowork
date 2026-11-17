@@ -81,6 +81,7 @@ import {
 	type Placed,
 	arrangePoints,
 	cardSize,
+	claimCardForRetry,
 	deleteCards,
 	groupCards,
 	link,
@@ -903,21 +904,21 @@ async function cmdRetry(a: Args) {
 	if (named.length && skipped.length)
 		throw new CliError(`${skipped.join(", ")} weren't made by this CLI's generation, so their request isn't on the card. Use \`vary\` or make them again.`, "INVALID_PARAM");
 	if (!chosen.length) return out({ canvas: canvas.id, note: skipped.length ? `Nothing to retry here (${skipped.join(", ")} weren't made by this CLI).` : "Nothing failed." });
-	const records = chosen.some((c) => !failed(c)) ? await usageOf(ctx.api, canvas.id) : [];
-	for (const card of chosen) {
-		if (failed(card)) continue;
+	const check = async (card: Card) => {
+		if (failed(card)) return;
 		if (card.status === "finished") throw new CliError(`${card.ref} is finished; \`vary ${card.ref}\` makes another take beside it.`, "INVALID_PARAM");
 		const sent = sentOf([card.id])[0];
 		const kind = requestOf(card)!.kind!;
 		if (sent?.answer !== "lost") throw new CliError(`${card.ref} is still generating: \`wait ${card.ref}\`.`, "BUSY");
 		if (canvas.team)
 			throw new CliError(`No answer came back for ${card.ref}, and on a team canvas the team's charges can't be read to tell whether it arrived, so it isn't sent again. \`wait ${card.ref}\`; if it never finishes, delete it and make it again.`, "BUSY");
-		if (chargedSince(sent, records, serverNow()))
+		if (chargedSince(sent, await usageOf(ctx.api, canvas.id), serverNow()))
 			throw new CliError(`${card.ref} did reach Flowith (a ${sent.model} charge began on this canvas after it was sent): \`wait ${card.ref}\` for the result.`, "BUSY");
 		const left = sent.to + SETTLE_MS[kind] - serverNow();
 		if (left > 0)
 			throw new CliError(`No charge for ${card.ref} so far, but it may still be on its way. \`wait ${card.ref}\`; if it is still generating in ${Math.ceil(left / 60_000)} min, retry then.`, "BUSY");
-	}
+	};
+	for (const card of chosen) await check(card);
 	if (dryRun) return out({ retry: chosen.map((c) => ({ ref: c.ref, kind: requestOf(c)!.kind, model: requestOf(c)!.body!.model })), ...(skipped.length ? { skipped } : {}) });
 	// Two retries of one card at once would both send it: the second finds it taken.
 	const claimed: string[] = [];
@@ -928,29 +929,44 @@ async function cmdRetry(a: Args) {
 	}
 	const ids: string[] = [];
 	const lost: string[] = [];
-	for (const card of chosen) {
-		const req = requestOf(card)!;
-		const {
-			error: _e, error_type: _t, error_code: _c, request_id: _r,
-			errorMessage: _m, creditFailureReason: _cr, creditFailureStage: _cs, creditFailureCode: _cc, httpCode: _h, attemptedModel: _a,
-			...data
-		} = card.data;
-		// A refusal may have turned it into the canvas's credits or upgrade card: back to the card it was.
-		const type = card.type === "22" || card.type === "25" ? (req.kind === "video" ? "13" : "2") : card.type;
-		await patch(ctx.api, card, { ...(type !== card.type ? { type } : {}), data: { ...data, value: "", status: "running", ...(req.kind === "video" ? { videoId: null } : {}) } });
-		const body = {
-			...req.body,
-			nodeId: card.id,
-			convId: canvas.id,
-			...(req.kind === "video" ? { parentNodeId: card.row.p_id ?? canvas.id, position: card.row.position ?? { x: 0, y: 0 }, rerun: true } : {}),
-		};
-		try {
-			if ((await sendFor(ctx, req.kind!, body, { id: card.id, createdAt: card.createdAt, type, data })) === "lost") lost.push(card.id);
-		} finally {
-			releaseRetry(card.id);
+	try {
+		// The first read may have been delayed until another command finished and released its lock.
+		// Validate every card again under the lock before starting any of this batch.
+		const latest = cardsFrom(await fetchRowsById(ctx.api, chosen.map((c) => c.id)));
+		const refreshed = chosen.map((c) => {
+			const card = latest.find((now) => now.id === c.id && now.row.conv_id === canvas.id);
+			if (!card) throw new CliError(`${c.ref} is no longer on this canvas. Nothing was submitted.`, "NOT_FOUND");
+			if (!requestOf(card)?.kind || !requestOf(card)?.body)
+				throw new CliError(`${c.ref}'s request changed. Read it again before retrying.`, "BUSY");
+			return card;
+		});
+		for (const card of refreshed) await check(card);
+		for (const card of refreshed) {
+			const req = requestOf(card)!;
+			const {
+				error: _e, error_type: _t, error_code: _c, request_id: _r,
+				errorMessage: _m, creditFailureReason: _cr, creditFailureStage: _cs, creditFailureCode: _cc, httpCode: _h, attemptedModel: _a,
+				...data
+			} = card.data;
+			// A refusal may have turned it into the canvas's credits or upgrade card: back to the card it was.
+			const type = card.type === "22" || card.type === "25" ? (req.kind === "video" ? "13" : "2") : card.type;
+			// Persist before claiming: a killed process or lost PATCH response must not strand a running card with
+			// no recovery record. A failed claim never reaches sendFor; it is safe to inspect and retry later.
+			const now = serverNow();
+			noteSent({ card: card.id, conv: canvas.id, model: String(req.body!.model), kind: req.kind!, from: now, to: now, answer: "lost" });
+			const claimedCard = await claimCardForRetry(ctx.api, card, type, { ...data, value: "", status: "running", ...(req.kind === "video" ? { videoId: null } : {}) });
+			const body = {
+				...req.body,
+				nodeId: card.id,
+				convId: canvas.id,
+				...(req.kind === "video" ? { parentNodeId: claimedCard.row.p_id ?? canvas.id, position: claimedCard.row.position ?? { x: 0, y: 0 }, rerun: true } : {}),
+			};
+			if ((await sendFor(ctx, req.kind!, body, claimedCard)) === "lost") lost.push(card.id);
+			ids.push(card.id);
+			log(`Retrying ${card.ref} (${req.kind}, ${String(req.body!.model)})…`);
 		}
-		ids.push(card.id);
-		log(`Retrying ${card.ref} (${req.kind}, ${String(req.body!.model)})…`);
+	} finally {
+		claimed.forEach(releaseRetry);
 	}
 	await waitAndReport(ctx, a, canvas.id, ids, chosen.some((c) => c.kind === "video") ? 900 : 300, {}, lost);
 }

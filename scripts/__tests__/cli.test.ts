@@ -3,7 +3,7 @@
  * twice, a lost answer leaves the card alone, charges are tied to their own attempts, and logout ends the sign-in.
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { CONV, fakeFlowith, ids, precharge } from "./fake-flowith";
 
@@ -68,6 +68,109 @@ describe("--dry-run sends nothing that changes the canvas", () => {
 });
 
 describe("retry never sends a card twice", () => {
+	const latch = () => {
+		let release!: () => void;
+		const promise = new Promise<void>((resolve) => { release = resolve; });
+		return { promise, release };
+	};
+
+	test("a delayed failed-card response cannot resubmit after another process releases its lock", async () => {
+		const captured = latch(), resume = latch();
+		let first = true;
+		const f = fake({ precharge: precharge(5), afterNodeRead: async () => {
+			if (first) { first = false; captured.release(); await resume.promise; }
+		} });
+		const slow = f.run("retry", ref(ids.failed), "--no-wait");
+		await captured.promise;
+		try { expect((await f.run("retry", ref(ids.failed), "--no-wait")).code).toBe(0); }
+		finally { resume.release(); }
+		expect((await slow).code).toBe(1);
+		expect(f.writes().filter((w) => w.path.startsWith("/image_gen/async"))).toHaveLength(1);
+		expect(f.usage).toHaveLength(1);
+	});
+
+	test("two machines that both read failed compete for one database claim", async () => {
+		const both = latch();
+		let pending = 0;
+		const f = fake({ precharge: precharge(5), beforeNodePatch: async () => {
+			if (++pending === 2) both.release();
+			await both.promise;
+		} });
+		const outcomes = await Promise.all([
+			f.run("retry", ref(ids.failed), "--no-wait"),
+			f.runFrom(f.newHome(), "retry", ref(ids.failed), "--no-wait"),
+		]);
+		expect(outcomes.map((r) => r.code).sort()).toEqual([0, 1]);
+		expect(outcomes.find((r) => r.code === 1)?.json.error).toBe("BUSY");
+		expect(f.writes().filter((w) => w.path.startsWith("/image_gen/async"))).toHaveLength(1);
+		expect(f.usage).toHaveLength(1);
+	});
+
+	test("an edit after validation is preserved and is not submitted", async () => {
+		const f = fake();
+		f.opts.beforeNodePatch = async () => {
+			f.rows.find((r) => r.id === ids.failed)!.data.title = "Changed meanwhile";
+		};
+		const result = await f.run("retry", ref(ids.failed), "--no-wait");
+		expect(result.json.error).toBe("BUSY");
+		expect(f.rows.find((r) => r.id === ids.failed)!.data.title).toBe("Changed meanwhile");
+		expect(f.writes().filter((w) => w.path.startsWith("/image_gen/async"))).toHaveLength(0);
+	});
+
+	test("a card deleted after validation cannot be claimed", async () => {
+		const f = fake();
+		f.opts.beforeNodePatch = async () => { Object.assign(f.rows.find((r) => r.id === ids.failed)!, { is_delete: true }); };
+		expect((await f.run("retry", ref(ids.failed), "--no-wait")).json.error).toBe("BUSY");
+		expect(f.writes().filter((w) => w.path.startsWith("/image_gen/async"))).toHaveLength(0);
+	});
+
+	test("a lost claim response is recovered only by reading its unique marker", async () => {
+		const f = fake({ dropPatchReply: true, precharge: precharge(5) });
+		expect((await f.run("retry", ref(ids.failed), "--no-wait")).code).toBe(0);
+		expect(f.writes().filter((w) => w.path.startsWith("/image_gen/async"))).toHaveLength(1);
+		expect(f.usage).toHaveLength(1);
+	});
+
+	test("an unreadable lost claim sends nothing and leaves a recovery record", async () => {
+		const f = fake({ dropPatchReply: true });
+		f.opts.beforeNodePatch = async () => { f.opts.nodeReadStatus = 503; };
+		expect((await f.run("retry", ref(ids.failed), "--no-wait")).json.error).toBe("SENT_UNKNOWN");
+		expect(f.writes().filter((w) => w.path.startsWith("/image_gen/async"))).toHaveLength(0);
+		const file = join(f.home, "sent", `${ids.failed}.json`);
+		const sent = JSON.parse(readFileSync(file, "utf8"));
+		expect(sent.answer).toBe("lost");
+		writeFileSync(file, JSON.stringify({ ...sent, from: sent.from - 3_600_000, to: sent.to - 3_600_000 }));
+		delete f.opts.beforeNodePatch;
+		delete f.opts.nodeReadStatus;
+		delete f.opts.dropPatchReply;
+		expect((await f.run("retry", ref(ids.failed), "--no-wait")).code).toBe(0);
+		expect(f.writes().filter((w) => w.path.startsWith("/image_gen/async"))).toHaveLength(1);
+	});
+
+	test("a batch is revalidated before any card is submitted", async () => {
+		const f = fake();
+		const second = structuredClone(f.rows.find((r) => r.id === ids.failed)!);
+		second.id = "b3000000-0000-4000-8000-000000000004";
+		f.rows.push(second);
+		let first = true;
+		f.opts.afterNodeRead = async () => {
+			if (first) { first = false; second.data.status = "running"; }
+		};
+		expect((await f.run("retry", ref(ids.failed), ref(second.id), "--no-wait")).json.error).toBe("BUSY");
+		expect(f.writes()).toHaveLength(0);
+		expect(readdirSync(join(f.home, "sent")).filter((name) => name.endsWith(".retry"))).toEqual([]);
+	});
+
+	test("a refused patch releases every lock in the batch", async () => {
+		const f = fake({ patchStatus: 403 });
+		const second = structuredClone(f.rows.find((r) => r.id === ids.failed)!);
+		second.id = "b3000000-0000-4000-8000-000000000004";
+		f.rows.push(second);
+		expect((await f.run("retry", ref(ids.failed), ref(second.id), "--no-wait")).json.error).toBe("FORBIDDEN");
+		expect(readdirSync(join(f.home, "sent")).filter((name) => name.endsWith(".retry"))).toEqual([]);
+		expect(f.writes().filter((w) => w.path.startsWith("/image_gen/async"))).toHaveLength(0);
+	});
+
 	test("a card still generating is refused", async () => {
 		const f = fake();
 		const r = await f.run("retry", ref(ids.running), "--no-wait");

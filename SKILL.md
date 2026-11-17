@@ -78,7 +78,7 @@ exact title also works. Commands print JSON (`--json` for one line). Errors exit
 |---|---|
 | Pictures | `image "p" ["p2"…] [--model] [--ratio 16:9] [--size 2k] [--quality high] [--n 4] [--ref card\|file\|url]… [--transparent]` |
 | Change a picture | `edit <ref> "change" ["change2"…] [--model] [--ratio] [--size] [--title] [--ref more…]` (one new card per change) · `vary <ref> [--n 3]` (same prompt again; pictures, clips, text) |
-| Failed card | `retry [refs]` — runs a failed card again in place (no refs: every failed card). Never a card still generating or finished (`vary` makes another take). A card whose send got no answer (`SENT_UNKNOWN`) is sent again only once the canvas's charges show it never arrived |
+| Failed card | `retry [refs]` — runs a failed card again in place (no refs: every failed card). Rechecks under a local lock and atomically claims the card before sending, including across machines using this CLI. Avoid simultaneous retries from the page or old CLIs, which do not use this claim. Never a card still generating or finished (`vary` makes another take). A lost response (`SENT_UNKNOWN`) is checked against results and charges before retrying |
 | Clips | `video "p" [--model] [--first ref] [--last ref] [--ref …]… [--duration 5] [--resolution 720p] [--ratio] [--no-audio] [--draft]` |
 | Continue / edit a clip | `video "what happens next" --extend <clip>` · `video "change" --edit-video <clip>` (Seedance or Gemini Omni) |
 | Text from models | `text "p" [--model a,b,c] [--ref card…] [--system "…"]` |

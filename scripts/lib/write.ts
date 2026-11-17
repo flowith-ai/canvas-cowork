@@ -6,7 +6,7 @@
  */
 
 import type { Card, FlowNodeRow } from "./desk";
-import { markHasCards } from "./desk";
+import { cardsFrom, fetchRowsById, markHasCards } from "./desk";
 import { type Api, CliError, rest, worker } from "./http";
 import {
 	CANVAS_DEFAULT_NODE_WIDTH,
@@ -94,6 +94,39 @@ export async function patch(api: Api, card: Pick<Card, "id" | "createdAt">, fiel
 		prefer: "return=representation",
 	});
 	if (!rows?.length) throw new CliError(`Card ${card.id.slice(0, 8)} couldn't be changed (gone, or not yours to edit).`, "FORBIDDEN");
+}
+
+/**
+ * Atomically claims exactly the version of a card we checked. Unlike a local lock, this also excludes other
+ * machines. Compare the entire data object: a concurrent edit must not be overwritten by our stale snapshot.
+ * The unique claim is also recoverable if the PATCH succeeds but its response is lost. No generation has been
+ * sent yet; an unconfirmed claim is left alone, never followed by a blind submit.
+ */
+export async function claimCardForRetry(api: Api, card: Card, type: string, data: Record<string, unknown>): Promise<Card> {
+	const claim = crypto.randomUUID();
+	const next = { ...data, agentRetryClaim: claim };
+	const query = [
+		`flow_node?id=eq.${card.id}`,
+		`created_at=eq.${encodeURIComponent(card.createdAt)}`,
+		`conv_id=eq.${card.row.conv_id}`,
+		`type=eq.${encodeURIComponent(card.type)}`,
+		`data=${card.row.data === null ? "is.null" : `eq.${encodeURIComponent(JSON.stringify(card.row.data))}`}`,
+		"is_delete=not.is.true",
+		"select=id,conv_id,type,p_id,position,width,height,data,created_at",
+	].join("&");
+	let rows: FlowNodeRow[];
+	try {
+		rows = await rest<FlowNodeRow[]>(api, query, { method: "PATCH", json: { type, data: next }, prefer: "return=representation" });
+	} catch (error) {
+		if (error instanceof CliError && (error.status === undefined || error.status < 500)) throw error;
+		rows = await fetchRowsById(api, [card.id]).catch(() => []);
+		// A network error does not prove that the claim failed. Only our unique claim proves we may submit.
+		rows = rows.filter((r) => r.created_at === card.createdAt && r.data && typeof r.data === "object"
+			&& r.data.agentRetryClaim === claim && r.data.status === "running");
+		if (!rows.length) throw new CliError(`Couldn't confirm the retry claim for ${card.ref}; nothing was submitted. Use \`look\`, then \`retry\` again.`, "SENT_UNKNOWN");
+	}
+	if (!rows?.length) throw new CliError(`${card.ref} changed, was removed, or couldn't be claimed for editing; nothing was submitted. Read it again before retrying.`, "BUSY");
+	return cardsFrom(rows)[0]!;
 }
 
 /** A card still generating gets its result written by the worker; changing its data now could undo that. */

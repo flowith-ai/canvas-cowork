@@ -1135,6 +1135,12 @@ async function cmdDelete(a: Args) {
 	if (dryRun) return out({ wouldDelete: chosen.map((c) => ({ ref: c.ref, kind: c.kind, title: c.title, ...(c.kind === "group" ? { withCards: cards.filter((m) => m.groupId === c.id).length } : {}) })) });
 	// A group goes with its cards, as on the canvas.
 	const ids = [...new Set(chosen.flatMap((c) => (c.kind === "group" ? [c.id, ...cards.filter((m) => m.groupId === c.id).map((m) => m.id)] : [c.id])))];
+	// A group whose every card goes would stay as an empty frame: it goes too.
+	const gone = new Set(ids);
+	for (const g of cards) {
+		const members = cards.filter((m) => m.groupId === g.id);
+		if (g.kind === "group" && !gone.has(g.id) && members.length && members.every((m) => gone.has(m.id))) ids.push(g.id);
+	}
 	await deleteCards(ctx.api, canvas.id, ids);
 	out({ deleted: ids.map((id) => id.slice(0, 8)) });
 }

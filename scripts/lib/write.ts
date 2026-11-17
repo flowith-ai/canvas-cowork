@@ -6,7 +6,7 @@
  */
 
 import type { Card, FlowNodeRow } from "./desk";
-import { markHasCards } from "./desk";
+import { cardsFrom, fetchRowsById, markHasCards } from "./desk";
 import { type Api, CliError, rest, worker } from "./http";
 import {
 	CANVAS_DEFAULT_NODE_WIDTH,
@@ -83,33 +83,61 @@ async function insert(api: Api, rows: Array<Record<string, unknown>>): Promise<F
 	});
 }
 
+/** A card's status and retry mark (`agentAttempt`, renewed by each retry) as read, or null. */
+const markOf = (data: Record<string, unknown> | undefined, key: string) => {
+	const v = data?.[key];
+	return v === undefined || v === null ? null : String(v);
+};
+
+export type PatchOutcome = "done" | "changed" | "gone" | "forbidden";
+
 /**
- * Patches rows. flow_node is partitioned by created_at, so rows are addressed by id + created_at.
- * `data` replaces the whole object: pass the merged data.
+ * Patches a card. flow_node is partitioned by created_at, so rows are addressed by id + created_at. `data` replaces the
+ * whole object, so a write of data applies only while the card's status and retry mark are as read (`asRead`, by
+ * default the card's own data): one UPDATE … WHERE, so a result, a retry or another command that came in meanwhile is
+ * never undone. With `type`, the card's type must be as read too. Says what happened: done, or why not.
  */
-export async function patch(api: Api, card: Pick<Card, "id" | "createdAt">, fields: Record<string, unknown>) {
-	const rows = await rest<Array<{ id: string }>>(api, `flow_node?id=eq.${card.id}&created_at=eq.${encodeURIComponent(card.createdAt)}&select=id`, {
-		method: "PATCH",
-		json: fields,
-		prefer: "return=representation",
-	});
-	if (!rows?.length) throw new CliError(`Card ${card.id.slice(0, 8)} couldn't be changed (gone, or not yours to edit).`, "FORBIDDEN");
+export async function tryPatch(
+	api: Api,
+	card: Pick<Card, "id" | "createdAt"> & { type?: string; data?: Record<string, unknown> },
+	fields: Record<string, unknown>,
+	opts: { asRead?: Record<string, unknown>; type?: boolean } = {},
+): Promise<PatchOutcome> {
+	const q = new URLSearchParams({ id: `eq.${card.id}`, created_at: `eq.${card.createdAt}`, is_delete: "not.is.true", select: "id" });
+	const read = opts.asRead ?? ("data" in fields ? card.data : undefined);
+	for (const key of read ? ["status", "agentAttempt"] : []) {
+		const v = markOf(read, key);
+		q.append(`data->>${key}`, v === null ? "is.null" : `eq.${v}`);
+	}
+	if (opts.type && card.type) q.set("type", `eq.${card.type}`);
+	const rows = await rest<Array<{ id: string }>>(api, `flow_node?${q}`, { method: "PATCH", json: fields, prefer: "return=representation" });
+	if (rows?.length) return "done";
+	// Nothing was changed: why, from the card as it is now.
+	const now = cardsFrom(await fetchRowsById(api, [card.id]))[0];
+	if (!now) return "gone";
+	if (read && (markOf(now.data, "status") !== markOf(read, "status") || markOf(now.data, "agentAttempt") !== markOf(read, "agentAttempt"))) return "changed";
+	if (opts.type && card.type && now.type !== card.type) return "changed";
+	return "forbidden";
+}
+
+export async function patch(
+	api: Api,
+	card: Pick<Card, "id" | "createdAt"> & { type?: string; data?: Record<string, unknown> },
+	fields: Record<string, unknown>,
+	opts: { asRead?: Record<string, unknown> } = {},
+) {
+	const outcome = await tryPatch(api, card, fields, opts);
+	const ref = card.id.slice(0, 8);
+	if (outcome === "gone") throw new CliError(`Card ${ref} is no longer on the canvas.`, "NOT_FOUND");
+	if (outcome === "changed") throw new CliError(`Card ${ref} changed while this ran (its result came in, or another command changed it): \`look\` and try again.`, "BUSY");
+	if (outcome === "forbidden") throw new CliError(`Card ${ref} couldn't be changed (not yours to edit).`, "FORBIDDEN");
 }
 
 /**
- * Changes a card only if it is still as it was read: the same type, status and retry mark (`agentAttempt`, which each
- * retry renews). One UPDATE … WHERE in Flowith's database, so when two clients (other machines, tabs) claim the same
- * card only one gets it. False when it had changed.
+ * Claims a card for a retry: changed only if its type, status and retry mark are still as read (the claim writes a new
+ * mark). When two clients (other machines) claim the same card at once, the database lets only one change it.
  */
-export async function claim(api: Api, card: Card, fields: Record<string, unknown>): Promise<boolean> {
-	const q = new URLSearchParams({ id: `eq.${card.id}`, created_at: `eq.${card.createdAt}`, type: `eq.${card.type}`, select: "id" });
-	for (const key of ["status", "agentAttempt"]) {
-		const v = card.data[key];
-		q.append(`data->>${key}`, v === undefined || v === null ? "is.null" : `eq.${typeof v === "object" ? JSON.stringify(v) : String(v)}`);
-	}
-	const rows = await rest<Array<{ id: string }>>(api, `flow_node?${q}`, { method: "PATCH", json: fields, prefer: "return=representation" });
-	return !!rows?.length;
-}
+export const claim = (api: Api, card: Card, fields: Record<string, unknown>) => tryPatch(api, card, fields, { type: true });
 
 /** A card still generating gets its result written by the worker; changing its data now could undo that. */
 export function settled(card: Card, what: string) {

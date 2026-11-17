@@ -82,6 +82,13 @@ export function releaseRetry(card: string) {
 	} catch {}
 }
 
+/** Forgets a card's send record (a send written down ahead that never went). */
+export function forgetSent(card: string) {
+	try {
+		unlinkSync(fileOf(card));
+	} catch {}
+}
+
 export function sentOf(cards: string[]): Sent[] {
 	return cards.flatMap((card) => {
 		try {

@@ -90,9 +90,9 @@ What ending it does, and what it doesn't:
 
 - **At once**: the sign-in can't be renewed or used to open another; Supabase Auth refuses its token;
   operations handed to the open canvas stop.
-- **Within 2 minutes**: this CLI stops. It asks Flowith whether the sign-in is still on when a command
-  starts and every 2 minutes while one runs (a long `wait` included), then says `NOT_LOGGED_IN` and
-  deletes the login here.
+- **Within about 2 minutes**: this CLI stops. A command asks Flowith whether the sign-in is still on
+  when it starts (unless another command did in the last 2 minutes) and every 2 minutes while it runs
+  (a long `wait` included), then says `NOT_LOGGED_IN` and deletes the login here.
 - **Not at once**: the access token already issued (it lasts up to 1 hour) is still accepted by
   Flowith's data and generation APIs until it expires. Anyone holding a copy of it could use it until
   then; nothing else of the login (no renewal) is left.

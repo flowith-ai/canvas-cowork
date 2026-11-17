@@ -78,7 +78,7 @@ exact title also works. Commands print JSON (`--json` for one line). Errors exit
 |---|---|
 | Pictures | `image "p" ["p2"…] [--model] [--ratio 16:9] [--size 2k] [--quality high] [--n 4] [--ref card\|file\|url]… [--transparent]` |
 | Change a picture | `edit <ref> "change" ["change2"…] [--model] [--ratio] [--size] [--title] [--ref more…]` (one new card per change) · `vary <ref> [--n 3]` (same prompt again; pictures, clips, text) |
-| Failed card | `retry [refs]` — runs a failed card again in place (no refs: every failed card). Never a card still generating or finished (`vary` makes another take). A card whose send got no answer (`SENT_UNKNOWN`) is sent again only once the canvas's charges show it never arrived. Two retries of one card (any machine) send it once: the other gets `BUSY` |
+| Failed card | `retry [refs]` — runs a failed card again in place (no refs: every failed card). Never a card still generating or finished (`vary` makes another take). A card whose send got no answer (`SENT_UNKNOWN`) is sent again only once the canvas's charges show it never arrived. Two `retry` commands on one card, on any machine, send it once: the other gets `BUSY`. (A retry clicked on the canvas page at that same moment isn't held off: don't retry a card the user is retrying.) |
 | Clips | `video "p" [--model] [--first ref] [--last ref] [--ref …]… [--duration 5] [--resolution 720p] [--ratio] [--no-audio] [--draft]` |
 | Continue / edit a clip | `video "what happens next" --extend <clip>` · `video "change" --edit-video <clip>` (Seedance or Gemini Omni) |
 | Text from models | `text "p" [--model a,b,c] [--ref card…] [--system "…"]` |

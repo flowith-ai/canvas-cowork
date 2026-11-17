@@ -117,12 +117,21 @@ export interface FakeOptions {
 	team?: boolean;
 	/** false: a submitted card stays generating (the worker hasn't written its result yet). */
 	finish?: boolean;
+	/** "drop": a retry's claim (a PATCH conditioned on the retry mark) is made, but its answer never comes back (504). */
+	claimAnswer?: "drop";
+	/** The user may read the canvas but not change it (row-level security): every PATCH changes nothing. */
+	readOnly?: boolean;
+}
+
+/** A filter the stand-in doesn't know fails the test instead of passing every row. */
+function unsupported(key: string, cond: string): never {
+	throw new Error(`fake PostgREST: unsupported filter ${key}=${cond}`);
 }
 
 /** Whether a row passes PostgREST filters (`col=eq.v`, `is.null`, `in.(…)`, `not.is.true`; `data->>key` reads data). */
 function passes(row: Record<string, any>, params: URLSearchParams) {
 	for (const [key, cond] of params) {
-		if (key === "select") continue;
+		if (["select", "order", "limit"].includes(key)) continue;
 		const json = /^data->>(.+)$/.exec(key);
 		const raw = json ? row.data?.[json[1]!] : row[key];
 		const value = raw === undefined || raw === null ? null : typeof raw === "object" ? JSON.stringify(raw) : String(raw);
@@ -130,7 +139,7 @@ function passes(row: Record<string, any>, params: URLSearchParams) {
 			: cond === "not.is.true" ? value === "true"
 			: cond.startsWith("eq.") ? value !== cond.slice(3)
 			: cond.startsWith("in.(") ? !cond.slice(4, -1).split(",").includes(value ?? "")
-			: true) return false;
+			: unsupported(key, cond)) return false;
 	}
 	return true;
 }
@@ -184,11 +193,7 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 				return Response.json([{ id: CONV, title: "Test canvas", updated_at: at, metadata: {}, team_id: opts.team ? "33333333-3333-4333-8333-333333333333" : null }]);
 			}
 			if (p.startsWith("/rest/v1/flow_node")) {
-				if (req.method === "GET") {
-					const only = url.searchParams.get("id");
-					const want = only?.startsWith("in.(") ? only.slice(4, -1).split(",") : undefined;
-					return Response.json(want ? rows.filter((r) => want.includes(r.id)) : rows);
-				}
+				if (req.method === "GET") return Response.json(structuredClone(rows.filter((r) => passes(r, url.searchParams))));
 				// Placed cards are kept (and read back) like the real table; a PATCH changes the card it names.
 				if (req.method === "POST") {
 					const placed = (Array.isArray(body) ? body : [body]).map((b: any) => ({ ...row(b.id, b.type ?? "2", {}), ...b, created_at: b.created_at ?? new Date().toISOString() }));
@@ -196,8 +201,10 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 					return Response.json(placed);
 				}
 				// Only the rows every filter passes are changed, in one step (as PostgreSQL's UPDATE … WHERE).
+				if (opts.readOnly) return Response.json([]);
 				const hit = rows.filter((r) => passes(r, url.searchParams));
 				for (const r of hit) Object.assign(r, structuredClone(body));
+				if (opts.claimAnswer === "drop" && url.searchParams.has("data->>agentAttempt")) return new Response("upstream timed out", { status: 504 });
 				return Response.json(hit);
 			}
 			if (p === "/user/model-usage/group-records") return Response.json({ success: true, data: usage });

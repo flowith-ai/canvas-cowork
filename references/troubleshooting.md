@@ -19,7 +19,7 @@ Errors print one JSON line `{"error": CODE, "message": …}` and exit 1.
 | `GENERATION_FAILED` / `CONTENT_POLICY` / `INVALID_INPUT` | The provider refused or failed (credits are refunded) | The card's `error` says why (`cw read <ref>`). Transient ("Workflow delivery failed", timeouts): `cw retry <ref>`. Refusals: rephrase, another reference, or another model |
 | `TIMEOUT` | The command stopped waiting | The work continues on the server: `cw wait <ref>` |
 | `SENT_UNKNOWN` (a card's `code`) | The request went out but no answer came back (network, gateway timeout): Flowith may have taken it | `cw wait <ref>`: it finishes if it was taken. `cw retry <ref>` sends it again only once the canvas's charges show it never arrived (it says when) |
-| `BUSY` | The card is still generating (or its last send may still be on its way), or another retry (another machine, a tab) ran it first | `cw wait <ref>` or `cw look`; don't send it again |
+| `BUSY` | The card is still generating (or its last send may still be on its way), or another `retry` (on another machine) ran it first, or it changed while the command ran | `cw wait <ref>` or `cw look`; don't send it again |
 | `DRY_RUN` | Internal guard: a dry run was about to change something and stopped | Report it: a preview should never reach this |
 
 Other things worth knowing:

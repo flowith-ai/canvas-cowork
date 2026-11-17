@@ -103,6 +103,8 @@ describe("retry decides on the card as it is once it holds the card (Codex's slo
 		read.release();
 		const late = await slow;
 		expect(late.json.error).toBe("BUSY");
+		// Caught by the fresh read once it held the card (the claim in Flowith would have caught it too).
+		expect(late.json.message).toContain("still generating");
 		expect(submits(f)).toHaveLength(1);
 		expect(f.usage).toHaveLength(1);
 	});
@@ -132,6 +134,80 @@ describe("retry decides on the card as it is once it holds the card (Codex's slo
 	});
 });
 
+describe("retry's claim, when it can't be made", () => {
+	const submits = (f: ReturnType<typeof fake>) => f.writes().filter((w) => w.path.startsWith("/image_gen"));
+	const sentFile = (f: ReturnType<typeof fake>, id: string) => join(f.home, "sent", `${id}.json`);
+
+	test("a claim whose answer is lost leaves the card to be sent once it clearly never went", async () => {
+		const f = fake({ claimAnswer: "drop", finish: false });
+		const r = await f.run("retry", ref(ids.failed), "--no-wait");
+		expect(r.json.error).toBe("SENT_UNKNOWN");
+		expect(submits(f)).toHaveLength(0);
+		expect(f.rows.find((x) => x.id === ids.failed)!.data.status).toBe("running");
+		const sent = JSON.parse(readFileSync(sentFile(f, ids.failed), "utf8"));
+		expect(sent.answer).toBe("lost");
+		// Right away it may still be on its way; once that time has passed with no charge, it goes (once).
+		f.opts.claimAnswer = undefined;
+		expect((await f.run("retry", ref(ids.failed), "--no-wait")).json.error).toBe("BUSY");
+		writeFileSync(sentFile(f, ids.failed), JSON.stringify({ ...sent, from: sent.from - 3_600_000, to: sent.to - 3_600_000 }));
+		expect((await f.run("retry", ref(ids.failed), "--no-wait")).code).toBe(0);
+		expect(submits(f)).toHaveLength(1);
+	});
+	test("a canvas the user can't edit says so (not that another retry ran it)", async () => {
+		const f = fake({ readOnly: true });
+		const r = await f.run("retry", ref(ids.failed), "--no-wait");
+		expect(r.json.error).toBe("FORBIDDEN");
+		expect(submits(f)).toHaveLength(0);
+		expect(existsSync(sentFile(f, ids.failed))).toBe(false);
+	});
+	test("a card deleted just before the claim isn't sent (or charged)", async () => {
+		const f = fake();
+		const read = f.hold((m, u) => m === "GET" && !!u.searchParams.get("id")?.startsWith("in.("));
+		const run = f.run("retry", ref(ids.failed), "--no-wait");
+		await read.arrived;
+		(f.rows.find((x) => x.id === ids.failed) as any).is_delete = true;
+		read.release();
+		const r = await run;
+		expect(r.json.error).toBe("BUSY");
+		expect(r.json.message).toContain("no longer on the canvas");
+		expect(submits(f)).toHaveLength(0);
+	});
+	test("a refused send marks its card only while it is still its own: another machine's claim is never undone", async () => {
+		const f = fake({ submit: { status: 402, body: { error: "insufficient credits", reason: "insufficient_effective_balance" } } });
+		const submit = f.hold((m, u) => m === "POST" && u.pathname === "/image_gen/async");
+		const run = f.run("retry", ref(ids.failed), "--no-wait");
+		await submit.arrived;
+		const card = f.rows.find((x) => x.id === ids.failed)!;
+		card.data = { ...card.data, status: "running", agentAttempt: "other-machine" };
+		submit.release();
+		await run;
+		expect(card.data.agentAttempt).toBe("other-machine");
+		expect(card.data.status).toBe("running");
+		expect(card.type).toBe("2");
+	});
+	test("a refused retry still turns its card into the canvas's credits card", async () => {
+		const f = fake({ submit: { status: 402, body: { error: "insufficient credits", reason: "insufficient_effective_balance" } } });
+		await f.run("retry", ref(ids.failed), "--no-wait");
+		expect(f.rows.find((x) => x.id === ids.failed)!.type).toBe("22");
+	});
+	test("in a batch, a card that changed meanwhile is left out and the others still go", async () => {
+		const f = fake({ finish: false });
+		const second = "a7000000-0000-4000-8000-000000000008";
+		const failedRow = f.rows.find((x) => x.id === ids.failed)!;
+		f.rows.push({ ...structuredClone(failedRow), id: second, position: { x: 3000, y: 0 }, data: { ...structuredClone(failedRow.data), title: "Failed 2" } });
+		const read = f.hold((m, u) => m === "GET" && u.searchParams.has("conv_id"));
+		const run = f.run("retry", "--no-wait");
+		await read.arrived;
+		// Run elsewhere while this command's read of the canvas was on its way.
+		f.rows.find((x) => x.id === second)!.data.status = "running";
+		read.release();
+		const r = await run;
+		expect(r.code).toBe(0);
+		expect(submits(f).map((w) => (w.body as any).nodeId)).toEqual([ids.failed]);
+		expect(JSON.stringify(r.json.notRetried)).toContain(ref(second));
+	});
+});
+
 describe("a long command keeps checking the sign-in", () => {
 	test("a Disconnect during `wait` stops it within the check interval", async () => {
 		const f = fake();
@@ -142,6 +218,18 @@ describe("a long command keeps checking the sign-in", () => {
 		const r = await waiting;
 		expect(r.json.error).toBe("NOT_LOGGED_IN");
 		expect(Date.now() - started).toBeLessThan(15_000);
+	}, 20_000);
+	test("a login to another account made meanwhile in another terminal stops it, never carried on as that account", async () => {
+		const f = fake();
+		const waiting = f.runWith({ env: { FLOWITH_SIGNIN_CHECK_MS: "300" } }, "wait", ref(ids.running), "--timeout", "30");
+		await Bun.sleep(1_500);
+		const file = join(f.home, "canvas-session.json");
+		const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
+		const other = `${b64({ alg: "HS256" })}.${b64({ sub: "99999999-9999-4999-8999-999999999999", exp: Math.floor(Date.now() / 1000) + 3600, session_id: "s-2" })}.sig`;
+		writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), accessToken: other, refreshToken: "r9" }));
+		const r = await waiting;
+		expect(r.json.error).toBe("NOT_LOGGED_IN");
+		expect(r.json.message).toContain("changed while this command ran");
 	}, 20_000);
 });
 

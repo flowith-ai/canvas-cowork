@@ -56,7 +56,7 @@ import {
 	waitFor,
 } from "./lib/generate";
 import { type Api, CliError, forbidWrites, serverNow, sleep, worker } from "./lib/http";
-import { type Sent, SETTLE_MS, chargeOf, chargedSince, claimRetry, creditsOf, noteSent, releaseRetry, sentOf, usageOf } from "./lib/ledger";
+import { type Sent, SETTLE_MS, chargeOf, chargedSince, claimRetry, creditsOf, forgetSent, noteSent, releaseRetry, sentOf, usageOf } from "./lib/ledger";
 import { download, fileFor, isUrl, mediaOf, toUrl } from "./lib/media";
 import {
 	type Session,
@@ -908,25 +908,28 @@ async function cmdRetry(a: Args) {
 	if (named.length && skipped.length)
 		throw new CliError(`${skipped.join(", ")} weren't made by this CLI's generation, so their request isn't on the card. Use \`vary\` or make them again.`, "INVALID_PARAM");
 	if (!chosen.length) return out({ canvas: canvas.id, note: skipped.length ? `Nothing to retry here (${skipped.join(", ")} weren't made by this CLI).` : "Nothing failed." });
-	/** Throws unless every card may run again, as read now (its send record read now too). */
-	const mayRun = async (list: Card[]) => {
-		const records = list.some((c) => !failed(c)) ? await usageOf(ctx.api, canvas.id) : [];
-		for (const card of list) {
-			if (failed(card)) continue;
-			if (card.status === "finished") throw new CliError(`${card.ref} is finished; \`vary ${card.ref}\` makes another take beside it.`, "INVALID_PARAM");
-			const sent = sentOf([card.id])[0];
-			const kind = requestOf(card)!.kind!;
-			if (sent?.answer !== "lost") throw new CliError(`${card.ref} is still generating: \`wait ${card.ref}\`.`, "BUSY");
-			if (canvas.team)
-				throw new CliError(`No answer came back for ${card.ref}, and on a team canvas the team's charges can't be read to tell whether it arrived, so it isn't sent again. \`wait ${card.ref}\`; if it never finishes, delete it and make it again.`, "BUSY");
-			if (chargedSince(sent, records, serverNow()))
-				throw new CliError(`${card.ref} did reach Flowith (a ${sent.model} charge began on this canvas after it was sent): \`wait ${card.ref}\` for the result.`, "BUSY");
-			const left = sent.to + SETTLE_MS[kind] - serverNow();
-			if (left > 0)
-				throw new CliError(`No charge for ${card.ref} so far, but it may still be on its way. \`wait ${card.ref}\`; if it is still generating in ${Math.ceil(left / 60_000)} min, retry then.`, "BUSY");
-		}
+	/** Why a card may not run again now, as read (its send record read now too); undefined when it may. */
+	const whyNot = (card: Card, records: Awaited<ReturnType<typeof usageOf>>): CliError | undefined => {
+		const req = requestOf(card);
+		if (!req?.kind || !req.body) return new CliError(`${card.ref}'s request is no longer on the card.`, "INVALID_PARAM");
+		if (failed(card)) return;
+		if (card.status === "finished") return new CliError(`${card.ref} is finished; \`vary ${card.ref}\` makes another take beside it.`, "INVALID_PARAM");
+		const sent = sentOf([card.id])[0];
+		if (sent?.answer !== "lost") return new CliError(`${card.ref} is still generating: \`wait ${card.ref}\`.`, "BUSY");
+		if (canvas.team)
+			return new CliError(`No answer came back for ${card.ref}, and on a team canvas the team's charges can't be read to tell whether it arrived, so it isn't sent again. \`wait ${card.ref}\`; if it never finishes, delete it and make it again.`, "BUSY");
+		if (chargedSince(sent, records, serverNow()))
+			return new CliError(`${card.ref} did reach Flowith (a ${sent.model} charge began on this canvas after it was sent): \`wait ${card.ref}\` for the result.`, "BUSY");
+		const left = sent.to + SETTLE_MS[req.kind] - serverNow();
+		if (left > 0)
+			return new CliError(`No charge for ${card.ref} so far, but it may still be on its way. \`wait ${card.ref}\`; if it is still generating in ${Math.ceil(left / 60_000)} min, retry then.`, "BUSY");
 	};
-	await mayRun(chosen);
+	const chargesFor = (list: Card[]) => (list.some((c) => !failed(c)) ? usageOf(ctx.api, canvas.id) : Promise.resolve([]));
+	const first = await chargesFor(chosen);
+	for (const card of chosen) {
+		const why = whyNot(card, first);
+		if (why) throw why;
+	}
 	if (dryRun) return out({ retry: chosen.map((c) => ({ ref: c.ref, kind: requestOf(c)!.kind, model: requestOf(c)!.body!.model })), ...(skipped.length ? { skipped } : {}) });
 	// Two retries of one card on this machine: the second finds it held.
 	const claimed: string[] = [];
@@ -937,14 +940,20 @@ async function cmdRetry(a: Args) {
 	}
 	const ids: string[] = [];
 	const lost: string[] = [];
-	const changed: string[] = [];
+	/** Cards not sent, each with why: they changed between the first read and now. */
+	const notSent: string[] = [];
 	try {
-		// The first read may be stale by now: decide again on the cards as they are, and their send records as they are.
+		// The first read may be stale by now (another retry may have run these cards meanwhile): each card is decided
+		// again on a fresh read, with its send record as it is now; one that changed is left out, the rest still go.
 		const fresh = cardsFrom(await fetchRowsById(ctx.api, chosen.map((c) => c.id)));
-		const gone = chosen.filter((c) => !fresh.some((f) => f.id === c.id)).map((c) => c.ref);
-		if (gone.length) throw new CliError(`${gone.join(", ")} is no longer on the canvas.`, "NOT_FOUND");
-		await mayRun(fresh);
+		for (const c of chosen) if (!fresh.some((f) => f.id === c.id)) notSent.push(`${c.ref}: no longer on the canvas`);
+		const records = await chargesFor(fresh);
 		for (const card of fresh) {
+			const why = whyNot(card, records);
+			if (why) {
+				notSent.push(why.message);
+				continue;
+			}
 			const req = requestOf(card)!;
 			const {
 				error: _e, error_type: _t, error_code: _c, request_id: _r,
@@ -955,8 +964,26 @@ async function cmdRetry(a: Args) {
 			const data = { ...rest, value: "", status: "running", agentAttempt: crypto.randomUUID(), ...(req.kind === "video" ? { videoId: null } : {}) };
 			// A refusal may have turned it into the canvas's credits or upgrade card: back to the card it was.
 			const type = card.type === "22" || card.type === "25" ? (req.kind === "video" ? "13" : "2") : card.type;
-			if (!(await claim(ctx.api, card, { ...(type !== card.type ? { type } : {}), data }))) {
-				changed.push(card.ref);
+			// Written down before the claim: if the claim's answer is lost, the card (claimed, nothing sent yet) reads as
+			// possibly sent, and is sent again only once it clearly never went. Put back when the claim surely didn't happen.
+			const before = sentOf([card.id])[0];
+			const putBack = () => (before ? noteSent(before) : forgetSent(card.id));
+			const at = serverNow();
+			noteSent({ card: card.id, conv: canvas.id, model: String(req.body!.model), kind: req.kind!, from: at, to: at, answer: "lost" });
+			let outcome;
+			try {
+				outcome = await claim(ctx.api, card, { ...(type !== card.type ? { type } : {}), data });
+			} catch (e) {
+				if (e instanceof CliError && e.status !== undefined && e.status < 500) {
+					putBack();
+					throw e;
+				}
+				throw new CliError(`No answer came back while claiming ${card.ref} (${e instanceof Error ? e.message : String(e)}), so it may be claimed with nothing sent. \`wait ${card.ref}\`; \`retry ${card.ref}\` sends it once it clearly never went.`, "SENT_UNKNOWN");
+			}
+			if (outcome !== "done") {
+				putBack();
+				if (outcome === "forbidden") throw new CliError(`${card.ref} couldn't be changed: it isn't yours to edit on this canvas.`, "FORBIDDEN");
+				notSent.push(`${card.ref}: ${outcome === "gone" ? "no longer on the canvas" : "changed since it was read (another retry, on another machine, ran it first; or its result came in)"}`);
 				continue;
 			}
 			const body = {
@@ -972,9 +999,8 @@ async function cmdRetry(a: Args) {
 	} finally {
 		claimed.forEach(releaseRetry);
 	}
-	const why = `changed since it was read (another retry, on another machine or in Flowith, ran it first; or its result came in)`;
-	if (!ids.length) throw new CliError(`${changed.join(", ")} ${why}, so nothing was sent: \`look\` or \`wait ${changed[0]}\`.`, "BUSY");
-	await waitAndReport(ctx, a, canvas.id, ids, chosen.some((c) => c.kind === "video") ? 900 : 300, changed.length ? { notRetried: changed, note: `${changed.join(", ")} ${why}; not sent.` } : {}, lost);
+	if (!ids.length) throw new CliError(`Nothing was sent. ${notSent.join(" ")}`, "BUSY");
+	await waitAndReport(ctx, a, canvas.id, ids, chosen.some((c) => c.kind === "video") ? 900 : 300, notSent.length ? { notRetried: notSent } : {}, lost);
 }
 
 async function cmdSpent(a: Args) {

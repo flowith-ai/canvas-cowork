@@ -10,6 +10,8 @@ import { home } from "./session";
 
 export type Kind = "text" | "image" | "video" | "audio";
 
+import { listPrice } from "./video-cost";
+
 export interface Model {
 	media?: string;
 	tier?: string;
@@ -214,13 +216,7 @@ export function estimateCredits(
 		}
 		return m.estimatedPrice ?? (m.price?.completion ? m.price.completion / 1000 : undefined);
 	}
-	if (m.media === "video") {
-		const seconds = Number(p.duration);
-		const perSec = (p.resolution && m.pricePerSecondByResolution?.[p.resolution]) || m.pricePerSecond;
-		const rate = perSec ? (p.audio === false ? perSec.audioOff : perSec.audioOn) ?? perSec.audioOn : undefined;
-		if (rate && seconds > 0) return Math.round((rate / 1000) * seconds);
-		return m.estimatedPricePer5s ? Math.round(m.estimatedPricePer5s) : undefined;
-	}
+	// Clips: estimateVideoCredits (lib/video-cost.ts), which needs the request's own settings.
 	if (m.media === "tool" && m.audioPricing) {
 		if (m.audioPricing.per === "1k_chars" && p.chars) return Math.ceil((m.audioPricing.credits * p.chars) / 1000);
 		return m.audioPricing.credits;
@@ -249,8 +245,9 @@ export function modelLine(id: string, m: Model): string {
 		const l = m.referenceAssetLimits;
 		if (l) flags.push(`refs ${l.image} img/${l.video} video/${l.audio} audio`);
 		if (m.supportsDraft) flags.push("draft");
-		const c = estimateCredits(m, { duration: "5", resolution: "720p" });
-		if (c !== undefined) flags.push(`~${c} cr/5s`);
+		// The listed price (the size it is quoted at); `video … --dry-run` asks the worker for a request's own.
+		const p = listPrice(m);
+		if (p) flags.push(`~${p.credits} cr/5s${p.at ? ` ${p.at}` : ""}`);
 	} else if (m.media === "tool") {
 		if (m.audioPricing) flags.push(`${m.audioPricing.credits} cr/${m.audioPricing.per === "1k_chars" ? "1k chars" : "song"}`);
 	} else {

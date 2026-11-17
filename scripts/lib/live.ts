@@ -7,7 +7,7 @@
  * when the user allowed it at `login`, so nothing on the public topic can be read or forged.
  */
 
-import { type Api, CliError } from "./http";
+import { type Api, CliError, guardWrite } from "./http";
 import { Realtime, openWith, sealWith } from "./realtime";
 
 export interface CanvasResult {
@@ -28,6 +28,7 @@ export async function runOnCanvas(
 	input: Record<string, unknown>,
 	opts: { timeoutMs: number; canvasUrl: string; onAccepted?: () => void },
 ): Promise<CanvasResult> {
+	guardWrite("SEND", `canvas operation ${operation}`);
 	if (!agent.sessionId || !agent.key)
 		throw new CliError("This login predates canvas operations. Run `login` again (once) to let the open canvas take them.", "NOT_LOGGED_IN");
 	const rt = new Realtime(api.supabaseUrl, api.supabaseKey, api.accessToken);

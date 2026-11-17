@@ -61,6 +61,8 @@ export interface CanvasInfo {
 	title: string | null;
 	updated_at: string;
 	metadata?: Record<string, unknown> | null;
+	/** A team canvas: what is made there is charged to the team's payer. */
+	team_id?: string | null;
 }
 
 const NODE_COLUMNS = "id,conv_id,type,p_id,position,width,height,data,created_at,prompt";
@@ -272,7 +274,7 @@ export async function listCanvases(api: Api, userId: string, query?: string, lim
 export async function getCanvas(api: Api, convId: string): Promise<CanvasInfo> {
 	const rows = await rest<CanvasInfo[]>(
 		api,
-		`conversation?select=id,title,updated_at,metadata&id=eq.${convId}&is_delete=not.is.true&limit=1`,
+		`conversation?select=id,title,updated_at,metadata,team_id&id=eq.${convId}&is_delete=not.is.true&limit=1`,
 	);
 	if (!rows[0]) throw new CliError(`Canvas ${convId} not found or not yours to open.`, "NOT_FOUND");
 	return rows[0];

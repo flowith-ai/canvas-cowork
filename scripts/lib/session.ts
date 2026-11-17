@@ -29,6 +29,8 @@ export interface Session {
 	/** The browser's name for this connection, and the key it gave it for canvas operations (lib/live.ts). */
 	botSessionId?: string;
 	agentKey?: string;
+	/** When Supabase last confirmed this sign-in is still on (a Disconnect in Flowith ends it). */
+	checkedAt?: number;
 	savedAt: string;
 }
 
@@ -68,7 +70,60 @@ export function forgetSession() {
 	} catch {}
 }
 
-export function jwtClaims(jwt: string): { sub?: string; exp?: number; email?: string } {
+/** The previous canvas-cowork's login (bot-session.json): a copy of the browser's own session, never renewed here. */
+const oldLoginFile = () => join(home(), "bot-session.json");
+
+/** Deletes the previous canvas-cowork's login file, if any (it shares the browser's sign-in, so it is not signed out). */
+export function forgetOldLogin(): boolean {
+	if (!existsSync(oldLoginFile())) return false;
+	try {
+		unlinkSync(oldLoginFile());
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Ends this CLI's sign-in and forgets it here. The worker ends it (/user/agent-session/end) only if it is an agent
+ * sign-in issued to this user, so a login an older page made from the browser's own session is never signed out (that
+ * would sign the browser out); such a login is only forgotten here. When Flowith can't be reached, nothing is
+ * forgotten: run `logout` again, or Disconnect the agent in Flowith.
+ */
+export async function logout(): Promise<{ ended: boolean; note?: string }> {
+	if (!loadSession()) return { ended: false, note: "Not logged in here." };
+	let s: Session;
+	try {
+		s = await activeSession();
+	} catch (e) {
+		// Supabase said it was ended already (Disconnect in Flowith); anything else (offline, an error) leaves it be.
+		if (e instanceof CliError && (e.data as { ended?: boolean } | undefined)?.ended) {
+			forgetSession();
+			return { ended: true };
+		}
+		return { ended: false, note: "Couldn't reach Flowith to end this sign-in; nothing was forgotten. Run `logout` again, or Disconnect the agent in Flowith." };
+	}
+	const sessionId = jwtClaims(s.accessToken).session_id;
+	const resp = await fetch(`${s.workerURL}/user/agent-session/end`, {
+		method: "POST",
+		headers: { Authorization: s.accessToken, "Content-Type": "application/json" },
+		body: JSON.stringify({ sessionIds: [sessionId] }),
+		signal: AbortSignal.timeout(15_000),
+	}).catch(() => null);
+	const body = resp?.ok ? ((await resp.json().catch(() => ({}))) as { ended?: string[] }) : undefined;
+	if (!body) return { ended: false, note: "Couldn't reach Flowith to end this sign-in; nothing was forgotten. Run `logout` again, or Disconnect the agent in Flowith." };
+	forgetSession();
+	return body.ended?.includes(String(sessionId))
+		? { ended: true }
+		: { ended: false, note: "Flowith doesn't know this login as an agent sign-in (an older page gave the browser's own); it was only forgotten here. Signing out of Flowith in that browser ends it." };
+}
+
+/** The worker a site's pages use: production talks to edge, the beta and previews to the dev worker. */
+export function workerFor(site: string): string {
+	return /^https:\/\/(www\.)?flowith\.io$/.test(siteUrl(site)) ? "https://edge.flowith.io" : "https://dev-edge.flowith.io";
+}
+
+export function jwtClaims(jwt: string): { sub?: string; exp?: number; email?: string; session_id?: string } {
 	try {
 		return JSON.parse(Buffer.from(jwt.split(".")[1] ?? "", "base64url").toString("utf8"));
 	} catch {
@@ -87,7 +142,7 @@ export async function activeSession(opts: { force?: boolean } = {}): Promise<Ses
 	if (process.env.FLOWITH_URL && s.site !== siteUrl())
 		throw new CliError(`Logged in to ${s.site}, but FLOWITH_URL is ${siteUrl()}. Run \`login\` again.`, "NOT_LOGGED_IN");
 	const exp = (jwtClaims(s.accessToken).exp ?? 0) * 1000;
-	if (!opts.force && exp - Date.now() > REFRESH_AHEAD_MS) return s;
+	if (!opts.force && exp - Date.now() > REFRESH_AHEAD_MS) return confirmed(s);
 	if (!s.refreshToken) {
 		if (exp > Date.now()) return s;
 		throw new CliError("Session expired. Run `login` again.", "NOT_LOGGED_IN");
@@ -107,13 +162,40 @@ export async function activeSession(opts: { force?: boolean } = {}): Promise<Ses
 		if (resp && (resp.status === 400 || resp.status === 401) && /invalid|revoked|not found|already used/i.test(`${body.error} ${body.error_description}`)) {
 			delete s.refreshToken;
 			saveSession(s);
-			throw new CliError(`The login was revoked (${body.error_description ?? body.error}). Run \`login\` again.`, "NOT_LOGGED_IN");
+			throw new CliError(`The login was revoked (${body.error_description ?? body.error}). Run \`login\` again.`, "NOT_LOGGED_IN", { ended: true });
 		}
 		if (exp > Date.now()) return s;
 		throw new CliError(`Couldn't renew the session (${body.error_description ?? resp?.status ?? "network error"}). Try again, or run \`login\`.`, "NOT_LOGGED_IN");
 	}
 	const latest = loadSession() ?? s;
-	const next: Session = { ...latest, accessToken: body.access_token, ...(body.refresh_token ? { refreshToken: body.refresh_token } : {}), savedAt: new Date().toISOString() };
+	const next: Session = { ...latest, accessToken: body.access_token, ...(body.refresh_token ? { refreshToken: body.refresh_token } : {}), checkedAt: Date.now(), savedAt: new Date().toISOString() };
+	saveSession(next);
+	return next;
+}
+
+/** How often a command asks Supabase whether the sign-in is still on, between renewals. */
+const CHECK_EVERY_MS = 2 * 60_000;
+
+/**
+ * The session, once Supabase has confirmed in the last two minutes that it is still on: a Disconnect in Flowith (or
+ * `logout` elsewhere) ends it at once there, while its access token would otherwise keep working until it expires.
+ */
+async function confirmed(s: Session): Promise<Session> {
+	if (!s.refreshToken || Date.now() - (s.checkedAt ?? 0) < CHECK_EVERY_MS) return s;
+	const resp = await fetch(`${s.supabaseUrl}/auth/v1/user`, {
+		headers: { apikey: s.supabaseKey, Authorization: `Bearer ${s.accessToken}` },
+		signal: AbortSignal.timeout(10_000),
+	}).catch(() => null);
+	// Only a definite "no such session" ends it here; a network blip is checked again next time.
+	if (resp && (resp.status === 401 || resp.status === 403)) {
+		forgetSession();
+		throw new CliError("This sign-in was ended (Disconnected in Flowith, or `logout`). Run `login` again.", "NOT_LOGGED_IN", { ended: true });
+	}
+	if (!resp?.ok) return s;
+	// Saved over what is on disk only if no other command renewed it meanwhile (its newer tokens must not be lost).
+	const latest = loadSession();
+	if (latest && latest.accessToken !== s.accessToken) return latest;
+	const next = { ...s, checkedAt: Date.now() };
 	saveSession(next);
 	return next;
 }

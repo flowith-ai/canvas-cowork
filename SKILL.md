@@ -54,12 +54,17 @@ exact title also works. Commands print JSON (`--json` for one line). Errors exit
 4. **Keep the canvas tidy.** Related work goes together (`--near`, `--group "name"`, `--into <group>`);
    give every card a short `--title` (≤ 12 字 / 5 words) — it is what the user reads on the canvas.
    Never delete or rewrite the user's own cards unless asked.
-5. **Mind credits** (1 credit = $0.001; `cw credits`). Every result reports `estimatedCredits` and,
-   once done, `chargedCredits` (what the canvas actually billed, refunds included); `cw spent` totals a
-   canvas. `--dry-run` prices a request without sending it. Ask the user before anything over ~1,000 credits
-   (a batch of videos, 1080p/long clips, Kling 4.0, Wan). Test video ideas cheaply first (Muse Video,
-   480p, 4–5 s), then make the final. `NO_CREDITS` / `MODEL_LOCKED`: stop and tell the user
-   (top up at https://flowith.io/pricing); don't silently switch models.
+5. **Mind credits** (1 credit = $0.001; `cw credits`). `--dry-run` shows a request and its
+   `estimatedCredits` without sending anything (commands that only change the canvas have no dry run and
+   say so). Ask the user before anything over ~1,000 credits (a batch of videos, 1080p/long clips, Kling
+   4.0, Wan) **and whenever `estimatedCredits` is `null`** (priced only when made: a source clip of
+   unknown length, Gemini Omni editing a clip). A clip's estimate is the worker's own price for that
+   very request (what it holds, at the user's member rate); a picture's comes from the catalogue. Once done, picture and clip results report `chargedCredits`: the canvas's own charge for
+   that request, refunds included; `null` with a `chargedNote` when it can't be tied to the request (text
+   is billed when its answer finishes; something else ran the same model on the canvas at that moment).
+   `cw spent` totals everything charged on a canvas. Test video ideas cheaply first (Muse Video, 480p,
+   4–5 s). `NO_CREDITS` / `MODEL_LOCKED`: stop and tell the user (top up at https://flowith.io/pricing);
+   don't silently switch models.
 6. **Videos take 1–8 minutes.** Run video commands with a long shell timeout (≥ 600 s) or in the
    background, or pass `--no-wait` and later `cw wait <ref>`. A generation keeps running on the server
    even if your command stops; `cw wait` / `cw look` pick it up.
@@ -73,7 +78,7 @@ exact title also works. Commands print JSON (`--json` for one line). Errors exit
 |---|---|
 | Pictures | `image "p" ["p2"…] [--model] [--ratio 16:9] [--size 2k] [--quality high] [--n 4] [--ref card\|file\|url]… [--transparent]` |
 | Change a picture | `edit <ref> "change" ["change2"…] [--model] [--ratio] [--size] [--title] [--ref more…]` (one new card per change) · `vary <ref> [--n 3]` (same prompt again; pictures, clips, text) |
-| Failed card | `retry [refs]` — runs it again in place (no refs: every failed card on the canvas) |
+| Failed card | `retry [refs]` — runs a failed card again in place (no refs: every failed card). Never a card still generating or finished (`vary` makes another take). A card whose send got no answer (`SENT_UNKNOWN`) is sent again only once the canvas's charges show it never arrived |
 | Clips | `video "p" [--model] [--first ref] [--last ref] [--ref …]… [--duration 5] [--resolution 720p] [--ratio] [--no-audio] [--draft]` |
 | Continue / edit a clip | `video "what happens next" --extend <clip>` · `video "change" --edit-video <clip>` (Seedance or Gemini Omni) |
 | Text from models | `text "p" [--model a,b,c] [--ref card…] [--system "…"]` |

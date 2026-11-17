@@ -78,15 +78,40 @@ export async function httpFailure(resp: Response, what: string): Promise<CliErro
 	);
 }
 
+// ---------- dry runs ----------
+
+let dryRun = false;
+
+/** --dry-run: from here on any request that would change something throws instead of being sent. */
+export function forbidWrites() {
+	dryRun = true;
+}
+
+/** Every write passes here first (requests, and canvas operations sent to the open canvas): in a dry run it never leaves the machine. */
+export function guardWrite(method: string, what: string) {
+	if (dryRun && method !== "GET") throw new CliError(`Dry run: ${method} ${what} would change the canvas and was not sent.`, "DRY_RUN");
+}
+
+/** Server time minus this machine's, from the last answer's Date header (usage records carry server time). */
+let serverOffsetMs = 0;
+export const serverNow = () => Date.now() + serverOffsetMs;
+function noteServerTime(resp: Response) {
+	const date = Date.parse(resp.headers.get("date") ?? "");
+	if (Number.isFinite(date)) serverOffsetMs = date + 500 - Date.now();
+}
+
 export interface WorkerInit {
 	method?: string;
 	json?: unknown;
 	body?: FormData | string;
 	timeoutMs?: number;
+	/** A POST that only asks (a price): allowed in a dry run. */
+	read?: boolean;
 }
 
 export async function worker<T = unknown>(api: Api, path: string, init: WorkerInit = {}): Promise<T> {
 	const method = init.method ?? (init.json !== undefined || init.body ? "POST" : "GET");
+	if (!init.read) guardWrite(method, path.split("?")[0]!);
 	const send = () =>
 		fetch(`${api.workerURL.replace(/\/$/, "")}${path}`, {
 			method,
@@ -103,6 +128,7 @@ export async function worker<T = unknown>(api: Api, path: string, init: WorkerIn
 		await api.renew();
 		resp = await send();
 	}
+	noteServerTime(resp);
 	if (!resp.ok) throw await httpFailure(resp, `${method} ${path.split("?")[0]}`);
 	return (await parseBody(resp)) as T;
 }
@@ -117,6 +143,7 @@ export interface RestInit {
 /** PostgREST: `query` is what follows /rest/v1/, e.g. `flow_node?id=eq.<uuid>&select=id,data`. */
 export async function rest<T = unknown>(api: Api, query: string, init: RestInit = {}): Promise<T> {
 	const method = init.method ?? (init.json !== undefined ? "POST" : "GET");
+	guardWrite(method, query.split("?")[0]!);
 	const send = () =>
 		fetch(`${api.supabaseUrl.replace(/\/$/, "")}/rest/v1/${query}`, {
 			method,
@@ -135,6 +162,7 @@ export async function rest<T = unknown>(api: Api, query: string, init: RestInit 
 		await api.renew();
 		resp = await send();
 	}
+	noteServerTime(resp);
 	if (!resp.ok) throw await httpFailure(resp, `${method} ${query.split("?")[0]}`);
 	return (await parseBody(resp)) as T;
 }

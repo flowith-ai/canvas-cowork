@@ -54,10 +54,6 @@ describe("models", () => {
 		expect(estimateCredits(m, { size: "1k" })).toBe(12);
 		expect(estimateCredits({ ...m, launchCampaignUntil: "2000-01-01T00:00:00Z" })).toBe(35);
 	});
-	test("credit estimates", () => {
-		expect(estimateCredits(catalog["seedance-2.5-flash"]!, { duration: "5" })).toBe(404);
-		expect(estimateCredits(catalog["seedance-2.5-flash"]!, { duration: "10" })).toBe(807);
-	});
 });
 
 describe("reference naming", () => {
@@ -183,5 +179,15 @@ describe("layout helpers", () => {
 		png.writeUInt32BE(1920, 16);
 		png.writeUInt32BE(1080, 20);
 		expect(imageSize(png)).toEqual({ width: 1920, height: 1080 });
+	});
+});
+
+describe("listed clip prices (`models`)", () => {
+	const { catalog } = require("./fake-flowith") as typeof import("./fake-flowith");
+	const { listPrice } = require("../lib/video-cost") as typeof import("../lib/video-cost");
+	test("say the size they are quoted at; a request's own price comes from the worker", () => {
+		expect(listPrice(catalog["seedance-2.5"] as never)).toEqual({ credits: 622, at: "480p" });
+		expect(listPrice(catalog["kling-video/v4"] as never)).toEqual({ credits: 1021, at: "720p" });
+		expect(listPrice(catalog["muse-video"] as never)).toEqual({ credits: 15 });
 	});
 });

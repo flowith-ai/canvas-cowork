@@ -55,24 +55,30 @@ import {
 	videoRequest,
 	waitFor,
 } from "./lib/generate";
-import { type Api, CliError, sleep, worker } from "./lib/http";
+import { type Api, CliError, forbidWrites, serverNow, sleep, worker } from "./lib/http";
+import { type Sent, SETTLE_MS, chargeOf, chargedSince, creditsOf, noteSent, sentOf, usageOf } from "./lib/ledger";
 import { download, fileFor, isUrl, mediaOf, toUrl } from "./lib/media";
 import {
 	type Session,
 	activeSession,
 	apiOf,
-	forgetSession,
+	forgetOldLogin,
 	jwtClaims,
 	login,
+	logout,
+	siteUrl,
+	workerFor,
 	openUrl,
 	saveSession,
 	userIdOf,
 } from "./lib/session";
 import { cutout, expand, makeSound, upscaleImage, upscaleVideo } from "./lib/tools";
+import { videoPrice } from "./lib/video-cost";
 import { runOnCanvas } from "./lib/live";
 import {
 	type Layout,
 	type NewCard,
+	type Placed,
 	arrangePoints,
 	cardSize,
 	deleteCards,
@@ -140,8 +146,6 @@ let quiet = false;
 let jsonOut = false;
 /** --dry-run: nothing is created, uploaded, sent or charged. */
 let dryRun = false;
-/** When this command started: what the canvas was charged from here on is this command's. */
-const STARTED = Date.now();
 const log = (m: string) => {
 	if (!quiet) process.stderr.write(`${m}\n`);
 };
@@ -175,16 +179,17 @@ async function context(a: Args): Promise<Ctx> {
 }
 
 /** The canvas a command works on: --canvas, $FLOWITH_CANVAS, or the active one. */
-async function canvasOf(ctx: Ctx, a: Args, opts: { create?: string } = {}): Promise<{ id: string; title: string | null; created?: boolean }> {
+async function canvasOf(ctx: Ctx, a: Args, opts: { create?: string } = {}): Promise<{ id: string; title: string | null; created?: boolean; team?: boolean }> {
 	const ref = flag(a, "canvas") ?? process.env.FLOWITH_CANVAS;
 	if (ref) {
-		const c = await resolveCanvas(ctx.api, ctx.userId, ref);
-		return { id: c.id, title: c.title };
+		const found = await resolveCanvas(ctx.api, ctx.userId, ref);
+		const c = found.team_id === undefined ? await getCanvas(ctx.api, found.id) : found;
+		return { id: c.id, title: c.title, team: !!c.team_id };
 	}
 	if (ctx.session.canvas) {
 		try {
 			const c = await getCanvas(ctx.api, ctx.session.canvas);
-			return { id: c.id, title: c.title };
+			return { id: c.id, title: c.title, team: !!c.team_id };
 		} catch (e) {
 			if (!(e instanceof CliError && e.code === "NOT_FOUND")) throw e;
 		}
@@ -208,6 +213,8 @@ async function catalogOf(ctx: Ctx, fresh = false): Promise<Catalog> {
 async function toRef(ctx: Ctx, convId: string, cards: Card[], input: string, dry = false): Promise<Ref> {
 	if (!isUrl(input) && !existsSync(resolve(input))) {
 		const card = findCard(cards, input);
+		// A text card is read by text models (its words go in the request); media models refuse it by name.
+		if (!card.url && card.text) return { url: "", name: card.title ?? card.ref, media: "file", card };
 		if (!card.url) throw new CliError(`${card.ref} (${card.kind}) has no finished media to use yet.`, "INVALID_PARAM");
 		const media = card.kind === "image" || card.kind === "video" || card.kind === "audio" ? card.kind : mediaOf(card.url);
 		return { url: card.url, name: card.title ?? card.ref, media, card };
@@ -228,69 +235,111 @@ async function toRefs(ctx: Ctx, convId: string, cards: Card[], inputs: string[],
 const timeoutOf = (a: Args, fallbackSec: number) => (num(a, "timeout") ?? fallbackSec) * 1000;
 
 /**
- * What this command was charged since `since` (model_usage, refunds included), in credits. The records name the
- * canvas and the model, not the card, so only the models this command ran count: the user working on the same canvas
- * meanwhile isn't billed to it. Records under other names only (a tool billed by another id) still count.
+ * Sends a placed card's generation and writes the send down (lib/ledger.ts). Refused (an answer under 500): the card
+ * is marked as the canvas marks its own refusals. No answer (the connection failed, timed out or a gateway 5xx): the
+ * card stays generating, since Flowith may have taken it; it is never marked failed, so nothing runs it twice.
  */
-async function chargedSince(ctx: Ctx, convId: string, since: number, models: Set<string>): Promise<number | undefined> {
+async function sendFor(
+	ctx: Ctx,
+	kind: Sent["kind"],
+	body: Record<string, unknown>,
+	card: { id: string; createdAt: string; type: string; data: Record<string, unknown> },
+): Promise<Sent["answer"]> {
+	const from = serverNow();
+	const sent = { card: card.id, conv: String(body.convId), model: String(body.model), kind, from };
+	// Written down before it goes out: if this process is stopped mid-send, the card still reads as possibly taken.
+	noteSent({ ...sent, to: from, answer: "lost" });
 	try {
-		const res = await worker<{ data?: Array<{ model: string; tokens_used: number; billing_unit_price: number | null; created_at: string }> }>(
-			ctx.api,
-			`/user/model-usage/group-records?groupIds=${convId}`,
-		);
-		const recent = (res?.data ?? []).filter((r) => Date.parse(r.created_at) >= since - 2000);
-		const ours = recent.filter((r) => models.has(r.model));
-		const rows = ours.length ? ours : recent;
-		return Math.round(rows.reduce((sum, r) => sum + creditsOf(r), 0) * 100) / 100;
-	} catch {
-		return undefined;
+		await send(ctx.api, kind, body);
+		noteSent({ ...sent, to: serverNow(), answer: "taken" });
+		return "taken";
+	} catch (e) {
+		// An answer under 500, or none to give at all (the sign-in was ended, a bad request caught here): not taken.
+		const refused = e instanceof CliError && (e.status === undefined || e.status < 500);
+		noteSent({ ...sent, to: serverNow(), answer: refused ? "refused" : "lost" });
+		if (!refused) return "lost";
+		await failCard(ctx.api, { id: card.id, createdAt: card.createdAt, type: card.type }, card.data, e);
+		throw e;
 	}
 }
 
-const creditsOf = (r: { tokens_used: number; billing_unit_price: number | null }) =>
-	r.billing_unit_price != null ? (r.tokens_used * r.billing_unit_price) / 1000 : r.tokens_used / 1000;
+/** Sends every placed card's generation. A refusal marks its card (and is thrown when it was the only one); the ids
+ * whose answer was lost come back. */
+async function sendAll(ctx: Ctx, placed: Placed, request: (id: string) => { kind: Sent["kind"]; body: Record<string, unknown> }): Promise<string[]> {
+	const lost: string[] = [];
+	await Promise.all(
+		placed.ids.map(async (id) => {
+			const row = placed.rows.find((r) => r.id === id)!;
+			const { kind, body } = request(id);
+			try {
+				const answer = await sendFor(ctx, kind, body, { id, createdAt: row.created_at, type: row.type, data: (row.data as Record<string, unknown>) ?? {} });
+				if (answer === "lost") lost.push(id);
+			} catch (e) {
+				if (placed.ids.length === 1) throw e;
+			}
+		}),
+	);
+	return lost;
+}
 
-async function finish(ctx: Ctx, convId: string, results: Result[], extra: Record<string, unknown> = {}, since?: number) {
+/** What these cards' sends were charged, tied to their attempts (lib/ledger.ts); null with the reason when it can't be told. */
+async function chargedFor(ctx: Ctx, convId: string, cards: Result[], team = false) {
+	const generated = cards.filter((c) => c.kind === "image" || c.kind === "video" || c.kind === "text");
+	if (!generated.length) return {};
+	if (team) return { chargedCredits: null, chargedNote: "Unknown: on a team canvas the team's payer is charged, and only they see those records." };
+	// A refund of a failed run lands right after its card fails.
+	await sleep(1500);
+	try {
+		const charge = chargeOf(sentOf(generated.map((c) => c.id)), await usageOf(ctx.api, convId), generated.length);
+		return "credits" in charge ? { chargedCredits: charge.credits } : { chargedCredits: null, chargedNote: `Unknown: ${charge.unknown}.` };
+	} catch {
+		return { chargedCredits: null, chargedNote: "Unknown: the canvas's charges couldn't be read." };
+	}
+}
+
+async function finish(ctx: Ctx, convId: string, results: Result[], extra: Record<string, unknown> = {}, opts: { charged?: boolean; team?: boolean } = {}) {
 	const failed = results.filter((r) => r.status === "failed");
 	const running = results.filter((r) => r.status === "running");
-	// Refunds of a precharge land right after a card finishes.
-	const models = new Set(results.map((r) => r.model).filter((m): m is string => !!m));
-	const charged = since !== undefined && !running.length ? (await sleep(1500), await chargedSince(ctx, convId, since, models)) : undefined;
+	const lost = running.filter((r) => r.code === "SENT_UNKNOWN");
+	const charged = opts.charged && !running.length ? await chargedFor(ctx, convId, results, opts.team) : {};
+	const stopped = failed.filter((r) => r.code === "NO_CREDITS" || r.code === "MODEL_LOCKED");
+	const broken = failed.filter((r) => r.code !== "NO_CREDITS" && r.code !== "MODEL_LOCKED");
 	const next = [
-		...(failed.some((r) => r.code === "NO_CREDITS" || r.code === "MODEL_LOCKED")
-			? ["Stop: not enough credits, or the plan doesn't include this model. Tell the user (https://flowith.io/pricing); don't retry or switch models unasked."]
+		...(stopped.length ? ["Stop: not enough credits, or the plan doesn't include this model. Tell the user (https://flowith.io/pricing); don't retry or switch models unasked."] : []),
+		...(broken.length ? [`Failed: ${broken.map((r) => `${r.ref} (${r.error ?? r.code})`).join("; ")}. Transient failures: \`retry <ref>\`; refusals: change the prompt or model.`] : []),
+		...(lost.length
+			? [`No answer came back for ${lost.map((r) => r.ref).join(" ")}: Flowith may have taken it. \`wait ${lost.map((r) => r.ref).join(" ")}\` (it finishes if it was taken); \`retry\` checks the canvas's charges and only sends it again once it is clear it never arrived.`]
 			: []),
-		...(failed.some((r) => r.code !== "NO_CREDITS" && r.code !== "MODEL_LOCKED")
-			? [`Failed: ${failed.filter((r) => r.code !== "NO_CREDITS" && r.code !== "MODEL_LOCKED").map((r) => `${r.ref} (${r.error ?? r.code})`).join("; ")}. Transient failures: \`retry <ref>\`; refusals: change the prompt or model.`]
-			: []),
-		...(running.length ? [`Still generating: \`wait ${running.map((r) => r.ref).join(" ")}\` later.`] : []),
+		...(running.length > lost.length ? [`Still generating: \`wait ${running.filter((r) => !lost.includes(r)).map((r) => r.ref).join(" ")}\` later.`] : []),
 	];
 	out({
 		canvas: convId,
 		url: canvasUrl(ctx.site, convId),
 		...extra,
-		...(charged !== undefined ? { chargedCredits: charged } : {}),
+		...charged,
 		cards: results,
 		...(next.length ? { next: next.join(" ") } : {}),
 	});
-	if (failed.length) process.exitCode = 1;
+	if (failed.length || lost.length) process.exitCode = 1;
 }
 
-async function waitAndReport(ctx: Ctx, a: Args, convId: string, ids: string[], fallbackSec: number, extra: Record<string, unknown> = {}, since = STARTED) {
-	if (has(a, "no-wait")) {
-		const rows = await fetchRowsById(ctx.api, ids);
-		await finish(ctx, convId, cardsFrom(rows).map(resultOf), extra);
-		return;
-	}
+/** Waits for the cards Flowith took and reports them all; a card whose send got no answer is reported, not waited on. */
+async function waitAndReport(ctx: Ctx, a: Args, convId: string, ids: string[], fallbackSec: number, extra: Record<string, unknown> = {}, lostIds: string[] = [], charged = true) {
+	const team = charged ? !!(await getCanvas(ctx.api, convId).catch(() => null))?.team_id : false;
+	const taken = ids.filter((id) => !lostIds.includes(id));
 	let last = -1;
-	const results = await waitFor(ctx.api, ids, {
-		timeoutMs: timeoutOf(a, fallbackSec),
-		onTick: (done, total) => {
-			if (done !== last) log(`${done}/${total} done`);
-			last = done;
-		},
-	});
-	await finish(ctx, convId, results, extra, since);
+	const waited = has(a, "no-wait") || !taken.length
+		? cardsFrom(await fetchRowsById(ctx.api, taken)).map(resultOf)
+		: await waitFor(ctx.api, taken, {
+				timeoutMs: timeoutOf(a, fallbackSec),
+				onTick: (done, total) => {
+					if (done !== last) log(`${done}/${total} done`);
+					last = done;
+				},
+			});
+	const lost = lostIds.length ? cardsFrom(await fetchRowsById(ctx.api, lostIds)).map(resultOf).map((r) => (r.status === "running" ? { ...r, code: "SENT_UNKNOWN" } : r)) : [];
+	const byId = new Map([...waited, ...lost].map((r) => [r.id, r]));
+	await finish(ctx, convId, ids.map((id) => byId.get(id)).filter((r): r is Result => !!r), extra, { charged: charged && !has(a, "no-wait"), team });
 }
 
 // ---------- commands: session ----------
@@ -298,7 +347,9 @@ async function waitAndReport(ctx: Ctx, a: Args, convId: string, ids: string[], f
 async function cmdLogin(a: Args) {
 	const s = await login(agentName(a), log, { open: !has(a, "no-open"), site: flag(a, "site") });
 	const claims = jwtClaims(s.accessToken);
-	out({ loggedIn: true, email: claims.email, site: s.site, worker: s.workerURL, canvas: s.canvas ?? null });
+	// The previous canvas-cowork's login (a copy of the browser's sign-in) is no longer used.
+	const oldLogin = forgetOldLogin();
+	out({ loggedIn: true, email: claims.email, site: s.site, worker: s.workerURL, canvas: s.canvas ?? null, ...(oldLogin ? { removedOldLogin: "~/.flowith/bot-session.json" } : {}) });
 }
 
 async function cmdWhoami(a: Args) {
@@ -589,21 +640,12 @@ async function cmdImage(a: Args, base?: { source: Card }) {
 	const groupName = flag(a, "group") ?? (items.length > 1 ? title ?? titleFrom(prompts[0]!, 20) : undefined);
 	const placed = await placeCards(ctx.api, canvas.id, cards, items, { anchor: base?.source ?? anchorOf(a, cards, refs), group: groupName, into: intoOf(a, cards) });
 	log(`Placed ${placed.ids.length} image card${placed.ids.length > 1 ? "s" : ""} (${modelId}, ~${credits} credits); generating…`);
-	const rows = new Map(placed.rows.map((r) => [r.id, r]));
-	await Promise.all(
-		jobs.map(async (j, i) => {
-			const id = placed.ids[i]!;
-			try {
-				await send(ctx.api, "image", imageRequest(j, id, canvas.id).body);
-			} catch (e) {
-				const row = rows.get(id);
-				if (row) await failCard(ctx.api, { id, createdAt: row.created_at, type: row.type }, (row.data as Record<string, unknown>) ?? {}, e);
-				if (jobs.length === 1) throw e;
-			}
-		}),
-	);
-	await waitAndReport(ctx, a, canvas.id, placed.ids, 300, { model: modelId, estimatedCredits: credits, ...(placed.groupId ? { group: placed.groupId.slice(0, 8) } : {}) });
+	const lost = await sendAll(ctx, placed, (id) => ({ kind: "image", body: imageRequest(jobs[placed.ids.indexOf(id)]!, id, canvas.id).body }));
+	await waitAndReport(ctx, a, canvas.id, placed.ids, 300, { model: modelId, estimatedCredits: credits, ...(placed.groupId ? { group: placed.groupId.slice(0, 8) } : {}) }, lost);
 }
+
+/** Said where a clip's price can't be known before it is made. */
+const UNPRICED = "Unknown until it is made (it depends on a source clip's length the CLI can't read, or on what the provider measures). Ask the user before running it.";
 
 async function cmdVideo(a: Args) {
 	let prompt = a.pos.join(" ").trim();
@@ -660,8 +702,12 @@ async function cmdVideo(a: Args) {
 	};
 	const anchor = anchorOf(a, cards, [...(first ? [first] : []), ...refs]);
 	const preview = videoRequest(job, "00000000-0000-0000-0000-000000000000", canvas.id, canvas.id, { x: 0, y: 0 });
-	const credits = estimateCredits(model, { duration: preview.params.duration, resolution: preview.params.resolution, audio: preview.audio });
-	if (has(a, "dry-run")) return out({ model: modelId, estimatedCredits: credits, request: preview.body });
+	// Source clips (references, or the clip extended / edited) and their lengths where their cards know them.
+	const clips = [...(first ? [first] : []), ...(last ? [last] : []), ...refs].filter((r) => r.media === "video");
+	const clipSeconds = clips.map((r) => Number(r.card?.data?.duration));
+	const sources = clips.length ? { count: clips.length, seconds: clipSeconds.every((n) => n > 0) ? clipSeconds.reduce((x, y) => x + y, 0) : undefined } : undefined;
+	const credits = await videoPrice(ctx.api, canvas.created ? undefined : canvas.id, preview.body, sources);
+	if (has(a, "dry-run")) return out({ model: modelId, estimatedCredits: credits ?? null, ...(credits === undefined ? { estimateNote: UNPRICED } : {}), request: preview.body });
 	const title = flag(a, "title") ?? (clip?.card && operation ? `${clip.card.title ?? "Clip"} · ${operation === "extend" ? "extended" : "edited"}` : titleFrom(a.pos.join(" ").trim() || "Video"));
 	const ratio = preview.params.aspect_ratio && !["adaptive", "auto"].includes(preview.params.aspect_ratio) ? preview.params.aspect_ratio : "16:9";
 	const placed = await placeCards(
@@ -675,14 +721,8 @@ async function cmdVideo(a: Args) {
 	const id = placed.ids[0]!;
 	const row = placed.rows.find((r) => r.id === id)!;
 	log(`Placed video card ${id.slice(0, 8)} (${modelId}, ${preview.params.duration ?? "?"} s, ~${credits ?? "?"} credits); generating…`);
-	try {
-		const { body } = videoRequest(job, id, canvas.id, row.p_id ?? canvas.id, row.position ?? { x: 0, y: 0 });
-		await send(ctx.api, "video", body);
-	} catch (e) {
-		await failCard(ctx.api, { id, createdAt: row.created_at, type: row.type }, (row.data as Record<string, unknown>) ?? {}, e);
-		throw e;
-	}
-	await waitAndReport(ctx, a, canvas.id, [id], 900, { model: modelId, estimatedCredits: credits });
+	const lost = await sendAll(ctx, placed, () => ({ kind: "video", body: videoRequest(job, id, canvas.id, row.p_id ?? canvas.id, row.position ?? { x: 0, y: 0 }).body }));
+	await waitAndReport(ctx, a, canvas.id, [id], 900, { model: modelId, estimatedCredits: credits ?? null, ...(credits === undefined ? { estimateNote: UNPRICED } : {}) }, lost);
 }
 
 async function cmdText(a: Args) {
@@ -714,20 +754,8 @@ async function cmdText(a: Args) {
 		into: intoOf(a, cards),
 	});
 	log(`Placed ${items.length} text card${items.length > 1 ? "s" : ""} (${models.map((m) => m.id).join(", ")}); writing…`);
-	const rows = new Map(placed.rows.map((r) => [r.id, r]));
-	await Promise.all(
-		jobs.map(async (j, i) => {
-			const id = placed.ids[i]!;
-			try {
-				await send(ctx.api, "text", textRequest(j, id, canvas.id));
-			} catch (e) {
-				const row = rows.get(id);
-				if (row) await failCard(ctx.api, { id, createdAt: row.created_at, type: row.type }, (row.data as Record<string, unknown>) ?? {}, e);
-				if (jobs.length === 1) throw e;
-			}
-		}),
-	);
-	await waitAndReport(ctx, a, canvas.id, placed.ids, 600);
+	const lost = await sendAll(ctx, placed, (id) => ({ kind: "text", body: textRequest(jobs[placed.ids.indexOf(id)]!, id, canvas.id) }));
+	await waitAndReport(ctx, a, canvas.id, placed.ids, 600, {}, lost);
 }
 
 async function cmdSound(a: Args, tool: "gen_speech" | "gen_music") {
@@ -764,7 +792,7 @@ async function cmdSound(a: Args, tool: "gen_speech" | "gen_music") {
 	log(`Making ${tool === "gen_speech" ? "speech" : "music"} with ${modelId} (~${credits ?? "?"} credits)…`);
 	const made = await makeSound(ctx.api, canvas.id, cards, source, { name: tool, args }, { timeoutMs: timeoutOf(a, 600), onTick: () => {} });
 	const rows = await fetchRowsById(ctx.api, made.ids);
-	await finish(ctx, canvas.id, cardsFrom(rows).map(resultOf), { model: modelId, estimatedCredits: credits, source: source.ref }, STARTED);
+	await finish(ctx, canvas.id, cardsFrom(rows).map(resultOf), { model: modelId, estimatedCredits: credits, source: source.ref });
 }
 
 async function cmdVary(a: Args) {
@@ -782,21 +810,12 @@ async function cmdVary(a: Args) {
 		const size = kind === "text" ? cardSize("text") : { width: src.rect.width, height: src.rect.height };
 		const items: NewCard[] = Array.from({ length: n }, () => ({ kind, size, data: { ...data, value: "", status: "running", ...(kind === "video" ? { videoId: null } : {}) } }));
 		const placed = await placeCards(ctx.api, canvas.id, cards, items, { anchor: src, group: n > 1 ? flag(a, "group") ?? `${src.title ?? "Variations"}` : undefined });
-		for (const row of placed.rows.filter((r) => placed.ids.includes(r.id))) {
-			const body = {
-				...req.body,
-				nodeId: row.id,
-				convId: canvas.id,
-				...(kind === "video" ? { parentNodeId: row.p_id ?? canvas.id, position: row.position ?? { x: 0, y: 0 } } : {}),
-			};
-			try {
-				await send(ctx.api, req.kind, body);
-			} catch (e) {
-				await failCard(ctx.api, { id: row.id, createdAt: row.created_at, type: row.type }, (row.data as Record<string, unknown>) ?? {}, e);
-				if (n === 1) throw e;
-			}
-		}
-		return waitAndReport(ctx, a, canvas.id, placed.ids, kind === "video" ? 900 : 300, placed.groupId ? { group: placed.groupId.slice(0, 8) } : {});
+		const rowOf = (id: string) => placed.rows.find((r) => r.id === id)!;
+		const lost = await sendAll(ctx, placed, (id) => ({
+			kind: req.kind!,
+			body: { ...req.body, nodeId: id, convId: canvas.id, ...(kind === "video" ? { parentNodeId: rowOf(id).p_id ?? canvas.id, position: rowOf(id).position ?? { x: 0, y: 0 } } : {}) },
+		}));
+		return waitAndReport(ctx, a, canvas.id, placed.ids, kind === "video" ? 900 : 300, placed.groupId ? { group: placed.groupId.slice(0, 8) } : {}, lost);
 	}
 	if (src.kind === "text" && src.prompt && src.model) {
 		const next = parseArgs(["text", src.prompt, "--model", flag(a, "model") ?? src.model, "--near", src.ref]);
@@ -854,7 +873,7 @@ async function cmdTool(a: Args, tool: "upscale" | "cutout" | "expand") {
 		placed = await expand(ctx.api, canvas.id, cards, source, ratio);
 	}
 	log(`${tool} started on ${source.ref} → ${placed.ids[0]!.slice(0, 8)}`);
-	await waitAndReport(ctx, a, canvas.id, placed.ids, source.kind === "video" ? 1200 : 600);
+	await waitAndReport(ctx, a, canvas.id, placed.ids, source.kind === "video" ? 1200 : 600, {}, [], false);
 }
 
 
@@ -864,24 +883,48 @@ function requestTemplate(body: Record<string, unknown>) {
 	return rest;
 }
 
+/**
+ * Runs failed cards again in place. A card still generating, or finished, is never sent again (it would be charged
+ * twice and the results would overwrite each other). One whose send got no answer is sent again only once it is clear
+ * it never arrived: no charge began while it was sent, and it has stayed generating longer than such a run takes.
+ */
 async function cmdRetry(a: Args) {
 	const ctx = await context(a);
 	const canvas = await canvasOf(ctx, a);
 	const cards = await readCanvas(ctx.api, canvas.id);
-	const named = a.pos.map((r) => findCard(cards, r));
-	const candidates = named.length ? named : cards.filter((c) => c.status === "failed");
 	const requestOf = (c: Card) => c.data.agentRequest as { kind?: "image" | "video" | "text"; body?: Record<string, unknown> } | undefined;
+	const failed = (c: Card) => c.status === "failed" || c.type === "22" || c.type === "25";
+	// Each card once, however often it is named (a ref and its title are the same card).
+	const named = [...new Map(a.pos.map((r) => findCard(cards, r)).map((c) => [c.id, c])).values()];
+	const candidates = named.length ? named : cards.filter(failed);
 	// Checked before anything is sent: only cards carrying their own request run again.
 	const chosen = candidates.filter((c) => requestOf(c)?.kind && requestOf(c)?.body);
 	const skipped = candidates.filter((c) => !chosen.includes(c)).map((c) => c.ref);
 	if (named.length && skipped.length)
 		throw new CliError(`${skipped.join(", ")} weren't made by this CLI's generation, so their request isn't on the card. Use \`vary\` or make them again.`, "INVALID_PARAM");
 	if (!chosen.length) return out({ canvas: canvas.id, note: skipped.length ? `Nothing to retry here (${skipped.join(", ")} weren't made by this CLI).` : "Nothing failed." });
+	const records = chosen.some((c) => !failed(c)) ? await usageOf(ctx.api, canvas.id) : [];
+	for (const card of chosen) {
+		if (failed(card)) continue;
+		if (card.status === "finished") throw new CliError(`${card.ref} is finished; \`vary ${card.ref}\` makes another take beside it.`, "INVALID_PARAM");
+		const sent = sentOf([card.id])[0];
+		const kind = requestOf(card)!.kind!;
+		// Refused (Flowith answered no) but never marked failed: nothing was taken, it can run.
+		if (sent?.answer === "refused") continue;
+		if (sent?.answer !== "lost") throw new CliError(`${card.ref} is still generating: \`wait ${card.ref}\`.`, "BUSY");
+		if (canvas.team)
+			throw new CliError(`No answer came back for ${card.ref}, and on a team canvas the team's charges can't be read to tell whether it arrived, so it isn't sent again. \`wait ${card.ref}\`; if it never finishes, delete it and make it again.`, "BUSY");
+		if (chargedSince(sent, records, serverNow()))
+			throw new CliError(`${card.ref} did reach Flowith (a ${sent.model} charge began on this canvas after it was sent): \`wait ${card.ref}\` for the result.`, "BUSY");
+		const left = sent.to + SETTLE_MS[kind] - serverNow();
+		if (left > 0)
+			throw new CliError(`No charge for ${card.ref} so far, but it may still be on its way. \`wait ${card.ref}\`; if it is still generating in ${Math.ceil(left / 60_000)} min, retry then.`, "BUSY");
+	}
 	if (dryRun) return out({ retry: chosen.map((c) => ({ ref: c.ref, kind: requestOf(c)!.kind, model: requestOf(c)!.body!.model })), ...(skipped.length ? { skipped } : {}) });
 	const ids: string[] = [];
+	const lost: string[] = [];
 	for (const card of chosen) {
 		const req = requestOf(card)!;
-		if (!req.kind || !req.body) continue;
 		const {
 			error: _e, error_type: _t, error_code: _c, request_id: _r,
 			errorMessage: _m, creditFailureReason: _cr, creditFailureStage: _cs, creditFailureCode: _cc, httpCode: _h, attemptedModel: _a,
@@ -896,16 +939,11 @@ async function cmdRetry(a: Args) {
 			convId: canvas.id,
 			...(req.kind === "video" ? { parentNodeId: card.row.p_id ?? canvas.id, position: card.row.position ?? { x: 0, y: 0 }, rerun: true } : {}),
 		};
-		try {
-			await send(ctx.api, req.kind, body);
-		} catch (e) {
-			await failCard(ctx.api, { ...card, type }, data, e);
-			throw e;
-		}
+		if ((await sendFor(ctx, req.kind!, body, { id: card.id, createdAt: card.createdAt, type, data })) === "lost") lost.push(card.id);
 		ids.push(card.id);
-		log(`Retrying ${card.ref} (${req.kind}, ${String(req.body.model)})…`);
+		log(`Retrying ${card.ref} (${req.kind}, ${String(req.body!.model)})…`);
 	}
-	await waitAndReport(ctx, a, canvas.id, ids, chosen.some((c) => c.kind === "video") ? 900 : 300);
+	await waitAndReport(ctx, a, canvas.id, ids, chosen.some((c) => c.kind === "video") ? 900 : 300, {}, lost);
 }
 
 async function cmdSpent(a: Args) {
@@ -926,7 +964,7 @@ async function cmdSpent(a: Args) {
 		...(sinceArg ? { since: new Date(since).toISOString() } : {}),
 		chargedCredits: Math.round(total * 100) / 100,
 		byModel: Object.fromEntries(Object.entries(byModel).sort((p, q) => q[1] - p[1]).map(([k, v]) => [k, Math.round(v * 100) / 100])),
-		note: "Actual charges on this canvas (refunds included; 1 credit = $0.001).",
+		note: "Everything charged on this canvas (by you, Flo, other tabs and agents), refunds included; 1 credit = $0.001.",
 	});
 }
 
@@ -1179,7 +1217,7 @@ async function onCanvas(a: Args, operation: string, build: (cards: Card[]) => Re
 	if (waitSec && ids.length && !has(a, "no-wait")) {
 		const rows = cardsFrom(await fetchRowsById(ctx.api, ids));
 		const generating = rows.filter((c) => c.status === "running" || c.status === "init").map((c) => c.id);
-		if (generating.length) return waitAndReport(ctx, a, canvas.id, ids, waitSec, { operation, ...extra });
+		if (generating.length) return waitAndReport(ctx, a, canvas.id, ids, waitSec, { operation, ...extra }, [], false);
 	}
 	const rows = ids.length ? cardsFrom(await fetchRowsById(ctx.api, ids)) : [];
 	out({ canvas: canvas.id, url, operation, ...extra, cards: rows.length ? rows.map(resultOf) : ids.map((id) => id.slice(0, 8)) });
@@ -1271,7 +1309,8 @@ const ON_CANVAS: Record<string, (a: Args) => Promise<unknown>> = {
 
 async function cmdModels(a: Args) {
 	const ctx = await context(a).catch(() => null);
-	const catalog = await fetchCatalog(ctx?.session.workerURL ?? "https://dev-edge.flowith.io", { fresh: has(a, "fresh") });
+	// Not logged in: the worker the site's pages use (FLOWITH_URL, else the default site).
+	const catalog = await fetchCatalog(ctx?.session.workerURL ?? workerFor(siteUrl()), { fresh: has(a, "fresh") });
 	const kinds = (a.pos[0] && ["image", "video", "text", "audio"].includes(a.pos[0]) ? [a.pos[0]] : ["image", "video", "text", "audio"]) as Kind[];
 	const id = a.pos.find((p) => !["image", "video", "text", "audio"].includes(p));
 	if (id) {
@@ -1327,7 +1366,8 @@ Placement   new cards sit beside --near <card> (or the first --ref card), else i
 Cards       a card is named by its ref (first 8 hex of its id, shown by look), a longer id prefix, or its title.
 References  in prompts, name references @image1 @image2 @video1 @audio1 in --ref order; the CLI rewrites
             them to each model's own naming (Seedance 图片1, Kling @image_1, image models 图1/image 1).
-Global      --canvas <ref>  --json  --quiet  --no-wait  --timeout <s>  --dry-run (show request + credits)
+Global      --canvas <ref>  --json  --quiet  --no-wait  --timeout <s>
+            --dry-run (making commands, add, note, delete: show the request and credits; send nothing)
             --agent <claude-code|codex|…> (auto-detected)  ·  env FLOWITH_URL, FLOWITH_CANVAS, FLOWITH_HOME
 `;
 
@@ -1339,8 +1379,10 @@ const COMMANDS: Record<string, (a: Args) => Promise<unknown>> = {
 	status: cmdWhoami,
 	credits: cmdCredits,
 	logout: async () => {
-		forgetSession();
-		out({ loggedOut: true });
+		const { ended, note } = await logout();
+		const oldLogin = forgetOldLogin();
+		out({ signInEnded: ended, ...(note ? { note } : {}), ...(oldLogin ? { removedOldLogin: "~/.flowith/bot-session.json" } : {}) });
+		if (!ended && note?.startsWith("Couldn't")) process.exitCode = 1;
 	},
 	canvases: cmdCanvases,
 	list: cmdCanvases,
@@ -1395,11 +1437,22 @@ const RENAMED: Record<string, string> = {
 	recall: "canvases <search> + look",
 };
 
+/** Commands whose --dry-run shows what they would do (requests, cards, credits) without doing it. */
+const PREVIEWS = new Set(["image", "edit", "vary", "retry", "video", "text", "speech", "music", "upscale", "cutout", "expand", "add", "note", "delete"]);
+/** Commands that only read Flowith: --dry-run leaves them as they are. */
+const READS = new Set(["whoami", "status", "credits", "canvases", "list", "look", "read", "models", "spent", "wait"]);
+
 async function main() {
 	const a = parseArgs(process.argv.slice(2));
 	jsonOut = has(a, "json");
 	quiet = has(a, "quiet") || jsonOut;
 	dryRun = has(a, "dry-run");
+	if (dryRun && COMMANDS[a.cmd]) {
+		if (!PREVIEWS.has(a.cmd) && !READS.has(a.cmd))
+			throw new CliError(`\`${a.cmd}\` has no dry run: it changes things when it runs. Leave out --dry-run (\`look\` shows the canvas as it is).`, "INVALID_PARAM");
+		// Whatever a preview misses, nothing that would change the canvas or spend credits leaves the machine.
+		forbidWrites();
+	}
 	if (a.cmd === "help") return void process.stdout.write(HELP);
 	if (has(a, "help")) {
 		// The help lines that name this command, with the shared notes.

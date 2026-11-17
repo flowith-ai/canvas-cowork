@@ -90,9 +90,9 @@ commands check Supabase Auth once the two-minute cache expires. Existing access 
 reach the worker and PostgREST until they expire (up to one hour); this does not cancel an already
 accepted generation or guarantee that a running command stops within two minutes.
 
-The Disconnect update is on next-gen. Beta needs hypergpt-frontend #753 before the page's Disconnect
-ends the independent sign-in; until then use CLI `logout` on beta. The login link and code are for you
-alone: never forward them.
+The Disconnect update is deployed on beta and next-gen (hypergpt-frontend #753 brought it to beta).
+For a CLI login approved before that update, use CLI `logout`, then `login` again so the page remembers
+the independent sign-in it must end. The login link and code are for you alone: never forward them.
 
 ## Retrying safely
 

@@ -39,8 +39,9 @@ Other things worth knowing:
   renew itself without signing the browser out. `logout` ends that sign-in and forgets it here;
   on sites with the Disconnect update, the page can end it too. New commands check Auth with a
   two-minute cache; running commands do not periodically check. Existing access tokens may still
-  work until expiry (up to one hour), and accepted generations are not cancelled. Until beta has
-  hypergpt-frontend #753, use CLI `logout` there to end the independent sign-in.
+  work until expiry (up to one hour), and accepted generations are not cancelled. Beta includes the
+  Disconnect update from hypergpt-frontend #753. If you logged in before that update, use CLI `logout`
+  and `login` again so the page can track and end the independent sign-in.
 - **Retry says the card changed**: another client edited, deleted or claimed it after it was read.
   Run `look` again. Updated CLIs coordinate retries through a conditional database claim; the page's
   Retry button and older CLIs do not, so avoid retrying the same card from both at once.

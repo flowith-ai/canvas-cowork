@@ -289,7 +289,7 @@ async function waitAndReport(ctx: Ctx, a: Args, convId: string, ids: string[], f
 // ---------- commands: session ----------
 
 async function cmdLogin(a: Args) {
-	const s = await login(agentName(a), log, { open: !has(a, "no-open") });
+	const s = await login(agentName(a), log, { open: !has(a, "no-open"), site: flag(a, "site") });
 	const claims = jwtClaims(s.accessToken);
 	out({ loggedIn: true, email: claims.email, site: s.site, worker: s.workerURL, canvas: s.canvas ?? null });
 }
@@ -1280,7 +1280,7 @@ const HELP = `canvas-cowork — work on a Flowith 3.0 canvas. Every card you mak
 
   bun scripts/index.ts <command> [args] [--flags]
 
-SET UP      login · whoami · credits · spent [--since 30m] · logout
+SET UP      login [--site next-gen.flowith.io] · whoami · credits · spent [--since 30m] · logout
 CANVASES    canvases [search] · new "title" · use <canvas|url> · open · rename canvas "title"
 SEE         look [words] [--kind image]  every card: ref, kind, title, model, status, place, links
             read <card…> [--full]        full prompt / text / media of cards

@@ -28,8 +28,9 @@ Other things worth knowing:
   alpha and some viewers draw them; on the canvas it is transparent.
 - **The user doesn't see new cards**: they appear live in an open canvas tab of the same account; ask
   the user to open `cw open` (or the `url` in any result). Cards placed far away are brought into view.
-- **Several machines / accounts**: `FLOWITH_HOME=/path` keeps a separate session; `FLOWITH_URL` points
-  at another Flowith site (default https://beta.flowith.io while 3.0 is in beta).
+- **Several machines / accounts**: `FLOWITH_HOME=/path` keeps a separate session. `login --site <host>`
+  (e.g. `next-gen.flowith.io`) signs in to another Flowith site and every later command follows that
+  session (default https://beta.flowith.io while 3.0 is in beta; `FLOWITH_URL` does the same per shell).
 - Session and caches live in `~/.flowith/` (`canvas-session.json`, mode 600, holds the login token —
   never print or share it). The CLI gets a sign-in of its own (it never shares the browser's), so it can
   renew itself without signing the browser out. `logout` forgets it here; "Disconnect" in Flowith stops

@@ -35,8 +35,9 @@ export interface Session {
 export const home = () => process.env.FLOWITH_HOME || join(homedir(), ".flowith");
 const sessionFile = () => join(home(), "canvas-session.json");
 
-export function siteUrl(): string {
-	return (process.env.FLOWITH_URL || DEFAULT_SITE).replace(/\/+$/, "").replace(/\/blank$/, "");
+export function siteUrl(site?: string): string {
+	const url = (site || process.env.FLOWITH_URL || DEFAULT_SITE).trim().replace(/\/+$/, "").replace(/\/blank$/, "");
+	return /^https?:\/\//.test(url) ? url : `https://${url}`;
 }
 
 export function loadSession(): Session | null {
@@ -205,9 +206,9 @@ const SUPABASE_KEY = process.env.FLOWITH_SUPABASE_KEY || "sb_publishable_qPCinc8
  * `cli-login:<code>` (works in every browser: nothing touches the computer's own network). Pages
  * from before that also find a WebSocket on 127.0.0.1 here.
  */
-export async function login(agent: string, log: (m: string) => void, opts: { open?: boolean } = {}): Promise<Session> {
+export async function login(agent: string, log: (m: string) => void, opts: { open?: boolean; site?: string } = {}): Promise<Session> {
 	const { Realtime, loginKeys, openSealed, ackProof, loginCode, verificationCode } = await import("./realtime");
-	const site = siteUrl();
+	const site = siteUrl(opts.site);
 	const nonce = crypto.randomUUID();
 	const code = loginCode();
 	const keys = await loginKeys();

@@ -42,5 +42,7 @@ Other things worth knowing:
   never print or share it). The CLI gets a sign-in of its own (it never shares the browser's), so it can
   renew itself without signing the browser out. `logout` ends that sign-in and forgets it here;
   "Disconnect" in Flowith ends it too: it can't renew, canvas operations stop at once, and the CLI says
-  `NOT_LOGGED_IN` within 2 minutes (it checks when a command starts and every 2 minutes while one runs).
-  The access token already issued stays usable by the APIs until it expires (up to 1 hour).
+  `NOT_LOGGED_IN` within about 2 minutes (it checks when a command starts and every 2 minutes while one
+  runs). The access token already issued stays usable by the APIs until it expires (up to 1 hour), and a
+  generation Flowith already took isn't cancelled. Beta has the Disconnect update since
+  hypergpt-frontend #753; a login approved before it is unknown to the page: `logout` and `login` again.

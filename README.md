@@ -97,9 +97,9 @@ What ending it does, and what it doesn't:
   Flowith's data and generation APIs until it expires. Anyone holding a copy of it could use it until
   then; nothing else of the login (no renewal) is left.
 - Ending a sign-in doesn't cancel a generation Flowith already took.
-- On beta, the page's Disconnect only drops the canvas operation key until the frontend that ends the
-  sign-in reaches it (hypergpt-frontend #753; it is on the next-gen preview); `logout` ends it on every
-  site.
+- The page's Disconnect ends sign-ins it approved since its update (on beta and next-gen; beta got it with
+  hypergpt-frontend #753). A CLI login approved before that is unknown to the page: `logout`, then
+  `login` again, so a later Disconnect can end it.
 
 The login link and code are for you alone: never forward them.
 

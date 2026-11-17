@@ -191,3 +191,18 @@ describe("listed clip prices (`models`)", () => {
 		expect(listPrice(catalog["muse-video"] as never)).toEqual({ credits: 15 });
 	});
 });
+
+describe("charges of cards only claimed for a retry", () => {
+	test("a card only claimed (never sent from here) makes the charge unknown, not zero", async () => {
+		const { chargeOf } = await import("../lib/ledger");
+		const claiming = { card: "c1", conv: "v", model: "m", kind: "image" as const, from: 0, to: 0, answer: "claiming" as const, attempt: "x" };
+		// A charge of that model at that moment (another card's) is not taken for it.
+		const other = { model: "m", req_id: "r1", tokens_used: 5000, billing_unit_price: null, created_at: new Date(0).toISOString() };
+		expect("unknown" in chargeOf([claiming], [other], 1)).toBe(true);
+	});
+	test("the fingerprint of card data ignores key order (the database reorders it)", async () => {
+		const { fingerprint } = await import("../lib/ledger");
+		expect(fingerprint({ b: 1, a: { d: [1, { y: 2, x: 1 }], c: null } })).toBe(fingerprint({ a: { c: null, d: [1, { x: 1, y: 2 }] }, b: 1 }));
+		expect(fingerprint({ a: 1 })).not.toBe(fingerprint({ a: 2 }));
+	});
+});

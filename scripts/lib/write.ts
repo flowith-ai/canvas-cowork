@@ -105,10 +105,12 @@ export async function tryPatch(
 	opts: { asRead?: Record<string, unknown>; type?: boolean } = {},
 ): Promise<PatchOutcome> {
 	const q = new URLSearchParams({ id: `eq.${card.id}`, created_at: `eq.${card.createdAt}`, is_delete: "not.is.true", select: "id" });
-	// Data stored as a JSON string (old rows) has no keys to compare in SQL: such a card is written as before.
-	const read = typeof card.row?.data === "string" ? undefined : (opts.asRead ?? ("data" in fields ? card.data : undefined));
+	const read = opts.asRead ?? ("data" in fields ? card.data : undefined);
+	// Data stored as a JSON string (old rows) has no keys in SQL (->> reads null): it must still be that string, so a
+	// write that turned it into an object (another claim) is seen.
+	const stringRow = typeof card.row?.data === "string";
 	for (const key of read ? ["status", "agentAttempt"] : []) {
-		const v = markOf(read, key);
+		const v = stringRow ? null : markOf(read, key);
 		q.append(`data->>${key}`, v === null ? "is.null" : `eq.${v}`);
 	}
 	if (opts.type && card.type) q.set("type", `eq.${card.type}`);
@@ -122,6 +124,7 @@ export async function tryPatch(
 		return "unchecked";
 	}
 	if (!now) return "gone";
+	if (read && stringRow && typeof now.row.data !== "string") return "changed";
 	if (read && (markOf(now.data, "status") !== markOf(read, "status") || markOf(now.data, "agentAttempt") !== markOf(read, "agentAttempt"))) return "changed";
 	if (opts.type && card.type && now.type !== card.type) return "changed";
 	return "forbidden";

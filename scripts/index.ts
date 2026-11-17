@@ -56,7 +56,7 @@ import {
 	waitFor,
 } from "./lib/generate";
 import { type Api, CliError, forbidWrites, serverNow, sleep, worker } from "./lib/http";
-import { type Sent, SETTLE_MS, chargeOf, chargedSince, claimRetry, creditsOf, forgetSent, noteSent, releaseRetry, sentOf, usageOf } from "./lib/ledger";
+import { type Sent, SETTLE_MS, chargeOf, chargedSince, claimRetry, creditsOf, fingerprint, forgetSent, noteSent, releaseRetry, sentOf, usageOf } from "./lib/ledger";
 import { download, fileFor, isUrl, mediaOf, toUrl } from "./lib/media";
 import {
 	type Session,
@@ -302,6 +302,8 @@ async function finish(ctx: Ctx, convId: string, results: Result[], extra: Record
 	const failed = results.filter((r) => r.status === "failed");
 	const running = results.filter((r) => r.status === "running");
 	const lost = running.filter((r) => r.code === "SENT_UNKNOWN");
+	const unsent = running.filter((r) => r.code === "NOT_SENT");
+	const halted = extra.stopped as { message?: string } | undefined;
 	const charged = opts.charged && !running.length ? await chargedFor(ctx, convId, results, opts.team) : {};
 	const stopped = failed.filter((r) => r.code === "NO_CREDITS" || r.code === "MODEL_LOCKED");
 	const broken = failed.filter((r) => r.code !== "NO_CREDITS" && r.code !== "MODEL_LOCKED");
@@ -311,7 +313,9 @@ async function finish(ctx: Ctx, convId: string, results: Result[], extra: Record
 		...(lost.length
 			? [`No answer came back for ${lost.map((r) => r.ref).join(" ")}: Flowith may have taken it. \`wait ${lost.map((r) => r.ref).join(" ")}\` (it finishes if it was taken); \`retry\` checks the canvas's charges and only sends it again once it is clear it never arrived.`]
 			: []),
-		...(running.length > lost.length ? [`Still generating: \`wait ${running.filter((r) => !lost.includes(r)).map((r) => r.ref).join(" ")}\` later.`] : []),
+		...(unsent.length ? [`Claimed for a retry but never sent: \`retry ${unsent.map((r) => r.ref).join(" ")}\` sends it.`] : []),
+		...(running.length > lost.length + unsent.length ? [`Still generating: \`wait ${running.filter((r) => !lost.includes(r) && !unsent.includes(r)).map((r) => r.ref).join(" ")}\` later.`] : []),
+		...(halted?.message ? [`Stopped before the rest: ${halted.message}`] : []),
 	];
 	out({
 		canvas: convId,
@@ -321,7 +325,7 @@ async function finish(ctx: Ctx, convId: string, results: Result[], extra: Record
 		cards: results,
 		...(next.length ? { next: next.join(" ") } : {}),
 	});
-	if (failed.length || lost.length) process.exitCode = 1;
+	if (failed.length || lost.length || unsent.length || halted) process.exitCode = 1;
 }
 
 /** Waits for the cards Flowith took and reports them all; a card whose send got no answer is reported, not waited on. */
@@ -338,7 +342,9 @@ async function waitAndReport(ctx: Ctx, a: Args, convId: string, ids: string[], f
 					last = done;
 				},
 			});
-	const lost = lostIds.length ? cardsFrom(await fetchRowsById(ctx.api, lostIds)).map(resultOf).map((r) => (r.status === "running" ? { ...r, code: "SENT_UNKNOWN" } : r)) : [];
+	const lost = lostIds.length
+		? cardsFrom(await fetchRowsById(ctx.api, lostIds)).map((c) => ({ ...resultOf(c), ...(c.status === "running" ? { code: claimedNotSent(c) ? "NOT_SENT" : "SENT_UNKNOWN" } : {}) }))
+		: [];
 	const byId = new Map([...waited, ...lost].map((r) => [r.id, r]));
 	await finish(ctx, convId, ids.map((id) => byId.get(id)).filter((r): r is Result => !!r), extra, { charged: charged && !has(a, "no-wait"), team });
 }
@@ -878,6 +884,12 @@ async function cmdTool(a: Args, tool: "upscale" | "cutout" | "expand") {
 }
 
 
+/** A card this machine claimed for a retry whose request never went: it carries the claim's mark, untouched since. */
+function claimedNotSent(card: Card) {
+	const sent = sentOf([card.id])[0];
+	return sent?.answer === "claiming" && !!sent.attempt && card.data.agentAttempt === sent.attempt && sent.fingerprint === fingerprint(card.data);
+}
+
 /** A request as stored on its card (for `retry`): without the ids and placement it gets when sent. */
 function requestTemplate(body: Record<string, unknown>) {
 	const { nodeId: _n, convId: _c, parentNodeId: _p, position: _pos, ...rest } = body;
@@ -914,9 +926,14 @@ async function cmdRetry(a: Args) {
 		if (!req?.kind || !req.body) return new CliError(`${card.ref}'s request is no longer on the card.`, "INVALID_PARAM");
 		if (failed(card)) return;
 		if (card.status === "finished") return new CliError(`${card.ref} is finished; \`vary ${card.ref}\` makes another take beside it.`, "INVALID_PARAM");
-		const sent = sentOf([card.id])[0];
-		// This machine's claim whose answer was lost, and it took (the card carries its mark): nothing was sent, so it goes now.
-		if (sent?.answer === "claiming" && sent.attempt && card.data.agentAttempt === sent.attempt) return;
+		let sent = sentOf([card.id])[0];
+		if (sent?.answer === "claiming") {
+			// This machine's claim whose answer was lost. It took and nothing touched the card since: nothing was sent, so
+			// it goes now. It took but the card changed since (it may have been run from the page): judged as a send whose
+			// answer was lost, from the claim on. It didn't take: judged by the send before it.
+			if (claimedNotSent(card)) return;
+			sent = card.data.agentAttempt === sent.attempt ? { ...sent, answer: "lost" } : sent.prev;
+		}
 		if (sent?.answer !== "lost") return new CliError(`${card.ref} is still generating: \`wait ${card.ref}\`.`, "BUSY");
 		if (canvas.team)
 			return new CliError(`No answer came back for ${card.ref}, and on a team canvas the team's charges can't be read to tell whether it arrived, so it isn't sent again. \`wait ${card.ref}\`; if it never finishes, delete it and make it again.`, "BUSY");
@@ -973,7 +990,11 @@ async function cmdRetry(a: Args) {
 			const before = sentOf([card.id])[0];
 			const putBack = () => (before ? noteSent(before) : forgetSent(card.id));
 			const at = serverNow();
-			noteSent({ card: card.id, conv: canvas.id, model: String(req.body!.model), kind: req.kind!, from: at, to: at, answer: "claiming", attempt: data.agentAttempt });
+			noteSent({
+				card: card.id, conv: canvas.id, model: String(req.body!.model), kind: req.kind!, from: at, to: at,
+				answer: "claiming", attempt: data.agentAttempt, fingerprint: fingerprint(data),
+				...((before?.answer === "claiming" ? before.prev : before) ? { prev: before?.answer === "claiming" ? before.prev : before } : {}),
+			});
 			let outcome;
 			try {
 				outcome = await claim(ctx.api, card, { ...(type !== card.type ? { type } : {}), data });
@@ -1272,7 +1293,8 @@ async function cmdWait(a: Args) {
 	const cards = await readCanvas(ctx.api, canvas.id);
 	const chosen = a.pos.length ? a.pos.map((r) => findCard(cards, r)) : cards.filter((c) => c.status === "running");
 	if (!chosen.length) return out({ canvas: canvas.id, cards: [], note: "Nothing is generating." });
-	await waitAndReport(ctx, a, canvas.id, chosen.map((c) => c.id), 900);
+	// A card claimed for a retry whose request never went would never finish: reported, not waited on.
+	await waitAndReport(ctx, a, canvas.id, chosen.map((c) => c.id), 900, {}, chosen.filter(claimedNotSent).map((c) => c.id));
 }
 
 // ---------- commands: run by the open canvas ----------

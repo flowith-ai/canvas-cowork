@@ -117,8 +117,11 @@ export interface FakeOptions {
 	team?: boolean;
 	/** false: a submitted card stays generating (the worker hasn't written its result yet). */
 	finish?: boolean;
-	/** "drop": a retry's claim (a PATCH conditioned on the retry mark) is made, but its answer never comes back (504). */
-	claimAnswer?: "drop";
+	/**
+	 * A retry's claim (a PATCH conditioned on the retry mark) gets no answer (504): "drop" after it was made,
+	 * "drop-unmade" without it having been made.
+	 */
+	claimAnswer?: "drop" | "drop-unmade";
 	/** The user may read the canvas but not change it (row-level security): every PATCH changes nothing. */
 	readOnly?: boolean;
 	/** Only these cards may not be changed (row-level security on some rows). */
@@ -204,6 +207,7 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 				}
 				// Only the rows every filter passes are changed, in one step (as PostgreSQL's UPDATE … WHERE).
 				if (opts.readOnly) return Response.json([]);
+				if (opts.claimAnswer === "drop-unmade" && url.searchParams.has("data->>agentAttempt")) return new Response("upstream timed out", { status: 504 });
 				const hit = rows.filter((r) => passes(r, url.searchParams) && !opts.readOnlyIds?.includes(r.id));
 				for (const r of hit) Object.assign(r, structuredClone(body));
 				if (opts.claimAnswer === "drop" && url.searchParams.has("data->>agentAttempt")) return new Response("upstream timed out", { status: 504 });

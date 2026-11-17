@@ -176,6 +176,67 @@ describe("retry's claim, when it can't be made", () => {
 		expect(submits(f)).toHaveLength(0);
 		expect(existsSync(sentFile(f, ids.failed))).toBe(false);
 	});
+	test("a claim with no answer that wasn't made leaves the earlier lost send to its own rule: sent once it clearly never went", async () => {
+		const f = fake({ submit: "drop", finish: false });
+		const card = (await f.run("image", "a cat", "--model", "z-image-turbo")).json.cards[0].id as string;
+		const file = sentFile(f, card);
+		const lostSend = JSON.parse(readFileSync(file, "utf8"));
+		writeFileSync(file, JSON.stringify({ ...lostSend, from: lostSend.from - 3_600_000, to: lostSend.to - 3_600_000 }));
+		f.opts.submit = "ok";
+		f.opts.claimAnswer = "drop-unmade";
+		expect((await f.run("retry", card.slice(0, 8), "--no-wait")).json.error).toBe("SERVER_ERROR");
+		expect(JSON.parse(readFileSync(file, "utf8")).prev.answer).toBe("lost");
+		f.opts.claimAnswer = undefined;
+		const r = await f.run("retry", card.slice(0, 8), "--no-wait");
+		expect(r.code).toBe(0);
+		expect(submits(f)).toHaveLength(2);
+	});
+	test("a claim that took, then the card was run from the page: not sent again", async () => {
+		const f = fake({ claimAnswer: "drop", finish: false, precharge: precharge(5) });
+		await f.run("retry", ref(ids.failed), "--no-wait");
+		f.opts.claimAnswer = undefined;
+		// The page's retry merges into the card's data (the mark stays) and is charged.
+		Object.assign(f.rows.find((x) => x.id === ids.failed)!.data, { expired: false, error: null, refund_amount: null, value: "" });
+		f.usage.unshift(precharge(5)("z-image-turbo"));
+		const r = await f.run("retry", ref(ids.failed), "--no-wait");
+		expect(r.json.error).toBe("BUSY");
+		expect(submits(f)).toHaveLength(0);
+	});
+	test("a claim that took, then only the page's view changed the card: sent once it clearly never ran", async () => {
+		const f = fake({ claimAnswer: "drop", finish: false });
+		await f.run("retry", ref(ids.failed), "--no-wait");
+		f.opts.claimAnswer = undefined;
+		Object.assign(f.rows.find((x) => x.id === ids.failed)!.data, { title: "Renamed in the page" });
+		expect((await f.run("retry", ref(ids.failed), "--no-wait")).json.error).toBe("BUSY");
+		const file = sentFile(f, ids.failed);
+		const sent = JSON.parse(readFileSync(file, "utf8"));
+		writeFileSync(file, JSON.stringify({ ...sent, from: sent.from - 3_600_000, to: sent.to - 3_600_000 }));
+		expect((await f.run("retry", ref(ids.failed), "--no-wait")).code).toBe(0);
+		expect(submits(f)).toHaveLength(1);
+	});
+	test("`wait` on a card claimed but never sent says to retry it, without waiting", async () => {
+		const f = fake({ claimAnswer: "drop", finish: false });
+		await f.run("retry", ref(ids.failed), "--no-wait");
+		const started = Date.now();
+		const r = await f.run("wait", ref(ids.failed), "--timeout", "60");
+		expect(Date.now() - started).toBeLessThan(10_000);
+		expect(r.code).toBe(1);
+		expect(r.json.cards[0].code).toBe("NOT_SENT");
+		expect(r.json.next).toContain("retry");
+	});
+	test("an old card whose data is a JSON string is claimed by one machine only", async () => {
+		const f = fake({ finish: false });
+		const row = f.rows.find((x) => x.id === ids.failed)! as any;
+		row.data = JSON.stringify(row.data);
+		const other = f.newHome();
+		const read = f.hold((m, u) => m === "GET" && !!u.searchParams.get("id")?.startsWith("in.("));
+		const slow = f.runWith({ home: other }, "retry", ref(ids.failed), "--no-wait");
+		await read.arrived;
+		expect((await f.run("retry", ref(ids.failed), "--no-wait")).code).toBe(0);
+		read.release();
+		expect((await slow).json.error).toBe("BUSY");
+		expect(submits(f)).toHaveLength(1);
+	});
 	test("a canvas the user can't edit says so (not that another retry ran it)", async () => {
 		const f = fake({ readOnly: true });
 		const r = await f.run("retry", ref(ids.failed), "--no-wait");
@@ -240,6 +301,8 @@ describe("retry's claim, when it can't be made", () => {
 		expect(submits(f).map((w) => (w.body as any).nodeId)).toEqual([ids.failed]);
 		expect(r.json.cards.map((c: any) => c.id)).toEqual([ids.failed]);
 		expect(r.json.stopped.error).toBe("FORBIDDEN");
+		expect(r.json.next).toContain("Stopped before the rest");
+		expect(r.code).toBe(1);
 	});
 	test("in a batch, a card that changed meanwhile is left out and the others still go", async () => {
 		const f = fake({ finish: false });

@@ -185,6 +185,14 @@ describe("retry never sends a card twice", () => {
 		expect(r.json.error).toBe("INVALID_PARAM");
 		expect(f.writes()).toEqual([]);
 	});
+	test("a credits card the page just claimed (running, its type not back yet) isn't taken for a failed card", async () => {
+		const f = fake({ finish: false });
+		Object.assign(f.rows.find((r) => r.id === ids.failed)!, { type: "22" });
+		Object.assign(f.rows.find((r) => r.id === ids.failed)!.data, { status: "running", agentAttempt: "page-claim", agentAttemptAt: new Date().toISOString() });
+		const r = await f.run("retry", ref(ids.failed), "--no-wait");
+		expect(r.json.error).toBe("BUSY");
+		expect(f.writes().filter((w) => w.path.startsWith("/image_gen"))).toHaveLength(0);
+	});
 	test("a claim records when it was made, so the canvas page sees the run as live", async () => {
 		const f = fake({ finish: false });
 		await f.run("retry", ref(ids.failed), "--no-wait");

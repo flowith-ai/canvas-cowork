@@ -922,7 +922,11 @@ async function cmdRetry(a: Args) {
 	const canvas = await canvasOf(ctx, a);
 	const cards = await readCanvas(ctx.api, canvas.id);
 	const requestOf = (c: Card) => c.data.agentRequest as { kind?: "image" | "video" | "text"; body?: Record<string, unknown> } | undefined;
-	const failed = (c: Card) => c.status === "failed" || c.type === "22" || c.type === "25";
+	// Someone (the canvas page, another agent) claimed it for a run in the last two hours and it is running: not a failed
+	// card, whatever its type (a credits card becomes a picture or clip again only once the worker takes the request).
+	const claimedLive = (c: Card) =>
+		(c.status === "running" || c.status === "init") && serverNow() - Date.parse(String(c.data.agentAttemptAt ?? "")) < 2 * 3_600_000;
+	const failed = (c: Card) => c.status === "failed" || ((c.type === "22" || c.type === "25") && !claimedLive(c));
 	// Each card once, however often it is named (a ref and its title are the same card).
 	const named = [...new Map(a.pos.map((r) => findCard(cards, r)).map((c) => [c.id, c])).values()];
 	const candidates = named.length ? named : cards.filter(failed);

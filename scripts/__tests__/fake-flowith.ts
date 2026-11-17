@@ -121,6 +121,8 @@ export interface FakeOptions {
 	claimAnswer?: "drop";
 	/** The user may read the canvas but not change it (row-level security): every PATCH changes nothing. */
 	readOnly?: boolean;
+	/** Only these cards may not be changed (row-level security on some rows). */
+	readOnlyIds?: string[];
 }
 
 /** A filter the stand-in doesn't know fails the test instead of passing every row. */
@@ -202,7 +204,7 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 				}
 				// Only the rows every filter passes are changed, in one step (as PostgreSQL's UPDATE … WHERE).
 				if (opts.readOnly) return Response.json([]);
-				const hit = rows.filter((r) => passes(r, url.searchParams));
+				const hit = rows.filter((r) => passes(r, url.searchParams) && !opts.readOnlyIds?.includes(r.id));
 				for (const r of hit) Object.assign(r, structuredClone(body));
 				if (opts.claimAnswer === "drop" && url.searchParams.has("data->>agentAttempt")) return new Response("upstream timed out", { status: 504 });
 				return Response.json(hit);

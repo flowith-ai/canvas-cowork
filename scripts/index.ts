@@ -915,6 +915,8 @@ async function cmdRetry(a: Args) {
 		if (failed(card)) return;
 		if (card.status === "finished") return new CliError(`${card.ref} is finished; \`vary ${card.ref}\` makes another take beside it.`, "INVALID_PARAM");
 		const sent = sentOf([card.id])[0];
+		// This machine's claim whose answer was lost, and it took (the card carries its mark): nothing was sent, so it goes now.
+		if (sent?.answer === "claiming" && sent.attempt && card.data.agentAttempt === sent.attempt) return;
 		if (sent?.answer !== "lost") return new CliError(`${card.ref} is still generating: \`wait ${card.ref}\`.`, "BUSY");
 		if (canvas.team)
 			return new CliError(`No answer came back for ${card.ref}, and on a team canvas the team's charges can't be read to tell whether it arrived, so it isn't sent again. \`wait ${card.ref}\`; if it never finishes, delete it and make it again.`, "BUSY");
@@ -941,17 +943,19 @@ async function cmdRetry(a: Args) {
 	const ids: string[] = [];
 	const lost: string[] = [];
 	/** Cards not sent, each with why: they changed between the first read and now. */
-	const notSent: string[] = [];
+	const notSent: CliError[] = [];
+	/** What stopped the rest of the batch (a refusal, no answer to a claim, a login that ended); those sent are still reported. */
+	let stopped: CliError | undefined;
 	try {
 		// The first read may be stale by now (another retry may have run these cards meanwhile): each card is decided
 		// again on a fresh read, with its send record as it is now; one that changed is left out, the rest still go.
 		const fresh = cardsFrom(await fetchRowsById(ctx.api, chosen.map((c) => c.id)));
-		for (const c of chosen) if (!fresh.some((f) => f.id === c.id)) notSent.push(`${c.ref}: no longer on the canvas`);
+		for (const c of chosen) if (!fresh.some((f) => f.id === c.id)) notSent.push(new CliError(`${c.ref} is no longer on the canvas.`, "NOT_FOUND"));
 		const records = await chargesFor(fresh);
 		for (const card of fresh) {
 			const why = whyNot(card, records);
 			if (why) {
-				notSent.push(why.message);
+				notSent.push(why);
 				continue;
 			}
 			const req = requestOf(card)!;
@@ -964,26 +968,36 @@ async function cmdRetry(a: Args) {
 			const data = { ...rest, value: "", status: "running", agentAttempt: crypto.randomUUID(), ...(req.kind === "video" ? { videoId: null } : {}) };
 			// A refusal may have turned it into the canvas's credits or upgrade card: back to the card it was.
 			const type = card.type === "22" || card.type === "25" ? (req.kind === "video" ? "13" : "2") : card.type;
-			// Written down before the claim: if the claim's answer is lost, the card (claimed, nothing sent yet) reads as
-			// possibly sent, and is sent again only once it clearly never went. Put back when the claim surely didn't happen.
+			// Written down before the claim, with its mark: if the claim's answer is lost, the next retry sees whether it
+			// took (the card carries the mark, nothing sent: it goes at once) or not. Put back when it surely didn't happen.
 			const before = sentOf([card.id])[0];
 			const putBack = () => (before ? noteSent(before) : forgetSent(card.id));
 			const at = serverNow();
-			noteSent({ card: card.id, conv: canvas.id, model: String(req.body!.model), kind: req.kind!, from: at, to: at, answer: "lost" });
+			noteSent({ card: card.id, conv: canvas.id, model: String(req.body!.model), kind: req.kind!, from: at, to: at, answer: "claiming", attempt: data.agentAttempt });
 			let outcome;
 			try {
 				outcome = await claim(ctx.api, card, { ...(type !== card.type ? { type } : {}), data });
 			} catch (e) {
-				if (e instanceof CliError && e.status !== undefined && e.status < 500) {
+				// An answer (or none needed: the login ended before it went) means the claim surely didn't happen.
+				if (e instanceof CliError && (e.status === undefined || e.status < 500)) {
 					putBack();
-					throw e;
+					stopped = e;
+				} else {
+					stopped = new CliError(`No answer came back while claiming ${card.ref} (${e instanceof Error ? e.message : String(e)}); nothing was sent. \`retry ${card.ref}\` again: it carries on from here.`, "SERVER_ERROR");
 				}
-				throw new CliError(`No answer came back while claiming ${card.ref} (${e instanceof Error ? e.message : String(e)}), so it may be claimed with nothing sent. \`wait ${card.ref}\`; \`retry ${card.ref}\` sends it once it clearly never went.`, "SENT_UNKNOWN");
+				break;
 			}
 			if (outcome !== "done") {
 				putBack();
-				if (outcome === "forbidden") throw new CliError(`${card.ref} couldn't be changed: it isn't yours to edit on this canvas.`, "FORBIDDEN");
-				notSent.push(`${card.ref}: ${outcome === "gone" ? "no longer on the canvas" : "changed since it was read (another retry, on another machine, ran it first; or its result came in)"}`);
+				if (outcome === "forbidden") {
+					stopped = new CliError(`${card.ref} couldn't be changed: it isn't yours to edit on this canvas.`, "FORBIDDEN");
+					break;
+				}
+				notSent.push(
+					outcome === "gone" ? new CliError(`${card.ref} is no longer on the canvas.`, "NOT_FOUND")
+					: outcome === "unchecked" ? new CliError(`${card.ref} wasn't claimed, and reading it back to tell why failed; nothing was sent: retry it again.`, "SERVER_ERROR")
+					: new CliError(`${card.ref} changed since it was read (another retry, on another machine, ran it first; or its result came in).`, "BUSY"),
+				);
 				continue;
 			}
 			const body = {
@@ -992,15 +1006,27 @@ async function cmdRetry(a: Args) {
 				convId: canvas.id,
 				...(req.kind === "video" ? { parentNodeId: card.row.p_id ?? canvas.id, position: card.row.position ?? { x: 0, y: 0 }, rerun: true } : {}),
 			};
-			if ((await sendFor(ctx, req.kind!, body, { id: card.id, createdAt: card.createdAt, type, data })) === "lost") lost.push(card.id);
-			ids.push(card.id);
 			log(`Retrying ${card.ref} (${req.kind}, ${String(req.body!.model)})…`);
+			try {
+				if ((await sendFor(ctx, req.kind!, body, { id: card.id, createdAt: card.createdAt, type, data })) === "lost") lost.push(card.id);
+				ids.push(card.id);
+			} catch (e) {
+				// Refused (and its card marked): the rest would most likely be refused too.
+				stopped = e instanceof CliError ? e : new CliError(String(e), "SERVER_ERROR");
+				break;
+			}
 		}
 	} finally {
 		claimed.forEach(releaseRetry);
 	}
-	if (!ids.length) throw new CliError(`Nothing was sent. ${notSent.join(" ")}`, "BUSY");
-	await waitAndReport(ctx, a, canvas.id, ids, chosen.some((c) => c.kind === "video") ? 900 : 300, notSent.length ? { notRetried: notSent } : {}, lost);
+	if (!ids.length) {
+		if (stopped) throw stopped;
+		throw notSent.length === 1 ? notSent[0]! : new CliError(`Nothing was sent. ${notSent.map((e) => e.message).join(" ")}`, "BUSY");
+	}
+	await waitAndReport(ctx, a, canvas.id, ids, chosen.some((c) => c.kind === "video") ? 900 : 300, {
+		...(notSent.length ? { notRetried: notSent.map((e) => e.message) } : {}),
+		...(stopped ? { stopped: { error: stopped.code, message: stopped.message } } : {}),
+	}, lost);
 }
 
 async function cmdSpent(a: Args) {

@@ -21,8 +21,12 @@ export interface Sent {
 	/** Server time the request went out, and its answer came back (or the connection failed). */
 	from: number;
 	to: number;
-	/** "lost": no answer came back, so whether Flowith took it is unknown. */
-	answer: "taken" | "refused" | "lost";
+	/**
+	 * "lost": no answer came back, so whether Flowith took it is unknown. "claiming": a retry was claiming the card under
+	 * the mark `attempt` and nothing has been sent yet (if the claim took, the card carries that mark).
+	 */
+	answer: "taken" | "refused" | "lost" | "claiming";
+	attempt?: string;
 }
 
 export interface UsageRecord {
@@ -149,7 +153,7 @@ export function chargeOf(sends: Sent[], records: UsageRecord[], expected: number
 	const lost = sends.find((s) => s.answer === "lost");
 	if (lost) return { unknown: `no answer came back for ${lost.card.slice(0, 8)}, so its charge can't be told apart` };
 	const claimed = new Set<string>();
-	const taken = sends.filter((s) => s.answer !== "refused");
+	const taken = sends.filter((s) => s.answer !== "refused" && s.answer !== "claiming");
 	for (const model of new Set(taken.map((s) => s.model))) {
 		const batch = taken.filter((s) => s.model === model);
 		const from = Math.min(...batch.map((s) => s.from));

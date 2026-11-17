@@ -89,7 +89,8 @@ const markOf = (data: Record<string, unknown> | undefined, key: string) => {
 	return v === undefined || v === null ? null : String(v);
 };
 
-export type PatchOutcome = "done" | "changed" | "gone" | "forbidden";
+/** done; or not, because the card changed, is gone, isn't the user's to edit, or couldn't be read back to tell. */
+export type PatchOutcome = "done" | "changed" | "gone" | "forbidden" | "unchecked";
 
 /**
  * Patches a card. flow_node is partitioned by created_at, so rows are addressed by id + created_at. `data` replaces the
@@ -99,12 +100,13 @@ export type PatchOutcome = "done" | "changed" | "gone" | "forbidden";
  */
 export async function tryPatch(
 	api: Api,
-	card: Pick<Card, "id" | "createdAt"> & { type?: string; data?: Record<string, unknown> },
+	card: Pick<Card, "id" | "createdAt"> & { type?: string; data?: Record<string, unknown>; row?: { data?: unknown } },
 	fields: Record<string, unknown>,
 	opts: { asRead?: Record<string, unknown>; type?: boolean } = {},
 ): Promise<PatchOutcome> {
 	const q = new URLSearchParams({ id: `eq.${card.id}`, created_at: `eq.${card.createdAt}`, is_delete: "not.is.true", select: "id" });
-	const read = opts.asRead ?? ("data" in fields ? card.data : undefined);
+	// Data stored as a JSON string (old rows) has no keys to compare in SQL: such a card is written as before.
+	const read = typeof card.row?.data === "string" ? undefined : (opts.asRead ?? ("data" in fields ? card.data : undefined));
 	for (const key of read ? ["status", "agentAttempt"] : []) {
 		const v = markOf(read, key);
 		q.append(`data->>${key}`, v === null ? "is.null" : `eq.${v}`);
@@ -113,7 +115,12 @@ export async function tryPatch(
 	const rows = await rest<Array<{ id: string }>>(api, `flow_node?${q}`, { method: "PATCH", json: fields, prefer: "return=representation" });
 	if (rows?.length) return "done";
 	// Nothing was changed: why, from the card as it is now.
-	const now = cardsFrom(await fetchRowsById(api, [card.id]))[0];
+	let now: Card | undefined;
+	try {
+		now = cardsFrom(await fetchRowsById(api, [card.id]))[0];
+	} catch {
+		return "unchecked";
+	}
 	if (!now) return "gone";
 	if (read && (markOf(now.data, "status") !== markOf(read, "status") || markOf(now.data, "agentAttempt") !== markOf(read, "agentAttempt"))) return "changed";
 	if (opts.type && card.type && now.type !== card.type) return "changed";
@@ -122,7 +129,7 @@ export async function tryPatch(
 
 export async function patch(
 	api: Api,
-	card: Pick<Card, "id" | "createdAt"> & { type?: string; data?: Record<string, unknown> },
+	card: Pick<Card, "id" | "createdAt"> & { type?: string; data?: Record<string, unknown>; row?: { data?: unknown } },
 	fields: Record<string, unknown>,
 	opts: { asRead?: Record<string, unknown> } = {},
 ) {
@@ -131,6 +138,7 @@ export async function patch(
 	if (outcome === "gone") throw new CliError(`Card ${ref} is no longer on the canvas.`, "NOT_FOUND");
 	if (outcome === "changed") throw new CliError(`Card ${ref} changed while this ran (its result came in, or another command changed it): \`look\` and try again.`, "BUSY");
 	if (outcome === "forbidden") throw new CliError(`Card ${ref} couldn't be changed (not yours to edit).`, "FORBIDDEN");
+	if (outcome === "unchecked") throw new CliError(`Card ${ref} wasn't changed, and reading it back to tell why failed: try again.`, "SERVER_ERROR");
 }
 
 /**
@@ -355,6 +363,8 @@ export async function groupCards(api: Api, convId: string, all: Card[], members:
 export async function ungroup(api: Api, convId: string, all: Card[], group: Card) {
 	if (group.kind !== "group") throw new CliError(`${group.ref} is not a group.`, "INVALID_PARAM");
 	const members = all.filter((c) => c.groupId === group.id);
+	// Its members' data is rewritten: one still generating would have its result undone, so none may be.
+	for (const c of members) settled(c, "ungroup");
 	await Promise.all(
 		members.map((c) => {
 			const { group_id: _g, ...data } = c.data;

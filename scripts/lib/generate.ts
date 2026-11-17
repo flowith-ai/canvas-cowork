@@ -383,12 +383,64 @@ export async function waitFor(
 	}
 }
 
-/** Marks a card failed when the request was refused before the worker took it. */
-export async function failCard(api: Api, card: Pick<Card, "id" | "createdAt">, data: Record<string, unknown>, failure: unknown) {
+/** The canvas's failure kinds (frontend ErrorType), which its cards know how to explain. */
+function errorTypeOf(code: string | undefined): string {
+	if (code === "CONTENT_POLICY") return "content_policy";
+	if (code === "RATE_LIMITED") return "provider_rate_limit";
+	if (code === "TIMEOUT") return "provider_timeout";
+	if (code === "INVALID_PARAM" || code === "INVALID_INPUT" || code === "INVALID_MODEL" || code === "BAD_REQUEST") return "invalid_request";
+	return code ? "provider_error" : "provider_network";
+}
+
+/**
+ * Marks a card whose request was refused before the worker took it, the way the canvas marks its own: out of credits
+ * becomes the canvas's credits card, a model the plan doesn't include its upgrade card, anything else an error the
+ * card shows (an image card reads it from its value, as the worker writes it).
+ */
+export async function failCard(
+	api: Api,
+	card: Pick<Card, "id" | "createdAt" | "type">,
+	data: Record<string, unknown>,
+	failure: unknown,
+) {
 	const { patch } = await import("./write");
 	const error = failure instanceof Error ? failure.message : String(failure);
 	const code = failure instanceof CliError ? failure.code : undefined;
-	await patch(api, card, { data: { ...data, status: "failed", error, ...(code ? { error_code: code } : {}) } }).catch(() => {});
+	const body = (failure instanceof CliError && failure.data && typeof failure.data === "object" ? failure.data : {}) as Record<string, unknown>;
+	const text = (v: unknown) => (typeof v === "string" && v ? v : undefined);
+	let fields: Record<string, unknown>;
+	if (code === "NO_CREDITS" && body.reason === "is_free_user" && body.modelTier === "t1") {
+		fields = { type: "25", data: { ...data, status: "failed", attemptedModel: text(body.model) ?? data.model, httpCode: 402, errorMessage: text(body.error) } };
+	} else if (code === "NO_CREDITS") {
+		fields = {
+			type: "22",
+			data: {
+				...data,
+				status: "failed",
+				...(text(body.model) ? { model: body.model, attemptedModel: body.model } : {}),
+				...(text(body.modelTier) ? { modelTier: body.modelTier } : {}),
+				...(text(body.target_feature) ? { targetFeature: body.target_feature } : {}),
+				...(text(body.reason) ? { creditFailureReason: body.reason } : {}),
+				...(text(body.stage) ? { creditFailureStage: body.stage } : {}),
+				...(text(body.code) ? { creditFailureCode: body.code } : {}),
+				errorMessage: text(body.error) ?? error,
+			},
+		};
+	} else {
+		const errorType = errorTypeOf(code);
+		const image = card.type === "2" && data.isImage === true;
+		fields = {
+			data: {
+				...data,
+				status: "failed",
+				error,
+				error_type: errorType,
+				...(code ? { error_code: code } : {}),
+				...(image ? { value: JSON.stringify({ value: errorType, error_type: errorType, error }) } : {}),
+			},
+		};
+	}
+	await patch(api, card, fields).catch(() => {});
 }
 
 export type { Catalog };

@@ -94,6 +94,12 @@ function kindOf(type: string, d: Record<string, any>): { kind: CardKind; url?: s
 	if (type === "1") return { kind: "prompt" };
 	if (type === "4") return { kind: "note" };
 	if (type === "7") return { kind: d.kind === "character" ? "character" : "text" };
+	// The canvas's out-of-credits and upgrade cards stand in for the card that was refused.
+	if (type === "22" || type === "25") {
+		const asked = d.agentRequest?.kind;
+		if (asked === "image" || asked === "video" || asked === "text") return { kind: asked };
+		return { kind: d.isImage === true ? "image" : "other" };
+	}
 	if (type === "2") {
 		if (d.mode === "video_generation") return { kind: "video", url: valueUrl };
 		if (d.isImage === true || d.mode === "image_generation" || (valueUrl && IMAGE_PATH.test(valueUrl))) return { kind: "image", url: valueUrl };

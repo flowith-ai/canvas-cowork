@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { estimateCredits, imageSizing, resolveModel, videoParams, type Catalog } from "../lib/catalog";
 import { cardsFrom, findCard, readableError, type FlowNodeRow } from "../lib/desk";
-import { imageRequest, nameReferences, titleFrom, videoRequest, type Ref } from "../lib/generate";
+import { imageRequest, nameReferences, resultOf, titleFrom, videoRequest, type Ref } from "../lib/generate";
 import { imageSize } from "../lib/media";
 import { klingReferenceName, seedanceReferenceName } from "../lib/reference-names";
 import { expandFrame } from "../lib/tools";
@@ -140,6 +140,13 @@ describe("reading the canvas", () => {
 		const raw = JSON.stringify({ value: "provider_error", error_type: "provider_error", error_message: "Workflow delivery failed: -1", request_error: { message: "x" } });
 		expect(readableError(raw)).toBe("provider_error: Workflow delivery failed: -1");
 		expect(readableError("Generation failed\n\nPlease try again.")).toBe("Generation failed Please try again.");
+	});
+	test("a refused card that became the canvas's credits card keeps its kind and reads as NO_CREDITS", () => {
+		const [refused] = cardsFrom([
+			row(a, "22", { status: "failed", errorMessage: "insufficient credits", agentRequest: { kind: "video", body: {} } }),
+		]);
+		expect(refused!.kind).toBe("video");
+		expect(resultOf(refused!)).toMatchObject({ status: "failed", code: "NO_CREDITS", error: "insufficient credits" });
 	});
 	test("cards are found by ref, prefix or title", () => {
 		expect(findCard(cards, "bbbb").id).toBe(b);

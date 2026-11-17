@@ -29,7 +29,7 @@ async function submit(api: Api, placed: Placed, path: string, json: Record<strin
 		await worker(api, path, { json, timeoutMs: 120_000 });
 	} catch (e) {
 		const row = placed.rows.find((r) => r.id === placed.ids[0]);
-		if (row) await failCard(api, { id: row.id, createdAt: row.created_at }, (row.data as Record<string, unknown>) ?? {}, e);
+		if (row) await failCard(api, { id: row.id, createdAt: row.created_at, type: row.type }, (row.data as Record<string, unknown>) ?? {}, e);
 		throw e;
 	}
 }

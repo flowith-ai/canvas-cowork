@@ -379,9 +379,9 @@ function cardLine(c: Card, byId: Map<string, Card>, indent: string): string {
 	if (c.title) bits.push(`"${c.title.length > 40 ? `${c.title.slice(0, 39)}…` : c.title}"`);
 	if (c.model) bits.push(c.model);
 	if (c.ratio && (c.kind === "image" || c.kind === "video")) bits.push(c.ratio);
-	if (c.status && c.kind !== "group") bits.push(STATUS_MARK[c.status] ?? c.status);
 	if (c.type === "22") bits.push("✗ no credits");
-	if (c.type === "25") bits.push("✗ needs a higher plan");
+	else if (c.type === "25") bits.push("✗ needs a higher plan");
+	else if (c.status && c.kind !== "group") bits.push(STATUS_MARK[c.status] ?? c.status);
 	bits.push(`@${c.rect.x},${c.rect.y} ${c.rect.width}×${c.rect.height}`);
 	const from = [...(c.madeFrom ?? []), ...(c.references ?? []), ...(c.follows ? [c.follows] : [])];
 	if (from.length) bits.push(`← ${[...new Set(from)].map(short).join(",")}`);
@@ -590,7 +590,7 @@ async function cmdImage(a: Args, base?: { source: Card }) {
 				await send(ctx.api, "image", imageRequest(j, id, canvas.id).body);
 			} catch (e) {
 				const row = rows.get(id);
-				if (row) await failCard(ctx.api, { id, createdAt: row.created_at }, (row.data as Record<string, unknown>) ?? {}, e);
+				if (row) await failCard(ctx.api, { id, createdAt: row.created_at, type: row.type }, (row.data as Record<string, unknown>) ?? {}, e);
 				if (jobs.length === 1) throw e;
 			}
 		}),
@@ -672,7 +672,7 @@ async function cmdVideo(a: Args) {
 		const { body } = videoRequest(job, id, canvas.id, row.p_id ?? canvas.id, row.position ?? { x: 0, y: 0 });
 		await send(ctx.api, "video", body);
 	} catch (e) {
-		await failCard(ctx.api, { id, createdAt: row.created_at }, (row.data as Record<string, unknown>) ?? {}, e);
+		await failCard(ctx.api, { id, createdAt: row.created_at, type: row.type }, (row.data as Record<string, unknown>) ?? {}, e);
 		throw e;
 	}
 	await waitAndReport(ctx, a, canvas.id, [id], 900, { model: modelId, estimatedCredits: credits });
@@ -715,7 +715,7 @@ async function cmdText(a: Args) {
 				await send(ctx.api, "text", textRequest(j, id, canvas.id));
 			} catch (e) {
 				const row = rows.get(id);
-				if (row) await failCard(ctx.api, { id, createdAt: row.created_at }, (row.data as Record<string, unknown>) ?? {}, e);
+				if (row) await failCard(ctx.api, { id, createdAt: row.created_at, type: row.type }, (row.data as Record<string, unknown>) ?? {}, e);
 				if (jobs.length === 1) throw e;
 			}
 		}),
@@ -785,7 +785,7 @@ async function cmdVary(a: Args) {
 			try {
 				await send(ctx.api, req.kind, body);
 			} catch (e) {
-				await failCard(ctx.api, { id: row.id, createdAt: row.created_at }, (row.data as Record<string, unknown>) ?? {}, e);
+				await failCard(ctx.api, { id: row.id, createdAt: row.created_at, type: row.type }, (row.data as Record<string, unknown>) ?? {}, e);
 				if (n === 1) throw e;
 			}
 		}
@@ -875,8 +875,14 @@ async function cmdRetry(a: Args) {
 	for (const card of chosen) {
 		const req = requestOf(card)!;
 		if (!req.kind || !req.body) continue;
-		const { error: _e, error_type: _t, error_code: _c, request_id: _r, ...data } = card.data;
-		await patch(ctx.api, card, { ...(card.type === "22" || card.type === "25" ? { type: card.kind === "video" ? "13" : "2" } : {}), data: { ...data, value: "", status: "running", ...(req.kind === "video" ? { videoId: null } : {}) } });
+		const {
+			error: _e, error_type: _t, error_code: _c, request_id: _r,
+			errorMessage: _m, creditFailureReason: _cr, creditFailureStage: _cs, creditFailureCode: _cc, httpCode: _h, attemptedModel: _a,
+			...data
+		} = card.data;
+		// A refusal may have turned it into the canvas's credits or upgrade card: back to the card it was.
+		const type = card.type === "22" || card.type === "25" ? (req.kind === "video" ? "13" : "2") : card.type;
+		await patch(ctx.api, card, { ...(type !== card.type ? { type } : {}), data: { ...data, value: "", status: "running", ...(req.kind === "video" ? { videoId: null } : {}) } });
 		const body = {
 			...req.body,
 			nodeId: card.id,
@@ -886,7 +892,7 @@ async function cmdRetry(a: Args) {
 		try {
 			await send(ctx.api, req.kind, body);
 		} catch (e) {
-			await failCard(ctx.api, card, data, e);
+			await failCard(ctx.api, { ...card, type }, data, e);
 			throw e;
 		}
 		ids.push(card.id);

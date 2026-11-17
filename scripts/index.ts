@@ -952,13 +952,14 @@ async function cmdAdd(a: Args) {
 	const items: NewCard[] = [];
 	for (const input of a.pos) {
 		const up = await toUrl(ctx.api, input, canvas.id);
-		const title = flag(a, "title") ?? up.name.replace(/\.[^.]+$/, "");
+		// Named like a file the user uploads in the canvas: the file name as it is.
+		const title = flag(a, "title") ?? up.name;
 		const common = { title, name: up.name, value: up.url, insert: true, mediaSource: "upload", uploadState: "ready", status: "finished" };
 		if (up.media === "image") {
 			const { remoteImageSize } = await import("./lib/media");
 			const size = await remoteImageSize(up.url);
 			const ratio = size ? `${size.width}:${size.height}` : "1:1";
-			items.push({ kind: "image", size: cardSize("image", ratio), data: { ...common, isImage: true, mode: "image_generation", aspect_ratio: ratio } });
+			items.push({ kind: "image", size: cardSize("image", ratio), data: { ...common, isImage: true, mode: "image", aspect_ratio: ratio } });
 		} else if (up.media === "video") items.push({ kind: "video", size: cardSize("video", flag(a, "ratio") ?? "16:9"), data: { ...common, videoId: up.url, aspect_ratio: flag(a, "ratio") ?? "16:9" } });
 		else if (up.media === "audio") items.push({ kind: "audio", size: cardSize("audio"), data: { ...common, audioUrl: up.url } });
 		else throw new CliError(`${up.name}: add takes pictures, clips and sounds.`, "INVALID_PARAM");

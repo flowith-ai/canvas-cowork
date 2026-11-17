@@ -884,11 +884,23 @@ async function cmdTool(a: Args, tool: "upscale" | "cutout" | "expand") {
 }
 
 
-/** A card this machine claimed for a retry whose request never went: it carries the claim's mark, untouched since. */
-function claimedNotSent(card: Card) {
-	const sent = sentOf([card.id])[0];
-	return sent?.answer === "claiming" && !!sent.attempt && card.data.agentAttempt === sent.attempt && sent.fingerprint === fingerprint(card.data);
+/**
+ * What this machine's send record says about a card now. A claim for a retry whose answer was lost is read through:
+ * it took and the card is untouched since (its mark, its data as the claim wrote it): "unsent", nothing went; it took
+ * but the card changed since (it may have been run from the page): a send whose answer was lost, from the claim on; it
+ * didn't take: what the record before it says.
+ */
+function sendState(card: Card, record = sentOf([card.id])[0]): Sent | "unsent" | undefined {
+	let s = record;
+	while (s?.answer === "claiming") {
+		if (s.attempt && card.data.agentAttempt === s.attempt) return s.fingerprint === fingerprint(card.data) ? "unsent" : { ...s, answer: "lost" };
+		s = s.prev;
+	}
+	return s;
 }
+
+/** A card this machine claimed for a retry whose request never went. */
+const claimedNotSent = (card: Card) => sendState(card) === "unsent";
 
 /** A request as stored on its card (for `retry`): without the ids and placement it gets when sent. */
 function requestTemplate(body: Record<string, unknown>) {
@@ -926,14 +938,9 @@ async function cmdRetry(a: Args) {
 		if (!req?.kind || !req.body) return new CliError(`${card.ref}'s request is no longer on the card.`, "INVALID_PARAM");
 		if (failed(card)) return;
 		if (card.status === "finished") return new CliError(`${card.ref} is finished; \`vary ${card.ref}\` makes another take beside it.`, "INVALID_PARAM");
-		let sent = sentOf([card.id])[0];
-		if (sent?.answer === "claiming") {
-			// This machine's claim whose answer was lost. It took and nothing touched the card since: nothing was sent, so
-			// it goes now. It took but the card changed since (it may have been run from the page): judged as a send whose
-			// answer was lost, from the claim on. It didn't take: judged by the send before it.
-			if (claimedNotSent(card)) return;
-			sent = card.data.agentAttempt === sent.attempt ? { ...sent, answer: "lost" } : sent.prev;
-		}
+		const sent = sendState(card);
+		// Claimed by this machine and never sent: it goes now.
+		if (sent === "unsent") return;
 		if (sent?.answer !== "lost") return new CliError(`${card.ref} is still generating: \`wait ${card.ref}\`.`, "BUSY");
 		if (canvas.team)
 			return new CliError(`No answer came back for ${card.ref}, and on a team canvas the team's charges can't be read to tell whether it arrived, so it isn't sent again. \`wait ${card.ref}\`; if it never finishes, delete it and make it again.`, "BUSY");
@@ -990,10 +997,12 @@ async function cmdRetry(a: Args) {
 			const before = sentOf([card.id])[0];
 			const putBack = () => (before ? noteSent(before) : forgetSent(card.id));
 			const at = serverNow();
+			// The record before, as what it means now (a claim of its own read through), so a chain of lost claims stays short.
+			const state = sendState(card, before);
+			const prev = state === "unsent" ? { ...before!, prev: undefined } : state;
 			noteSent({
 				card: card.id, conv: canvas.id, model: String(req.body!.model), kind: req.kind!, from: at, to: at,
-				answer: "claiming", attempt: data.agentAttempt, fingerprint: fingerprint(data),
-				...((before?.answer === "claiming" ? before.prev : before) ? { prev: before?.answer === "claiming" ? before.prev : before } : {}),
+				answer: "claiming", attempt: data.agentAttempt, fingerprint: fingerprint(data), ...(prev ? { prev } : {}),
 			});
 			let outcome;
 			try {

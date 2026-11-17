@@ -191,6 +191,16 @@ describe("retry's claim, when it can't be made", () => {
 		expect(r.code).toBe(0);
 		expect(submits(f)).toHaveLength(2);
 	});
+	test("two claims in a row without an answer (the first made, the second not): the card is still sent, once", async () => {
+		const f = fake({ claimAnswer: "drop", finish: false });
+		await f.run("retry", ref(ids.failed), "--no-wait");
+		f.opts.claimAnswer = "drop-unmade";
+		expect((await f.run("retry", ref(ids.failed), "--no-wait")).json.error).toBe("SERVER_ERROR");
+		f.opts.claimAnswer = undefined;
+		const r = await f.run("retry", ref(ids.failed), "--no-wait");
+		expect(r.code).toBe(0);
+		expect(submits(f)).toHaveLength(1);
+	});
 	test("a claim that took, then the card was run from the page: not sent again", async () => {
 		const f = fake({ claimAnswer: "drop", finish: false, precharge: precharge(5) });
 		await f.run("retry", ref(ids.failed), "--no-wait");

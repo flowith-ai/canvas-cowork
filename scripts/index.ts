@@ -1,2960 +1,1500 @@
 #!/usr/bin/env bun
 /**
- * Canvas Bot CLI — Zero-dependency Flowith canvas control
+ * canvas-cowork — work on a Flowith 3.0 canvas from Claude Code, Codex or any agent with a shell.
  *
- * Native WebSocket + fetch + http only. No npm packages.
- * Works with: Bun (any), Node 22+
+ * Every command acts on the user's canvas the way their own hands (or the in-app Creator Agent,
+ * Flo) would: cards are placed where Flo places them, generations go through the canvas's own
+ * routes and pricing, and an open canvas shows each card arrive live. Zero dependencies; Bun.
  *
- * Session is auto-created via browser handshake — no credentials needed.
+ *   bun scripts/index.ts <command> [args] [--flags]      (`help` lists everything)
  */
 
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join, resolve } from "path";
 import {
-	existsSync,
-	readFileSync,
-	writeFileSync,
-	statSync,
-	chmodSync,
-	unlinkSync,
-	mkdirSync,
-	renameSync,
-} from "fs";
-import { createServer } from "http";
-import { resolve, join, basename, extname } from "path";
-import { homedir } from "os";
-import { type ApiSession, CliError, workerJson, workerUrl } from "./lib/http";
-import {
-	REFRESH_AHEAD_MS,
-	getJwtUserId,
-	isJwtExpired,
-	jwtExpiresAtIso,
-	jwtExpiresInMs,
-	refreshAccessToken,
-} from "./lib/session";
-import {
-	DEFAULT_ALIAS,
-	type Mode,
-	compactModelLine,
-	fetchModels,
-	loadAliasTable,
-	modelsForMode,
+	type Catalog,
+	type Kind,
+	AUDIO_MODELS,
+	defaultModel,
+	estimateCredits,
+	fetchCatalog,
+	modelLine,
+	modelsOf,
 	resolveModel,
-	summarizeModel,
-} from "./lib/models";
+} from "./lib/catalog";
 import {
-	cleanFailed,
+	type Card,
+	canvasUrl,
+	cardsFrom,
 	createCanvas,
-	deleteNodes,
+	fetchRowsById,
+	findCard,
 	getCanvas,
+	isUuid,
 	listCanvases,
-	readNodes,
-} from "./lib/canvas";
-import { resolveMedia, uploadFile } from "./lib/upload";
+	readCanvas,
+	resolveCanvas,
+} from "./lib/desk";
 import {
-	BATCH_ROW_HEIGHT,
-	type GenResult,
-	compactResult,
-	genImage,
-	genText,
-	genVideo,
-	questionPositionFor,
+	type ImageJob,
+	type Ref,
+	type Result,
+	type TextJob,
+	type VideoJob,
+	failCard,
+	hasHan,
+	imageCardData,
+	imageRequest,
+	resultOf,
+	send,
+	textCardData,
+	textRequest,
+	titleFrom,
+	videoCardData,
+	videoRequest,
+	waitFor,
 } from "./lib/generate";
-import { outputPathFor, saveResult } from "./lib/download";
+import { type Api, CliError, forbidWrites, serverNow, sleep, worker } from "./lib/http";
+import { type Sent, SETTLE_MS, chargeOf, chargedSince, claimRetry, creditsOf, noteSent, releaseRetry, sentOf, usageOf } from "./lib/ledger";
+import { download, fileFor, isUrl, mediaOf, toUrl } from "./lib/media";
+import {
+	type Session,
+	activeSession,
+	apiOf,
+	forgetOldLogin,
+	jwtClaims,
+	login,
+	logout,
+	siteUrl,
+	workerFor,
+	openUrl,
+	saveSession,
+	userIdOf,
+} from "./lib/session";
+import { cutout, expand, makeSound, upscaleImage, upscaleVideo } from "./lib/tools";
+import { videoPrice } from "./lib/video-cost";
+import { runOnCanvas } from "./lib/live";
+import {
+	type Layout,
+	type NewCard,
+	type Placed,
+	arrangePoints,
+	cardSize,
+	claimCardForRetry,
+	deleteCards,
+	groupCards,
+	link,
+	moveTo,
+	nearestFree,
+	obstaclesOf,
+	patch,
+	placeCards,
+	rename,
+	ungroup,
+} from "./lib/write";
+import { CANVAS_NODE_GAP, groupLayout, isClear, placeSingle } from "./lib/placement";
 
-// ============ Runtime check ============
+// ---------- args ----------
 
-if (typeof globalThis.WebSocket === "undefined") {
-	console.error("Error: WebSocket not available. Use bun or Node 22+.");
-	process.exit(1);
+const BOOLEAN_FLAGS = new Set([
+	"json", "quiet", "no-wait", "wait", "all", "full", "fresh", "dry-run", "no-audio", "audio", "draft",
+	"transparent", "no-open", "instrumental", "remove", "help",
+]);
+
+interface Args {
+	cmd: string;
+	pos: string[];
+	flags: Map<string, string[]>;
 }
 
-// ============ Types ============
-
-interface CanvasBotSession {
-	sessionId: string;
-	sessionSecret: string;
-	supabaseUrl: string;
-	supabaseKey: string;
-	accessToken: string;
-	/** Only present when the frontend handshake passes it; lets the CLI refresh itself. */
-	refreshToken?: string;
-	workerURL?: string;
-	activeConvId?: string;
-	createdAt: string;
-	expiresAt: string;
-	lastBrowserOpenAt?: string;
-	browserOpenCount?: number;
-	flowithUrl?: string;
-}
-
-interface BotActionBase {
-	actionId: string;
-	sessionId: string;
-	timestamp: string;
-	agentId?: string;
-}
-type BotAction = BotActionBase &
-	(
-		| { type: "ping" }
-		| {
-				type: "register_session";
-				expiresAt: string;
-				sessionSecret: string;
-				botClient?: string;
-		  }
-		| { type: "create_canvas"; title?: string }
-		| { type: "switch_canvas"; convId: string }
-		| { type: "list_models"; chatMode?: string }
-		| { type: "list_canvases" }
-		| { type: "search_canvases"; query: string }
-		| {
-				type: "read_nodes";
-				convId: string;
-				nodeId?: string;
-				full?: boolean;
-				failed?: boolean;
-		  }
-		| {
-				type: "poll_generation";
-				convId: string;
-				createdAfter: string;
-				parentId?: string;
-		  }
-		| {
-				type: "recall";
-				query: string;
-				limit?: number;
-				filters?: Record<string, unknown>;
-		  }
-		| { type: "recall_node"; convId: string; nodeId: string }
-		| { type: "clean_failed"; convId: string }
-		| { type: "get_current_canvas"; includeTitle?: boolean }
-		| { type: "set_mode"; mode: string }
-		| { type: "set_model"; model: string }
-		| {
-				type: "submit";
-				value: string;
-				files?: Array<{ url: string; name: string; type?: string }>;
-				follow?: string;
-				aspectRatio?: string;
-				imageSize?: string;
-				videoDuration?: string;
-				videoLoop?: boolean;
-				videoAudio?: boolean;
-		  }
-		| { type: "comment"; nodeId: string; text: string }
-		| { type: "delete_node"; nodeId: string }
-		| { type: "delete_nodes"; nodeIds: string[] }
-		| { type: "read_node"; nodeId: string }
-		| { type: "read_all_nodes" }
-	);
-type BotActionPayload<T = BotAction> = T extends BotActionBase
-	? Omit<T, keyof BotActionBase>
-	: never;
-type BotResponse =
-	| { type: "ack"; actionId: string }
-	| { type: "result"; actionId: string; data: unknown }
-	| { type: "error"; actionId: string; code: string; message: string }
-	| { type: "pong"; actionId: string };
-
-// ============ Constants ============
-
-const SESSION_DIR = join(homedir(), ".flowith");
-const SESSION_FILE = join(SESSION_DIR, "bot-session.json");
-const BATCH_DIR = join(SESSION_DIR, "batches");
-const SESSION_LOCK_FILE = join(SESSION_DIR, "bot-session.lock");
-const LEGACY_SESSION_FILE = ".flowith-bot-session.json";
-const BOT_EVENTS = { ACTION: "bot_action", RESPONSE: "bot_response" } as const;
-const ACTION_TIMEOUT_MS = 30_000;
-const ORACLE_TIMEOUT_MS = 120_000;
-const HEARTBEAT_MS = 29_000;
-const QUICK_PING_MS = 3_000;
-const BROWSER_OPEN_WAIT_MS = 25_000;
-const BROWSER_POLL_MS = 2_000;
-const BROWSER_OPEN_COOLDOWN_MS = 60_000;
-const BROWSER_MAX_OPENS = 3; // Max auto-opens per session before giving up
-const BATCH_LOCKED_RETRIES = 2; // Retries when the frontend rate-limits a batch submit
-const VALID_MODES = new Set(["text", "image", "video", "agent", "neo"]);
-
-// Input validation
-const UUID_RE =
-	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-function assertUUID(value: string, label: string) {
-	if (!UUID_RE.test(value))
-		throw new Error(`Invalid ${label}: expected UUID, got "${value}"`);
-}
-
-// Resolve Flowith URL: env override or deployed preview
-async function detectFlowithUrl(): Promise<string> {
-	if (process.env.FLOWITH_URL) return process.env.FLOWITH_URL;
-	return "https://flowith.io/blank";
-}
-let _flowithUrl: string | null = null;
-async function getFlowithUrl(): Promise<string> {
-	if (!_flowithUrl) _flowithUrl = await detectFlowithUrl();
-	return _flowithUrl;
-}
-
-// ============ Minimal Supabase Realtime (Phoenix Channel) ============
-
-class RealtimeLite {
-	private ws!: WebSocket;
-	private ref = 0;
-	private joinRefs = new Map<string, string>();
-	private hb?: ReturnType<typeof setInterval>;
-	private listeners: Array<(m: any) => void> = [];
-	private joinedSet = new Set<string>();
-	constructor(
-		private url: string,
-		private key: string,
-		private token: string,
-	) {}
-	connect(): Promise<void> {
-		const ws = this.url
-			.replace("https://", "wss://")
-			.replace("http://", "ws://");
-		return new Promise((res, rej) => {
-			this.ws = new WebSocket(
-				`${ws}/realtime/v1/websocket?apikey=${encodeURIComponent(this.key)}&vsn=1.0.0`,
-			);
-			const t = setTimeout(() => rej(new Error("WS timeout")), 10_000);
-			this.ws.onopen = () => {
-				clearTimeout(t);
-				this.hb = setInterval(
-					() => this.push("phoenix", "heartbeat", {}),
-					HEARTBEAT_MS,
-				);
-				res();
-			};
-			this.ws.onmessage = (e: MessageEvent) => {
-				try {
-					const m = JSON.parse(String(e.data));
-					for (const f of this.listeners) f(m);
-				} catch {}
-			};
-			this.ws.onerror = () => {
-				clearTimeout(t);
-				rej(new Error("WS failed"));
-			};
-			this.ws.onclose = () => {
-				if (this.hb) clearInterval(this.hb);
-			};
-		});
+function parseArgs(argv: string[]): Args {
+	const pos: string[] = [];
+	const flags = new Map<string, string[]>();
+	for (let i = 0; i < argv.length; i++) {
+		const a = argv[i]!;
+		if (a === "--") {
+			pos.push(...argv.slice(i + 1));
+			break;
+		}
+		if (a.startsWith("--")) {
+			const eq = a.indexOf("=");
+			const name = eq > 0 ? a.slice(2, eq) : a.slice(2);
+			let value: string;
+			if (eq > 0) value = a.slice(eq + 1);
+			else if (BOOLEAN_FLAGS.has(name) || i + 1 >= argv.length || argv[i + 1]!.startsWith("--")) value = "true";
+			else value = argv[++i]!;
+			flags.set(name, [...(flags.get(name) ?? []), value]);
+		} else pos.push(a);
 	}
-	join(ch: string): Promise<void> {
-		if (this.joinedSet.has(ch)) return Promise.resolve();
-		const ref = String(++this.ref);
-		this.joinRefs.set(ch, ref);
-		return new Promise((res, rej) => {
-			const t = setTimeout(() => rej(new Error(`Join timeout: ${ch}`)), 10_000);
-			const h = (m: any) => {
-				if (m.ref === ref && m.event === "phx_reply") {
-					clearTimeout(t);
-					this.listeners = this.listeners.filter((l) => l !== h);
-					if (m.payload?.status === "ok") {
-						this.joinedSet.add(ch);
-						res();
-					} else rej(new Error("Join failed"));
-				}
-			};
-			this.listeners.push(h);
-			this.push(
-				`realtime:${ch}`,
-				"phx_join",
-				{
-					config: {
-						broadcast: { self: false },
-						presence: { key: "" },
-						postgres_changes: [],
-					},
-					access_token: this.token,
-				},
-				ref,
-				ref,
-			);
-		});
+	return { cmd: pos.shift() ?? "help", pos, flags };
+}
+
+const flag = (a: Args, name: string) => a.flags.get(name)?.at(-1);
+const flags = (a: Args, name: string) => (a.flags.get(name) ?? []).flatMap((v) => v.split(",").map((s) => s.trim()).filter(Boolean));
+const has = (a: Args, name: string) => a.flags.has(name) && flag(a, name) !== "false";
+const num = (a: Args, name: string) => {
+	const v = flag(a, name);
+	if (v === undefined) return undefined;
+	const n = Number(v);
+	if (!Number.isFinite(n)) throw new CliError(`--${name} takes a number.`, "INVALID_PARAM");
+	return n;
+};
+
+// ---------- output ----------
+
+let quiet = false;
+let jsonOut = false;
+/** --dry-run: nothing is created, uploaded, sent or charged. */
+let dryRun = false;
+const log = (m: string) => {
+	if (!quiet) process.stderr.write(`${m}\n`);
+};
+const out = (data: unknown) => process.stdout.write(`${JSON.stringify(data, null, jsonOut ? 0 : 2)}\n`);
+
+/** Which agent writes: shown on the canvas's change feed and on the connect page. */
+function agentName(a: Args): string {
+	const named = flag(a, "agent") ?? flag(a, "bot") ?? process.env.FLOWITH_AGENT;
+	if (named) return named;
+	const e = process.env;
+	if (e.CLAUDECODE || e.CLAUDE_CODE_ENTRYPOINT) return "claude-code";
+	if (e.CODEX_HOME || e.CODEX_SANDBOX || e.CODEX_MANAGED_BY_NPM || e.CODEX_CI) return "codex";
+	if (e.CURSOR_AGENT || e.CURSOR_TRACE_ID) return "cursor";
+	if (e.OPENCODE) return "opencode";
+	if (e.OPENCLAW) return "openclaw";
+	return "other";
+}
+
+// ---------- context ----------
+
+interface Ctx {
+	session: Session;
+	api: Api;
+	userId: string;
+	site: string;
+}
+
+async function context(a: Args): Promise<Ctx> {
+	const session = await activeSession();
+	return { session, api: apiOf(session, agentName(a)), userId: userIdOf(session), site: session.site };
+}
+
+/** The canvas a command works on: --canvas, $FLOWITH_CANVAS, or the active one. */
+async function canvasOf(ctx: Ctx, a: Args, opts: { create?: string } = {}): Promise<{ id: string; title: string | null; created?: boolean; team?: boolean }> {
+	const ref = flag(a, "canvas") ?? process.env.FLOWITH_CANVAS;
+	if (ref) {
+		const found = await resolveCanvas(ctx.api, ctx.userId, ref);
+		const c = found.team_id === undefined ? await getCanvas(ctx.api, found.id) : found;
+		return { id: c.id, title: c.title, team: !!c.team_id };
 	}
-	broadcast(ch: string, event: string, payload: unknown) {
-		this.push(
-			`realtime:${ch}`,
-			"broadcast",
-			{ type: "broadcast", event, payload },
-			undefined,
-			this.joinRefs.get(ch),
-		);
-	}
-	onBroadcast(ch: string, event: string, cb: (p: any) => void): () => void {
-		const h = (m: any) => {
-			if (
-				m.topic === `realtime:${ch}` &&
-				m.event === "broadcast" &&
-				m.payload?.event === event
-			)
-				cb(m.payload.payload);
-		};
-		this.listeners.push(h);
-		return () => {
-			this.listeners = this.listeners.filter((l) => l !== h);
-		};
-	}
-	close() {
-		if (this.hb) clearInterval(this.hb);
+	if (ctx.session.canvas) {
 		try {
-			this.ws?.close();
-		} catch {}
-	}
-	private push(
-		topic: string,
-		event: string,
-		payload: unknown,
-		ref?: string,
-		jr?: string,
-	) {
-		if (this.ws.readyState === WebSocket.OPEN)
-			this.ws.send(
-				JSON.stringify({
-					topic,
-					event,
-					payload,
-					ref: ref ?? String(++this.ref),
-					join_ref: jr ?? null,
-				}),
-			);
-	}
-}
-
-// ============ Bot client identity ============
-
-function parseBotClient(rawArgs: string[]): {
-	args: string[];
-	botClient: string;
-} {
-	const idx = rawArgs.indexOf("--bot");
-	if (idx !== -1 && rawArgs[idx + 1]) {
-		return {
-			botClient: rawArgs[idx + 1],
-			args: [...rawArgs.slice(0, idx), ...rawArgs.slice(idx + 2)],
-		};
-	}
-	return { botClient: process.env.BOT_CLIENT || "other", args: rawArgs };
-}
-
-// ============ Canvas & parallel flags ============
-
-function parseCanvasFlag(rawArgs: string[]): {
-	args: string[];
-	canvasId?: string;
-} {
-	const idx = rawArgs.indexOf("--canvas");
-	if (idx !== -1 && rawArgs[idx + 1]) {
-		return {
-			canvasId: rawArgs[idx + 1],
-			args: [...rawArgs.slice(0, idx), ...rawArgs.slice(idx + 2)],
-		};
-	}
-	return { args: rawArgs };
-}
-
-function parseParallelFlag(rawArgs: string[]): {
-	args: string[];
-	parallel: boolean;
-} {
-	const idx = rawArgs.indexOf("--parallel");
-	if (idx !== -1) {
-		return {
-			parallel: true,
-			args: [...rawArgs.slice(0, idx), ...rawArgs.slice(idx + 1)],
-		};
-	}
-	return { parallel: false, args: rawArgs };
-}
-
-function parseAgentIdFlag(rawArgs: string[]): {
-	args: string[];
-	agentId?: string;
-} {
-	const idx = rawArgs.indexOf("--agent-id");
-	if (idx !== -1 && rawArgs[idx + 1]) {
-		return {
-			agentId: rawArgs[idx + 1],
-			args: [...rawArgs.slice(0, idx), ...rawArgs.slice(idx + 2)],
-		};
-	}
-	return { args: rawArgs };
-}
-
-// ============ Browser open helper ============
-
-/**
- * On macOS, return the bundle id (lowercase) of the default HTTPS handler.
- * No Launch Services plist, or no https entry in it, means the system default (Safari).
- * Returns null if the plist exists but can't be read.
- */
-let _macDefaultHttpsHandler: string | null | undefined; // undefined = not checked yet
-function getMacDefaultHttpsHandler(): string | null {
-	if (_macDefaultHttpsHandler !== undefined) return _macDefaultHttpsHandler;
-	_macDefaultHttpsHandler = readMacDefaultHttpsHandler();
-	return _macDefaultHttpsHandler;
-}
-
-function readMacDefaultHttpsHandler(): string | null {
-	const plist = join(
-		homedir(),
-		"Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist",
-	);
-	if (!existsSync(plist)) return "com.apple.safari";
-
-	const { execFileSync } = require("child_process");
-	try {
-		// Parse the plist as JSON — `defaults read` text output lists each handler's keys
-		// alphabetically (LSHandlerRoleAll before LSHandlerURLScheme), so regexes over it
-		// pick up the wrong entry.
-		const out = execFileSync("plutil", ["-convert", "json", "-o", "-", plist], {
-			encoding: "utf-8",
-			timeout: 2000,
-			stdio: ["ignore", "pipe", "ignore"],
-		});
-		const handlers: any[] = JSON.parse(out).LSHandlers ?? [];
-		const https = handlers.find(
-			(h) => String(h?.LSHandlerURLScheme).toLowerCase() === "https",
-		);
-		const bundleId = https?.LSHandlerRoleAll ?? https?.LSHandlerRoleViewer;
-		return typeof bundleId === "string"
-			? bundleId.toLowerCase()
-			: "com.apple.safari";
-	} catch {
-		return null;
-	}
-}
-
-/**
- * On macOS, detect if the default HTTPS handler is Safari.
- * If so, find an installed Chromium-based browser to use instead
- * (Safari blocks ws://127.0.0.1 from HTTPS pages — mixed content).
- * Returns the app name to use with `open -a`, null if default is fine,
- * or "SAFARI_ONLY" if Safari is default and no Chromium is available.
- */
-const SAFARI_ONLY = "SAFARI_ONLY" as const;
-let _macBrowserOverride: string | null | undefined; // undefined = not checked yet
-function getMacBrowserOverride(): string | typeof SAFARI_ONLY | null {
-	if (process.platform !== "darwin") return null;
-	if (_macBrowserOverride !== undefined) return _macBrowserOverride;
-
-	// Check default browser via Launch Services (null = can't detect — assume non-Safari)
-	const isSafariDefault =
-		getMacDefaultHttpsHandler()?.includes("safari") ?? false;
-
-	if (!isSafariDefault) {
-		_macBrowserOverride = null;
-		return null;
-	}
-
-	// Safari is default — find a Chromium browser
-	const candidates = [
-		"Google Chrome",
-		"Google Chrome Canary",
-		"Chrome",
-		"Chromium",
-		"Microsoft Edge",
-		"Arc",
-		"Brave Browser",
-		"Opera",
-	];
-	for (const app of candidates) {
-		if (existsSync(`/Applications/${app}.app`)) {
-			console.error(
-				`Default browser is Safari (incompatible). Using ${app} instead.`,
-			);
-			_macBrowserOverride = app;
-			return app;
+			const c = await getCanvas(ctx.api, ctx.session.canvas);
+			return { id: c.id, title: c.title, team: !!c.team_id };
+		} catch (e) {
+			if (!(e instanceof CliError && e.code === "NOT_FOUND")) throw e;
 		}
 	}
-
-	// Safari-only — no compatible browser found
-	_macBrowserOverride = SAFARI_ONLY;
-	return SAFARI_ONLY;
+	if (opts.create !== undefined && dryRun) return { id: "(a new canvas)", title: opts.create, created: true };
+	if (opts.create !== undefined) {
+		const c = await createCanvas(ctx.api, ctx.userId, opts.create || "Untitled");
+		ctx.session.canvas = c.id;
+		saveSession(ctx.session);
+		log(`New canvas "${c.title}": ${canvasUrl(ctx.site, c.id)}`);
+		return { id: c.id, title: c.title, created: true };
+	}
+	throw new CliError("No canvas chosen. `use <canvas>` an existing one, or `new \"title\"` to start one.", "NO_CANVAS");
 }
+
+async function catalogOf(ctx: Ctx, fresh = false): Promise<Catalog> {
+	return fetchCatalog(ctx.session.workerURL, { fresh });
+}
+
+/** --ref / --first values: a card ref on this canvas, a local file or a URL. */
+async function toRef(ctx: Ctx, convId: string, cards: Card[], input: string, dry = false): Promise<Ref> {
+	if (!isUrl(input) && !existsSync(resolve(input))) {
+		const card = findCard(cards, input);
+		// A text card is read by text models (its words go in the request); media models refuse it by name.
+		if (!card.url && card.text) return { url: "", name: card.title ?? card.ref, media: "file", card };
+		if (!card.url) throw new CliError(`${card.ref} (${card.kind}) has no finished media to use yet.`, "INVALID_PARAM");
+		const media = card.kind === "image" || card.kind === "video" || card.kind === "audio" ? card.kind : mediaOf(card.url);
+		return { url: card.url, name: card.title ?? card.ref, media, card };
+	}
+	// A dry run uploads nothing: the file stands in for its URL.
+	if (dry && !isUrl(input)) return { url: `file://${resolve(input)}`, name: input.split("/").pop() ?? input, media: mediaOf(input) };
+	const up = await toUrl(ctx.api, input, convId);
+	if (!isUrl(input)) log(`Uploaded ${up.name}`);
+	return up;
+}
+
+async function toRefs(ctx: Ctx, convId: string, cards: Card[], inputs: string[], dry = false) {
+	const refs: Ref[] = [];
+	for (const i of inputs) refs.push(await toRef(ctx, convId, cards, i, dry));
+	return refs;
+}
+
+const timeoutOf = (a: Args, fallbackSec: number) => (num(a, "timeout") ?? fallbackSec) * 1000;
 
 /**
- * Try to find an existing Flowith tab in the browser and navigate it,
- * instead of opening a new tab. Returns true if an existing tab was reused.
+ * Sends a placed card's generation and writes the send down (lib/ledger.ts). Refused (an answer under 500): the card
+ * is marked as the canvas marks its own refusals. No answer (the connection failed, timed out or a gateway 5xx): the
+ * card stays generating, since Flowith may have taken it; it is never marked failed, so nothing runs it twice.
  */
-function tryReuseExistingTab(url: string): boolean {
-	if (process.platform !== "darwin") return false;
-	const { spawnSync } = require("child_process");
-
-	let origin: string;
+async function sendFor(
+	ctx: Ctx,
+	kind: Sent["kind"],
+	body: Record<string, unknown>,
+	card: { id: string; createdAt: string; type: string; data: Record<string, unknown> },
+): Promise<Sent["answer"]> {
+	const from = serverNow();
+	const sent = { card: card.id, conv: String(body.convId), model: String(body.model), kind, from };
+	// Written down before it goes out: if this process is stopped mid-send, the card still reads as possibly taken.
+	noteSent({ ...sent, to: from, answer: "lost" });
 	try {
-		origin = new URL(url).origin;
-	} catch {
-		return false;
-	}
-
-	// Determine which browser to target
-	const override = getMacBrowserOverride();
-	const browsers =
-		override && override !== SAFARI_ONLY
-			? [override]
-			: ["Google Chrome", "Arc", "Brave Browser", "Microsoft Edge"];
-
-	for (const browser of browsers) {
-		// Use escaped values to prevent AppleScript injection
-		const safeOrigin = origin.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-		const safeUrl = url.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-		const script = [
-			`tell application "System Events"`,
-			`  if not (exists process "${browser}") then error "not running"`,
-			`end tell`,
-			`tell application "${browser}"`,
-			`  repeat with w in windows`,
-			`    set tabIdx to 0`,
-			`    repeat with t in tabs of w`,
-			`      set tabIdx to tabIdx + 1`,
-			`      try`,
-			`        if URL of t starts with "${safeOrigin}" then`,
-			`          set URL of t to "${safeUrl}"`,
-			`          set active tab index of w to tabIdx`,
-			`          set index of w to 1`,
-			`          activate`,
-			`          return`,
-			`        end if`,
-			`      end try`,
-			`    end repeat`,
-			`  end repeat`,
-			`end tell`,
-			`error "no match"`,
-		].join("\n");
-		const result = spawnSync("osascript", ["-e", script], {
-			timeout: 3_000,
-			stdio: ["ignore", "pipe", "pipe"],
-		});
-		if (result.status === 0) return true;
-	}
-	return false;
-}
-
-// True when the last openInBrowser() handed an https URL to a macOS default browser
-// that is (or may be) Safari, which can't complete the localhost handshake.
-let _lastOpenMaybeSafari = false;
-
-async function openInBrowser(url: string) {
-	const { spawnSync } = await import("child_process");
-	_lastOpenMaybeSafari = false;
-
-	// On macOS, try to navigate an existing Flowith tab first (no new tab)
-	if (process.platform === "darwin" && tryReuseExistingTab(url)) return;
-
-	if (process.platform === "darwin") {
-		if (url.startsWith("https://")) {
-			const override = getMacBrowserOverride();
-			if (override === SAFARI_ONLY) {
-				throw new BrowserConnectionError("Safari is not supported");
-			}
-			if (override) {
-				const result = spawnSync("open", ["-a", override, url], {
-					stdio: "ignore",
-				});
-				if (result.status === 0) return;
-				console.error(
-					`Failed to launch ${override}, falling back to default browser`,
-				);
-			}
-			const handler = getMacDefaultHttpsHandler();
-			_lastOpenMaybeSafari = handler === null || handler.includes("safari");
-		}
-		spawnSync("open", [url], { stdio: "ignore" });
-	} else if (process.platform === "win32") {
-		// cmd.exe treats & | < > ^ as metacharacters; escape with ^ to prevent URL breakage
-		const escaped = url.replace(/[&|<>^]/g, "^$&");
-		spawnSync("cmd", ["/c", "start", "", escaped], { stdio: "ignore" });
-	} else {
-		spawnSync("xdg-open", [url], { stdio: "ignore" });
+		await send(ctx.api, kind, body);
+		noteSent({ ...sent, to: serverNow(), answer: "taken" });
+		return "taken";
+	} catch (e) {
+		// An answer under 500, or none to give at all (the sign-in was ended, a bad request caught here): not taken.
+		const refused = e instanceof CliError && (e.status === undefined || e.status < 500);
+		noteSent({ ...sent, to: serverNow(), answer: refused ? "refused" : "lost" });
+		if (!refused) return "lost";
+		await failCard(ctx.api, { id: card.id, createdAt: card.createdAt, type: card.type }, card.data, e);
+		throw e;
 	}
 }
 
-// JWT helpers live in ./lib/session
-
-// ============ Session I/O ============
-
-function saveSession(s: CanvasBotSession) {
-	mkdirSync(SESSION_DIR, { recursive: true });
-	writeFileSync(SESSION_FILE, JSON.stringify(s, null, 2));
-	try {
-		chmodSync(SESSION_FILE, 0o600);
-	} catch {}
-}
-
-function loadSession(): CanvasBotSession | null {
-	// Migrate legacy session from cwd if new location doesn't exist
-	if (!existsSync(SESSION_FILE)) {
-		const legacy = resolve(process.cwd(), LEGACY_SESSION_FILE);
-		if (existsSync(legacy)) {
+/** Sends every placed card's generation. A refusal marks its card (and is thrown when it was the only one); the ids
+ * whose answer was lost come back. */
+async function sendAll(ctx: Ctx, placed: Placed, request: (id: string) => { kind: Sent["kind"]; body: Record<string, unknown> }): Promise<string[]> {
+	const lost: string[] = [];
+	await Promise.all(
+		placed.ids.map(async (id) => {
+			const row = placed.rows.find((r) => r.id === id)!;
+			const { kind, body } = request(id);
 			try {
-				mkdirSync(SESSION_DIR, { recursive: true });
-				writeFileSync(SESSION_FILE, readFileSync(legacy, "utf-8"));
-				try {
-					chmodSync(SESSION_FILE, 0o600);
-				} catch {}
-				unlinkSync(legacy);
-				console.error(`Migrated session from ${legacy} to ${SESSION_FILE}`);
-			} catch {}
-		}
-	}
-	if (!existsSync(SESSION_FILE)) return null;
-	try {
-		const s = statSync(SESSION_FILE);
-		if (s.mode & 0o077) chmodSync(SESSION_FILE, 0o600);
-	} catch {}
-	try {
-		const s: CanvasBotSession = JSON.parse(readFileSync(SESSION_FILE, "utf-8"));
-		if (!s.sessionId || !s.sessionSecret || !s.supabaseUrl || !s.accessToken)
-			return null;
-		// An expired access token is still usable when we hold a refresh token:
-		// acquireSession() refreshes it before use.
-		if (isJwtExpired(s.accessToken) && !s.refreshToken) return null;
-		return s;
-	} catch {
-		return null;
-	}
-}
-
-// ============ Token validation ============
-
-async function validateToken(session: CanvasBotSession): Promise<boolean> {
-	try {
-		const r = await fetch(
-			`${session.supabaseUrl}/rest/v1/conversation?select=id&limit=1`,
-			{
-				headers: {
-					apikey: session.supabaseKey,
-					Authorization: `Bearer ${session.accessToken}`,
-				},
-				signal: AbortSignal.timeout(5_000),
-			},
-		);
-		// 401/403 = token revoked or expired server-side
-		return r.status !== 401 && r.status !== 403;
-	} catch {
-		// Network error — don't block, let it fail naturally later
-		return true;
-	}
-}
-
-// ============ Browser handshake: local WebSocket server receives session from frontend ============
-
-/**
- * Refresh the access token when it is about to expire and we hold a refresh
- * token. Returns true when the session was refreshed. On a rejected refresh
- * the refresh token is dropped so the caller falls back to the browser
- * handshake (the browser tab shares the same Supabase refresh chain, so a
- * rejection usually means it rotated the token first).
- */
-async function ensureFreshToken(s: CanvasBotSession): Promise<boolean> {
-	if (!s.refreshToken) return false;
-	if (jwtExpiresInMs(s.accessToken) > REFRESH_AHEAD_MS) return false;
-	try {
-		const t = await refreshAccessToken({
-			supabaseUrl: s.supabaseUrl,
-			supabaseKey: s.supabaseKey,
-			refreshToken: s.refreshToken,
-		});
-		s.accessToken = t.accessToken;
-		s.refreshToken = t.refreshToken;
-		s.expiresAt = t.expiresAt;
-		saveSession(s);
-		console.error(`Access token refreshed (valid until ${t.expiresAt}).`);
-		return true;
-	} catch (e: any) {
-		console.error(
-			`Token refresh failed (${e?.message ?? e}). Falling back to the browser handshake.`,
-		);
-		delete s.refreshToken;
-		saveSession(s);
-		return false;
-	}
-}
-
-async function acquireSession(botClient = "other"): Promise<CanvasBotSession> {
-	const currentFlowithUrl = await getFlowithUrl();
-	const existing = loadSession();
-	if (existing) {
-		// If FLOWITH_URL changed (e.g. switched to localhost), the browser at the
-		// new origin won't be logged in. Force re-auth so the user gets a proper
-		// login prompt instead of silent "browser not responding" failures.
-		if (existing.flowithUrl && existing.flowithUrl !== currentFlowithUrl) {
-			deleteSessionFile();
-			console.error(
-				`Flowith URL changed (${existing.flowithUrl} → ${currentFlowithUrl}). Re-authenticating...`,
-			);
-		} else {
-			// Refresh first when we can, so a long-running agent never needs the
-			// browser just to stay logged in.
-			await ensureFreshToken(existing);
-			// Quick server-side token validation (catches revoked/expired tokens the JWT check misses)
-			const valid = await validateToken(existing);
-			if (valid) return existing;
-			// Token rejected — clear stale session
-			deleteSessionFile();
-			console.error("Session token expired or revoked. Re-authenticating...");
-		}
-	}
-
-	// Lockfile guard: if another CLI process is already opening the browser, wait for it
-	if (!tryAcquireSessionLock()) {
-		return waitForSessionFromOtherProcess();
-	}
-
-	console.error("No valid session. Opening Flowith in your browser...");
-	console.error(
-		"Please log in if needed — the connection will complete automatically.\n",
-	);
-
-	// One-time nonce: browser must echo this back to prove it was opened by this CLI instance
-	const nonce = crypto.randomUUID();
-
-	return new Promise((resolvePromise, reject) => {
-		let settled = false;
-		let serverRef: { close: () => void } | null = null;
-		const fail = (msg: string, code?: string) => {
-			if (!settled) {
-				settled = true;
-				clearTimeout(timeout);
-				serverRef?.close();
-				releaseSessionLock();
-				reject(code ? new BrowserConnectionError(msg, code) : new Error(msg));
+				const answer = await sendFor(ctx, kind, body, { id, createdAt: row.created_at, type: row.type, data: (row.data as Record<string, unknown>) ?? {} });
+				if (answer === "lost") lost.push(id);
+			} catch (e) {
+				if (placed.ids.length === 1) throw e;
 			}
-		};
-		const succeed = (s: CanvasBotSession) => {
-			if (!settled) {
-				settled = true;
-				clearTimeout(timeout);
-				serverRef?.close();
-				releaseSessionLock();
-				resolvePromise(s);
-			}
-		};
-
-		const timeout = setTimeout(
-			() =>
-				fail(
-					"Browser did not send session within 2 minutes.\n\n" +
-						"This usually means you are not logged in to Flowith.\n" +
-						"Please log in at the browser window that was opened, then re-run this command." +
-						(_lastOpenMaybeSafari
-							? "\n\nIf the page opened in Safari, it can't complete the handshake (Safari blocks ws://127.0.0.1 from HTTPS pages).\n" +
-								"Set Chrome, Arc, Edge or Brave as your default browser, or re-run this command and open the printed \"Waiting for browser at\" URL in one of them."
-							: ""),
-					"NOT_LOGGED_IN",
-				),
-			120_000,
-		);
-
-		// Use WebSocket server instead of HTTP for the session handshake.
-		// Note: Safari blocks both fetch() and ws:// to 127.0.0.1 from HTTPS pages (mixed content).
-		// Safari is detected and rejected before reaching this point.
-		const handleWsMessage = (
-			ws: { send: (data: string) => void; close: () => void },
-			raw: string | Buffer,
-		) => {
-			try {
-				const msg = JSON.parse(
-					typeof raw === "string" ? raw : raw.toString("utf-8"),
-				);
-
-				if (msg.type === "not_logged_in") {
-					ws.send(JSON.stringify({ ok: true }));
-					ws.close();
-					fail(
-						"You are not logged in. Please log in at the browser, then re-run this command.",
-						"NOT_LOGGED_IN",
-					);
-					return;
-				}
-
-				if (msg.type === "session") {
-					const parsed = msg.data;
-					if (parsed.nonce !== nonce) {
-						ws.send(JSON.stringify({ error: "Invalid nonce" }));
-						return;
-					}
-					const { nonce: _, ...sessionData } = parsed as CanvasBotSession & {
-						nonce: string;
-					};
-					const session: CanvasBotSession = {
-						...sessionData,
-						// Trust the JWT's own expiry over the page's fixed "+55 min".
-						expiresAt:
-							jwtExpiresAtIso(sessionData.accessToken) ?? sessionData.expiresAt,
-						sessionSecret: crypto.randomUUID(),
-						lastBrowserOpenAt: new Date().toISOString(),
-						flowithUrl: currentFlowithUrl,
-					};
-					saveSession(session);
-					ws.send(JSON.stringify({ ok: true }));
-					console.error("Session received from browser. Connected!");
-					ws.close();
-					succeed(session);
-				}
-			} catch {
-				ws.send(JSON.stringify({ error: "Invalid message" }));
-			}
-		};
-
-		const isBun = typeof (globalThis as any).Bun !== "undefined";
-
-		if (isBun) {
-			const bunServer = (globalThis as any).Bun.serve({
-				port: 0,
-				hostname: "127.0.0.1",
-				fetch(req: Request, srv: any) {
-					if (srv.upgrade(req)) return undefined as any;
-					return new Response("Not a WebSocket request", { status: 400 });
-				},
-				websocket: {
-					open() {},
-					message(ws: any, msg: string | Buffer) {
-						handleWsMessage(ws, msg);
-					},
-					close() {},
-				},
-			});
-			serverRef = { close: () => bunServer.stop() };
-
-			getFlowithUrl().then(async (base) => {
-				const url = `${base}?cli_port=${bunServer.port}&cli_nonce=${nonce}&cli_bot=${encodeURIComponent(botClient)}`;
-				await openInBrowser(url);
-				console.error(`Waiting for browser at ${url} ...`);
-			});
-		} else {
-			const nodeServer = createServer();
-			serverRef = nodeServer;
-			const nodeCrypto = require("crypto");
-
-			nodeServer.on("upgrade", (req: any, socket: any) => {
-				const key = req.headers["sec-websocket-key"];
-				if (!key) {
-					socket.destroy();
-					return;
-				}
-				const acceptHash = nodeCrypto
-					.createHash("sha1")
-					.update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
-					.digest("base64");
-				socket.write(
-					"HTTP/1.1 101 Switching Protocols\r\n" +
-						"Upgrade: websocket\r\n" +
-						"Connection: Upgrade\r\n" +
-						`Sec-WebSocket-Accept: ${acceptHash}\r\n` +
-						"\r\n",
-				);
-
-				const sendFrame = (data: string) => {
-					const buf = Buffer.from(data, "utf-8");
-					const frame: number[] = [0x81];
-					if (buf.length < 126) frame.push(buf.length);
-					else if (buf.length < 65536) {
-						frame.push(126, (buf.length >> 8) & 0xff, buf.length & 0xff);
-					} else {
-						frame.push(127);
-						for (let i = 7; i >= 0; i--)
-							frame.push((buf.length >> (i * 8)) & 0xff);
-					}
-					socket.write(Buffer.concat([Buffer.from(frame), buf]));
-				};
-
-				const MAX_WS_BUFFER = 64 * 1024; // 64KB — session payload is ~2KB
-				let buffer = Buffer.alloc(0);
-				socket.on("data", (chunk: Buffer) => {
-					if (buffer.length + chunk.length > MAX_WS_BUFFER) {
-						socket.destroy();
-						return;
-					}
-					buffer = Buffer.concat([buffer, chunk]);
-					while (buffer.length >= 2) {
-						const opcode = buffer[0] & 0x0f;
-						const masked = (buffer[1] & 0x80) !== 0;
-						let payloadLen = buffer[1] & 0x7f;
-						let offset = 2;
-						if (payloadLen === 126) {
-							if (buffer.length < 4) return;
-							payloadLen = (buffer[2] << 8) | buffer[3];
-							offset = 4;
-						} else if (payloadLen === 127) {
-							if (buffer.length < 10) return;
-							payloadLen = 0;
-							for (let i = 0; i < 8; i++)
-								payloadLen = payloadLen * 256 + buffer[2 + i];
-							offset = 10;
-						}
-						const maskSize = masked ? 4 : 0;
-						const totalLen = offset + maskSize + payloadLen;
-						if (buffer.length < totalLen) return;
-						const mask = masked
-							? buffer.subarray(offset, offset + maskSize)
-							: null;
-						const payload = buffer.subarray(offset + maskSize, totalLen);
-						if (mask)
-							for (let i = 0; i < payload.length; i++)
-								payload[i] ^= mask[i % 4];
-						buffer = buffer.subarray(totalLen);
-						if (opcode === 0x08) {
-							socket.end();
-							return;
-						}
-						// Respond to ping with pong
-						if (opcode === 0x09) {
-							const pong = Buffer.alloc(2 + payload.length);
-							pong[0] = 0x8a; // pong frame
-							pong[1] = payload.length;
-							payload.copy(pong, 2);
-							socket.write(pong);
-							continue;
-						}
-						if (opcode !== 0x01) continue;
-						handleWsMessage(
-							{ send: sendFrame, close: () => socket.end() },
-							payload,
-						);
-					}
-				});
-				socket.on("error", () => {});
-			});
-
-			nodeServer.listen(0, "127.0.0.1", async () => {
-				const port = (nodeServer.address() as any).port;
-				const base = await getFlowithUrl();
-				const url = `${base}?cli_port=${port}&cli_nonce=${nonce}&cli_bot=${encodeURIComponent(botClient)}`;
-				await openInBrowser(url);
-				console.error(`Waiting for browser at ${url} ...`);
-			});
-		}
-	});
-}
-
-// ============ Register session with frontend via broadcast ============
-
-async function registerWithFrontend(
-	client: RealtimeLite,
-	session: CanvasBotSession,
-	userId: string,
-	botClient: string,
-) {
-	const ch = `bot_ctrl:${userId}`;
-	await client.join(ch);
-	const actionId = crypto.randomUUID();
-	const action: BotAction = {
-		actionId,
-		sessionId: session.sessionId,
-		timestamp: new Date().toISOString(),
-		type: "register_session",
-		expiresAt: session.expiresAt,
-		sessionSecret: session.sessionSecret,
-		botClient,
-	};
-	let cleanup: (() => void) | undefined;
-	await Promise.race([
-		new Promise<void>((resolve, reject) => {
-			cleanup = client.onBroadcast(
-				ch,
-				BOT_EVENTS.RESPONSE,
-				(resp: BotResponse) => {
-					if (resp.actionId !== actionId) return;
-					cleanup?.();
-					if (resp.type === "ack") resolve();
-					else if (resp.type === "error")
-						reject(
-							new Error(
-								`Session registration rejected: ${(resp as any).message || (resp as any).code}`,
-							),
-						);
-				},
-			);
-			client.broadcast(ch, BOT_EVENTS.ACTION, action);
 		}),
-		new Promise<void>((r) => setTimeout(r, 3_000)), // No browser yet — ensureBrowserConnected will handle it
-	]);
-	cleanup?.(); // Clean up listener if timeout won the race
+	);
+	return lost;
 }
 
-// ============ Typed errors ============
-
-class BrowserConnectionError extends Error {
-	constructor(
-		message: string,
-		public code: string = "BROWSER_CONNECTION_ERROR",
-	) {
-		super(message);
-		this.name = "BrowserConnectionError";
-	}
-}
-
-function deleteSessionFile() {
+/** What these cards' sends were charged, tied to their attempts (lib/ledger.ts); null with the reason when it can't be told. */
+async function chargedFor(ctx: Ctx, convId: string, cards: Result[], team = false) {
+	const generated = cards.filter((c) => c.kind === "image" || c.kind === "video" || c.kind === "text");
+	if (!generated.length) return {};
+	if (team) return { chargedCredits: null, chargedNote: "Unknown: on a team canvas the team's payer is charged, and only they see those records." };
+	// A refund of a failed run lands right after its card fails.
+	await sleep(1500);
 	try {
-		unlinkSync(SESSION_FILE);
-	} catch {}
-}
-
-// ============ Session lock (prevents concurrent browser opens) ============
-
-const SESSION_LOCK_MAX_AGE_MS = 120_000;
-const SESSION_LOCK_POLL_MS = 1_000;
-
-/** Try to acquire the session lock. Returns false if another process holds it. */
-function tryAcquireSessionLock(): boolean {
-	mkdirSync(SESSION_DIR, { recursive: true });
-	if (existsSync(SESSION_LOCK_FILE)) {
-		try {
-			const s = statSync(SESSION_LOCK_FILE);
-			if (Date.now() - s.mtimeMs < SESSION_LOCK_MAX_AGE_MS) {
-				// Check if the holding process is still alive
-				try {
-					const pid = parseInt(
-						readFileSync(SESSION_LOCK_FILE, "utf-8").trim(),
-						10,
-					);
-					if (pid && pid !== process.pid) {
-						try {
-							process.kill(pid, 0); // signal 0 = check existence only
-							return false; // process alive, lock valid
-						} catch {
-							console.error("Stale lock (process dead). Taking over...");
-						}
-					}
-				} catch {
-					return false; // can't read PID, treat as held
-				}
-			}
-		} catch {}
-	}
-	try {
-		writeFileSync(SESSION_LOCK_FILE, String(process.pid));
-		return true;
+		const charge = chargeOf(sentOf(generated.map((c) => c.id)), await usageOf(ctx.api, convId), generated.length);
+		return "credits" in charge ? { chargedCredits: charge.credits } : { chargedCredits: null, chargedNote: `Unknown: ${charge.unknown}.` };
 	} catch {
-		return false;
+		return { chargedCredits: null, chargedNote: "Unknown: the canvas's charges couldn't be read." };
 	}
 }
 
-function releaseSessionLock() {
-	try {
-		unlinkSync(SESSION_LOCK_FILE);
-	} catch {}
-}
-
-/** Wait for another process to finish acquiring the session. */
-async function waitForSessionFromOtherProcess(): Promise<CanvasBotSession> {
-	console.error(
-		"Another process is opening the browser. Waiting for session...",
-	);
-	const deadline = Date.now() + SESSION_LOCK_MAX_AGE_MS;
-	while (Date.now() < deadline) {
-		await new Promise((r) => setTimeout(r, SESSION_LOCK_POLL_MS));
-		const session = loadSession();
-		if (session) {
-			const valid = await validateToken(session);
-			if (valid) {
-				console.error("Session ready.");
-				return session;
-			}
-		}
-		// Lock released but no valid session → stale lock, break and proceed
-		if (!existsSync(SESSION_LOCK_FILE)) break;
-	}
-	throw new Error(
-		"Timed out waiting for session from another process. Please retry.",
-	);
-}
-
-// ============ Creative Dream (journal I/O) ============
-
-const JOURNAL_FILE = join(SESSION_DIR, "creative-journal.md");
-
-// ============ Pre-flight: auto-detect & auto-open browser ============
-
-async function quickPing(
-	client: RealtimeLite,
-	ch: string,
-	session: CanvasBotSession,
-): Promise<boolean> {
-	try {
-		const action: BotAction = {
-			actionId: crypto.randomUUID(),
-			sessionId: session.sessionId,
-			timestamp: new Date().toISOString(),
-			type: "ping",
-		};
-		await sendAndWait(client, ch, action, QUICK_PING_MS);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-/**
- * Read-only liveness probe: is a logged-in Flowith tab actually responding?
- * Unlike ensureBrowserConnected, this never opens a browser — used by
- * `status --live` and `login` to report true connection state.
- */
-async function liveBrowserPing(session: CanvasBotSession): Promise<boolean> {
-	const userId = getJwtUserId(session.accessToken);
-	if (!userId) return false;
-	const client = new RealtimeLite(
-		session.supabaseUrl,
-		session.supabaseKey,
-		session.accessToken,
-	);
-	try {
-		await client.connect();
-		const ch = `bot_ctrl:${userId}`;
-		await client.join(ch);
-		return await quickPing(client, ch, session);
-	} catch {
-		return false;
-	} finally {
-		client.close();
-	}
-}
-
-async function ensureBrowserConnected(
-	client: RealtimeLite,
-	session: CanvasBotSession,
-	userId: string,
-	botClient: string,
-): Promise<void> {
-	const ch = `bot_ctrl:${userId}`;
-	if (await quickPing(client, ch, session)) return;
-
-	// Grace period: browser may be transitioning after a page navigation (e.g. switch_canvas).
-	// A brief retry avoids a false "not connected" that triggers a redundant browser open.
-	await new Promise((r) => setTimeout(r, 2_000));
-	if (await quickPing(client, ch, session)) return;
-
-	// Decide: open browser or just wait (if we or another process already opened it recently)
-	// session is passed by reference — in-process retries see the updated timestamp without re-reading the file.
-	// saveSession() persists it so separate CLI invocations also respect the cooldown.
-	const now = Date.now();
-	const recentlyOpened =
-		session.lastBrowserOpenAt &&
-		now - new Date(session.lastBrowserOpenAt).getTime() <
-			BROWSER_OPEN_COOLDOWN_MS;
-
-	const openCount = session.browserOpenCount || 0;
-	if (!recentlyOpened) {
-		if (openCount >= BROWSER_MAX_OPENS) {
-			throw new BrowserConnectionError(
-				`Already opened the browser ${BROWSER_MAX_OPENS} times without a successful connection.\n\n` +
-					"Please make sure a Flowith tab is open and loaded, then re-run this command.",
-				"TOO_MANY_OPENS",
-			);
-		}
-		const base = await getFlowithUrl();
-		const target = session.activeConvId
-			? `${base}/conv/${session.activeConvId}`
-			: base;
-		console.error("Browser not connected. Opening Flowith...");
-		await openInBrowser(target);
-		session.browserOpenCount = openCount + 1;
-		session.lastBrowserOpenAt = new Date().toISOString();
-		saveSession(session);
-	} else {
-		console.error("Browser was recently opened. Waiting for it to connect...");
-	}
-
-	// Poll until browser mounts and responds
-	const deadline = Date.now() + BROWSER_OPEN_WAIT_MS;
-	while (Date.now() < deadline) {
-		await new Promise((r) => setTimeout(r, BROWSER_POLL_MS));
-		await registerWithFrontend(client, session, userId, botClient);
-		if (await quickPing(client, ch, session)) {
-			if (session.browserOpenCount) {
-				session.browserOpenCount = 0;
-				saveSession(session);
-			}
-			console.error("Connected!");
-			return;
-		}
-	}
-
-	// Timed out — determine root cause: token expired (not logged in) vs browser issue
-	const tokenValid = await validateToken(session);
-	if (!tokenValid) {
-		// Token rejected → user is not logged in or session expired
-		deleteSessionFile();
-		throw new BrowserConnectionError(
-			"Your Flowith session has expired or you are not logged in.\n\n" +
-				"Please open Flowith in your browser, log in, then re-run this command.",
-			"NOT_LOGGED_IN",
-		);
-	}
-	throw new BrowserConnectionError(
-		"Browser opened but did not respond.\n\n" +
-			"Please ensure the Flowith tab is fully loaded and you are logged in.",
-		"BROWSER_NOT_CONNECTED",
-	);
-}
-
-// ============ Connect + Execute with auto-retry ============
-
-const MAX_RETRIES = 2;
-
-async function connectAndExecute(
-	session: CanvasBotSession,
-	userId: string,
-	channelName: string,
-	action: BotAction,
-	timeout: number,
-	botClient: string,
-	options?: { parallel?: boolean },
-): Promise<BotResponse> {
-	let lastError: Error | null = null;
-	const isParallel = options?.parallel ?? false;
-
-	for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-		const client = new RealtimeLite(
-			session.supabaseUrl,
-			session.supabaseKey,
-			session.accessToken,
-		);
-		try {
-			await client.connect();
-			await registerWithFrontend(client, session, userId, botClient);
-			if (!isParallel || channelName.startsWith("bot_ctrl:")) {
-				await ensureBrowserConnected(client, session, userId, botClient);
-			}
-			if (!channelName.startsWith("bot_ctrl:") && !isParallel) {
-				// Auto-align: ask the browser what canvas it's on and follow it.
-				// Skipped in parallel mode — canvas is explicit via --canvas flag.
-				const ctrlCh = `bot_ctrl:${userId}`;
-				await client.join(ctrlCh);
-				const queryAction: BotAction = {
-					actionId: crypto.randomUUID(),
-					sessionId: session.sessionId,
-					timestamp: new Date().toISOString(),
-					type: "get_current_canvas",
-				};
-				try {
-					const resp = await sendAndWait(
-						client,
-						ctrlCh,
-						queryAction,
-						QUICK_PING_MS,
-					);
-					const browserConvId = (resp as any).data?.convId;
-					if (browserConvId) {
-						if (browserConvId !== channelName.replace("bot:", "")) {
-							// Browser is on a different canvas — follow it
-							channelName = `bot:${browserConvId}`;
-							session.activeConvId = browserConvId;
-							saveSession(session);
-						}
-					} else {
-						// Browser is not on a canvas page — throw clear error
-						throw new BrowserConnectionError(
-							"No canvas is open in the browser. Please navigate to a canvas, then re-run.",
-							"NO_CANVAS",
-						);
-					}
-				} catch (e) {
-					if (e instanceof BrowserConnectionError) throw e;
-					// Query failed — proceed with original target
-				}
-			}
-			if (!channelName.startsWith("bot_ctrl:")) {
-				await client.join(channelName);
-			}
-			return await sendAndWait(client, channelName, action, timeout);
-		} catch (e: any) {
-			lastError = e;
-			// Browser timeout = we already opened + waited long enough — retrying won't help
-			if (e instanceof BrowserConnectionError) throw e;
-			if (attempt < MAX_RETRIES) {
-				console.error(
-					`Connection failed (${e.message}), retrying... (${attempt + 1}/${MAX_RETRIES})`,
-				);
-			}
-		} finally {
-			client.close();
-		}
-	}
-
-	throw lastError ?? new Error("Connection failed after retries");
-}
-
-// ============ Uploads (see ./lib/upload) ============
-
-type SubmitFile = { url: string; name: string; type?: string };
-
-/**
- * `submit --image`: local files are uploaded, URLs pass through. The browser
- * submit path treats attachments as images (start/end frames in video mode),
- * so only images are accepted here; use `gen video --ref` for audio/video.
- */
-async function resolveImages(
-	paths: string[],
-	session: CanvasBotSession,
-): Promise<SubmitFile[]> {
-	const media = await resolveMedia(session, paths, {
-		convId: session.activeConvId,
+async function finish(ctx: Ctx, convId: string, results: Result[], extra: Record<string, unknown> = {}, opts: { charged?: boolean; team?: boolean } = {}) {
+	const failed = results.filter((r) => r.status === "failed");
+	const running = results.filter((r) => r.status === "running");
+	const lost = running.filter((r) => r.code === "SENT_UNKNOWN");
+	const charged = opts.charged && !running.length ? await chargedFor(ctx, convId, results, opts.team) : {};
+	const stopped = failed.filter((r) => r.code === "NO_CREDITS" || r.code === "MODEL_LOCKED");
+	const broken = failed.filter((r) => r.code !== "NO_CREDITS" && r.code !== "MODEL_LOCKED");
+	const next = [
+		...(stopped.length ? ["Stop: not enough credits, or the plan doesn't include this model. Tell the user (https://flowith.io/pricing); don't retry or switch models unasked."] : []),
+		...(broken.length ? [`Failed: ${broken.map((r) => `${r.ref} (${r.error ?? r.code})`).join("; ")}. Transient failures: \`retry <ref>\`; refusals: change the prompt or model.`] : []),
+		...(lost.length
+			? [`No answer came back for ${lost.map((r) => r.ref).join(" ")}: Flowith may have taken it. \`wait ${lost.map((r) => r.ref).join(" ")}\` (it finishes if it was taken); \`retry\` checks the canvas's charges and only sends it again once it is clear it never arrived.`]
+			: []),
+		...(running.length > lost.length ? [`Still generating: \`wait ${running.filter((r) => !lost.includes(r)).map((r) => r.ref).join(" ")}\` later.`] : []),
+	];
+	out({
+		canvas: convId,
+		url: canvasUrl(ctx.site, convId),
+		...extra,
+		...charged,
+		cards: results,
+		...(next.length ? { next: next.join(" ") } : {}),
 	});
-	const bad = media.filter((m) => m.media !== "image");
-	if (bad.length)
-		throw new CliError(
-			`submit --image only accepts images (got ${bad.map((m) => m.name).join(", ")}). ` +
-				"For Seedance audio/video references use: gen video --ref <file>",
-			"INVALID_PARAM",
-		);
-	return media.map((m) => ({ url: m.url, name: m.name, type: m.type }));
+	if (failed.length || lost.length) process.exitCode = 1;
 }
 
-function extractFlag(
-	args: string[],
-	flag: string,
-): { values: string[]; rest: string[] } {
-	const values: string[] = [],
-		rest: string[] = [];
-	for (let i = 0; i < args.length; i++) {
-		if (args[i] === flag && args[i + 1] && !args[i + 1].startsWith("--")) {
-			values.push(args[i + 1]);
-			i++;
-		} else {
-			rest.push(args[i]);
+/** Waits for the cards Flowith took and reports them all; a card whose send got no answer is reported, not waited on. */
+async function waitAndReport(ctx: Ctx, a: Args, convId: string, ids: string[], fallbackSec: number, extra: Record<string, unknown> = {}, lostIds: string[] = [], charged = true) {
+	const team = charged ? !!(await getCanvas(ctx.api, convId).catch(() => null))?.team_id : false;
+	const taken = ids.filter((id) => !lostIds.includes(id));
+	let last = -1;
+	const waited = has(a, "no-wait") || !taken.length
+		? cardsFrom(await fetchRowsById(ctx.api, taken)).map(resultOf)
+		: await waitFor(ctx.api, taken, {
+				timeoutMs: timeoutOf(a, fallbackSec),
+				onTick: (done, total) => {
+					if (done !== last) log(`${done}/${total} done`);
+					last = done;
+				},
+			});
+	const lost = lostIds.length ? cardsFrom(await fetchRowsById(ctx.api, lostIds)).map(resultOf).map((r) => (r.status === "running" ? { ...r, code: "SENT_UNKNOWN" } : r)) : [];
+	const byId = new Map([...waited, ...lost].map((r) => [r.id, r]));
+	await finish(ctx, convId, ids.map((id) => byId.get(id)).filter((r): r is Result => !!r), extra, { charged: charged && !has(a, "no-wait"), team });
+}
+
+// ---------- commands: session ----------
+
+async function cmdLogin(a: Args) {
+	const s = await login(agentName(a), log, { open: !has(a, "no-open"), site: flag(a, "site") });
+	const claims = jwtClaims(s.accessToken);
+	// The previous canvas-cowork's login (a copy of the browser's sign-in) is no longer used.
+	const oldLogin = forgetOldLogin();
+	out({ loggedIn: true, email: claims.email, site: s.site, worker: s.workerURL, canvas: s.canvas ?? null, ...(oldLogin ? { removedOldLogin: "~/.flowith/bot-session.json" } : {}) });
+}
+
+async function cmdWhoami(a: Args) {
+	const ctx = await context(a);
+	const claims = jwtClaims(ctx.session.accessToken);
+	out({
+		email: claims.email,
+		userId: ctx.userId,
+		site: ctx.site,
+		worker: ctx.session.workerURL,
+		agent: ctx.api.agent,
+		canvas: ctx.session.canvas ? canvasUrl(ctx.site, ctx.session.canvas) : null,
+		sessionExpires: claims.exp ? new Date(claims.exp * 1000).toISOString() : null,
+		renews: Boolean(ctx.session.refreshToken),
+	});
+}
+
+async function cmdCredits(a: Args) {
+	const ctx = await context(a);
+	const rows = await worker<Array<Record<string, any>>>(ctx.api, "/user/credits");
+	const now = Date.now();
+	const live = (rows ?? []).filter(
+		(r) => !r.canceled && (!r.from_date || Date.parse(r.from_date) <= now) && (!r.to_date || Date.parse(r.to_date) > now),
+	);
+	// The balance Flowith shows: grants overdrawn by a run that cost more than they held go negative and count.
+	const total = live.reduce((s, r) => s + (Number(r.remain_quota) || 0), 0);
+	out({
+		credits: Math.round(total * 100) / 100,
+		note: "1 credit = $0.001. Some grants only cover certain model tiers; a negative grant is owed and comes off the rest.",
+		grants: live
+			.filter((r) => Number(r.remain_quota) !== 0)
+			.map((r) => ({ kind: r.sub_type, left: r.remain_quota, until: r.to_date?.slice(0, 10), ...(r.policy_summary ? { limits: r.policy_summary } : {}) })),
+	});
+}
+
+// ---------- commands: canvases ----------
+
+async function cmdCanvases(a: Args) {
+	const ctx = await context(a);
+	const list = await listCanvases(ctx.api, ctx.userId, a.pos.join(" ") || undefined, num(a, "limit") ?? 20);
+	if (jsonOut) return out(list.map((c) => ({ id: c.id, title: c.title, updated: c.updated_at, url: canvasUrl(ctx.site, c.id) })));
+	const active = ctx.session.canvas;
+	for (const c of list)
+		console.log(`${c.id === active ? "*" : " "} ${c.id.slice(0, 8)}  ${c.updated_at.slice(0, 16).replace("T", " ")}  ${c.title ?? "(untitled)"}`);
+	if (!list.length) console.log("No canvases.");
+}
+
+async function cmdNew(a: Args) {
+	const ctx = await context(a);
+	const title = a.pos.join(" ").trim() || "Untitled";
+	const c = await createCanvas(ctx.api, ctx.userId, title);
+	ctx.session.canvas = c.id;
+	saveSession(ctx.session);
+	const url = canvasUrl(ctx.site, c.id);
+	if (has(a, "open")) openUrl(url);
+	out({ canvas: c.id, title: c.title, url, active: true });
+}
+
+async function cmdUse(a: Args) {
+	const ctx = await context(a);
+	const ref = a.pos.join(" ").trim();
+	if (!ref) throw new CliError("use <canvas id, prefix, title or URL>", "INVALID_PARAM");
+	const id = ref.match(/\/conv\/([0-9a-f-]{36})/i)?.[1] ?? ref;
+	const c = await resolveCanvas(ctx.api, ctx.userId, id);
+	ctx.session.canvas = c.id;
+	saveSession(ctx.session);
+	out({ canvas: c.id, title: c.title, url: canvasUrl(ctx.site, c.id), active: true });
+}
+
+async function cmdOpen(a: Args) {
+	const ctx = await context(a);
+	const c = await canvasOf(ctx, a);
+	const url = canvasUrl(ctx.site, c.id);
+	openUrl(url);
+	out({ opened: url });
+}
+
+// ---------- commands: seeing ----------
+
+const STATUS_MARK: Record<string, string> = { finished: "✓", failed: "✗", running: "…", init: "…" };
+
+function cardLine(c: Card, byId: Map<string, Card>, indent: string): string {
+	const short = (id: string) => byId.get(id)?.ref ?? id.slice(0, 8);
+	const bits: string[] = [`${indent}${c.kind.padEnd(6)} ${c.ref}`];
+	if (c.title) bits.push(`"${c.title.length > 40 ? `${c.title.slice(0, 39)}…` : c.title}"`);
+	if (c.model) bits.push(c.model);
+	if (c.ratio && (c.kind === "image" || c.kind === "video")) bits.push(c.ratio);
+	if (c.type === "22") bits.push("✗ no credits");
+	else if (c.type === "25") bits.push("✗ needs a higher plan");
+	else if (c.status && c.kind !== "group") bits.push(STATUS_MARK[c.status] ?? c.status);
+	bits.push(`@${c.rect.x},${c.rect.y} ${c.rect.width}×${c.rect.height}`);
+	const from = [...(c.madeFrom ?? []), ...(c.references ?? []), ...(c.follows ? [c.follows] : [])];
+	if (from.length) bits.push(`← ${[...new Set(from)].map(short).join(",")}`);
+	if (c.placedBy === "flo") bits.push("(Flo)");
+	const gist = (c.kind === "image" || c.kind === "video" || c.kind === "audio" ? c.prompt : c.text)?.replace(/\s+/g, " ").trim();
+	return `${bits.join("  ")}${gist ? `\n${indent}       ${gist.length > 110 ? `${gist.slice(0, 109)}…` : gist}` : ""}${c.status === "failed" && c.error ? `\n${indent}       error: ${c.error.slice(0, 160)}` : ""}`;
+}
+
+async function cmdLook(a: Args) {
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a);
+	const all = await readCanvas(ctx.api, canvas.id);
+	// look [words] [--kind image]: only the matching cards (and the groups holding them).
+	const words = a.pos.join(" ").trim().toLowerCase();
+	const kind = flag(a, "kind");
+	const matches = (c: Card) =>
+		(!kind || c.kind === kind) &&
+		(!words || [c.title, c.prompt, c.text, c.model, c.ref].some((v) => v?.toLowerCase().includes(words)));
+	const hits = all.filter((c) => c.kind !== "group" && matches(c));
+	const cards = words || kind ? all.filter((c) => hits.includes(c) || (c.kind === "group" && hits.some((h) => h.groupId === c.id))) : all;
+	if (jsonOut) {
+		return out({
+			canvas: canvas.id,
+			title: canvas.title,
+			url: canvasUrl(ctx.site, canvas.id),
+			cards: cards.map(({ row: _r, data: _d, ...c }) => ({ ...c, prompt: c.prompt?.slice(0, 400), text: c.text?.slice(0, 400) })),
+		});
+	}
+	const byId = new Map(cards.map((c) => [c.id, c]));
+	const groups = cards.filter((c) => c.kind === "group");
+	const loose = cards.filter((c) => c.kind !== "group" && !c.groupId);
+	const counts = Object.entries(
+		cards.filter((c) => c.kind !== "group").reduce<Record<string, number>>((m, c) => ((m[c.kind] = (m[c.kind] ?? 0) + 1), m), {}),
+	)
+		.map(([k, n]) => `${n} ${k}`)
+		.join(", ");
+	console.log(`Canvas "${canvas.title ?? "(untitled)"}" ${canvas.id}\n${canvasUrl(ctx.site, canvas.id)}\n${counts || "empty"}${groups.length ? `, ${groups.length} group${groups.length > 1 ? "s" : ""}` : ""}  (@x,y = top-left; ← = made from / uses)\n`);
+	const top = [...groups, ...loose].sort((p, q) => p.rect.y - q.rect.y || p.rect.x - q.rect.x);
+	// What a tidy-up should fix: top-level boxes that cover each other.
+	const overlaps: string[] = [];
+	for (let i = 0; i < top.length; i++)
+		for (let j = i + 1; j < top.length; j++) {
+			const [p, q] = [top[i]!.rect, top[j]!.rect];
+			if (p.x < q.x + q.width && q.x < p.x + p.width && p.y < q.y + q.height && q.y < p.y + p.height) overlaps.push(`${top[i]!.ref}×${top[j]!.ref}`);
 		}
-	}
-	return { values, rest };
-}
-
-// ============ Batch journal (crash/interrupt recovery) ============
-
-interface BatchRecord {
-	batchId: string;
-	convId: string;
-	mode?: string;
-	models: string[];
-	createdAt: string;
-	updatedAt: string;
-	total: number;
-	items: Array<{
-		index: number;
-		prompt: string;
-		status: "pending" | "submitted" | "failed";
-		questionNodeId?: string;
-		// Why a failed item failed, so a re-run can tell "rate-limited, retry later"
-		// (rate_limited) apart from a real error and avoid re-submitting blindly.
-		reason?: "rate_limited" | "error";
-	}>;
-}
-
-function batchFile(batchId: string): string {
-	return join(BATCH_DIR, `${batchId}.json`);
-}
-
-/**
- * Persist the batch record after every item so an interrupt leaves an audit
- * trail. Writes atomically (temp file + rename) so an interrupt mid-write can
- * never leave a half-written JSON that loadBatch would silently drop. A write
- * failure is warned (not swallowed) since it means recovery won't be available.
- */
-let _batchSaveWarned = false;
-function saveBatch(rec: BatchRecord) {
-	try {
-		mkdirSync(BATCH_DIR, { recursive: true });
-		rec.updatedAt = new Date().toISOString();
-		const dest = batchFile(rec.batchId);
-		const tmp = `${dest}.${process.pid}.tmp`;
-		writeFileSync(tmp, JSON.stringify(rec, null, 2));
-		renameSync(tmp, dest); // atomic on the same filesystem
-	} catch (e: any) {
-		if (!_batchSaveWarned) {
-			_batchSaveWarned = true;
-			console.error(
-				`[canvas-cowork] WARNING: failed to write batch journal (${e?.message ?? e}). ` +
-					`Recovery via 'batches ${rec.batchId}' may be unavailable.`,
-			);
-		}
+	if (overlaps.length) console.log(`Overlapping: ${overlaps.slice(0, 12).join(", ")}${overlaps.length > 12 ? " …" : ""}  (tidy, arrange or move fixes it)\n`);
+	for (const c of top) {
+		if (c.kind === "group") {
+			const members = cards.filter((m) => m.groupId === c.id).sort((p, q) => p.rect.y - q.rect.y || p.rect.x - q.rect.x);
+			const total = all.filter((m) => m.groupId === c.id).length;
+			console.log(`group  ${c.ref}  "${c.title ?? ""}"  ${total} cards  @${c.rect.x},${c.rect.y} ${c.rect.width}×${c.rect.height}`);
+			for (const m of members) console.log(cardLine(m, byId, "  "));
+		} else console.log(cardLine(c, byId, ""));
 	}
 }
 
-function loadBatch(batchId: string): BatchRecord | null {
-	try {
-		return JSON.parse(readFileSync(batchFile(batchId), "utf-8")) as BatchRecord;
-	} catch (e: any) {
-		// ENOENT is expected (no such batch); anything else means a corrupt or
-		// unreadable journal — surface it so a bad audit isn't mistaken for "none".
-		if (e?.code !== "ENOENT") {
-			console.error(
-				`[canvas-cowork] WARNING: batch journal for ${batchId} is unreadable (${e?.message ?? e}).`,
-			);
-		}
-		return null;
-	}
+async function cmdRead(a: Args) {
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a);
+	const cards = await readCanvas(ctx.api, canvas.id);
+	if (!a.pos.length) throw new CliError("read <card> [card…]", "INVALID_PARAM");
+	out(
+		a.pos.map((r) => {
+			const c = findCard(cards, r);
+			const { row, data, ...rest } = c;
+			return has(a, "full") ? { ...rest, data } : rest;
+		}),
+	);
 }
 
-function listBatches(limit = 20): BatchRecord[] {
-	try {
-		const { readdirSync } = require("fs");
-		return (readdirSync(BATCH_DIR) as string[])
-			.filter((f) => f.endsWith(".json"))
-			.map((f) => {
-				try {
-					return JSON.parse(
-						readFileSync(join(BATCH_DIR, f), "utf-8"),
-					) as BatchRecord;
-				} catch {
-					return null;
-				}
-			})
-			.filter((r): r is BatchRecord => r !== null)
-			.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-			.slice(0, limit);
-	} catch {
-		return [];
-	}
+/** Downloads previews (or originals with --full) so the agent can look at them. */
+async function cmdShots(a: Args) {
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a);
+	const cards = await readCanvas(ctx.api, canvas.id);
+	const chosen = a.pos.length
+		? a.pos.map((r) => findCard(cards, r))
+		: cards.filter((c) => (c.kind === "image" || c.kind === "video") && c.url).slice(-(num(a, "last") ?? 12));
+	const dir = flag(a, "out") ?? join(tmpdir(), "flowith-shots", canvas.id.slice(0, 8));
+	mkdirSync(dir, { recursive: true });
+	const files: Array<Record<string, unknown>> = [];
+	await Promise.all(
+		chosen.map(async (c) => {
+			const src = has(a, "full") ? c.url : (c.preview ?? (c.kind === "image" ? c.url : undefined));
+			if (!src) {
+				files.push({ ref: c.ref, kind: c.kind, skipped: c.kind === "video" ? "no preview frame yet; use --full for the clip" : "no media" });
+				return;
+			}
+			const path = fileFor(dir, c.ref, c.title, src, c.kind === "video" && !has(a, "full") ? "jpg" : c.kind === "video" ? "mp4" : "png");
+			try {
+				await download(src, path);
+				// A cut-out keeps its background colours under full transparency; most viewers draw them anyway.
+				const head = readFileSync(path).subarray(0, 26);
+				const alpha = head.length > 25 && head.readUInt32BE(0) === 0x89504e47 && (head[25] === 6 || head[25] === 4);
+				files.push({ ref: c.ref, kind: c.kind, title: c.title, file: path, ...(alpha ? { note: "PNG with transparency: transparent areas may still show colour in a viewer" } : {}) });
+			} catch (e) {
+				files.push({ ref: c.ref, kind: c.kind, error: (e as Error).message });
+			}
+		}),
+	);
+	out({ dir, files, hint: "Open each file to see it (your Read tool shows images)." });
 }
 
-// ============ Output ============
-
-let JSON_COMPACT = false; // --json: compact single-line JSON on stdout, implies --quiet
-let VERBOSE = false; // --verbose: keep the full node `data` in gen results
-let QUIET = false; // --quiet: no progress lines on stderr
-
-/** Strip the global output flags (--json / --verbose / --quiet) from anywhere on the line. */
-function parseJsonFlag(rawArgs: string[]): string[] {
-	const rest: string[] = [];
-	for (const a of rawArgs) {
-		if (a === "--json") JSON_COMPACT = QUIET = true;
-		else if (a === "--verbose") VERBOSE = true;
-		else if (a === "--quiet") QUIET = true;
-		else rest.push(a);
+async function cmdSave(a: Args) {
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a);
+	const cards = await readCanvas(ctx.api, canvas.id);
+	if (!a.pos.length) throw new CliError("save <card…> [--out dir]", "INVALID_PARAM");
+	const dir = flag(a, "out") ?? ".";
+	const saved: Array<Record<string, unknown>> = [];
+	for (const r of a.pos) {
+		const c = findCard(cards, r);
+		if (c.text && !c.url) {
+			const path = fileFor(dir, c.ref, c.title, "x.md", "md");
+			mkdirSync(dir, { recursive: true });
+			writeFileSync(path, c.text);
+			saved.push({ ref: c.ref, file: path });
+		} else if (c.url) {
+			const path = fileFor(dir, c.ref, c.title, c.url, c.kind === "video" ? "mp4" : c.kind === "audio" ? "mp3" : "png");
+			saved.push({ ref: c.ref, ...(await download(c.url, path)) });
+		} else saved.push({ ref: c.ref, skipped: "nothing to save yet" });
 	}
+	out({ saved });
+}
+
+// ---------- commands: making ----------
+
+async function prepare(a: Args, firstPrompt: string) {
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a, { create: titleFrom(firstPrompt, 24) });
+	const [cards, catalog] = await Promise.all([canvas.created && dryRun ? ([] as Card[]) : readCanvas(ctx.api, canvas.id), catalogOf(ctx)]);
+	return { ctx, canvas, cards, catalog };
+}
+
+/** Where new cards go: beside --near/--from, else beside the first card reference. */
+function anchorOf(a: Args, cards: Card[], refs: Ref[]): Card | undefined {
+	const near = flag(a, "near");
+	if (near) return findCard(cards, near);
+	return refs.find((r) => r.card)?.card;
+}
+
+function intoOf(a: Args, cards: Card[]) {
+	const into = flag(a, "into");
+	return into ? findCard(cards, into) : undefined;
+}
+
+async function cmdImage(a: Args, base?: { source: Card }) {
+	// edit <card> "change A" "change B": one new picture per change, all from the same card.
+	const prompts = (base ? a.pos.slice(1) : a.pos).map((p) => p.trim()).filter(Boolean);
+	if (!prompts.length || !prompts[0]) throw new CliError(base ? 'edit <card> "what to change"' : 'image "prompt" ["prompt" …]', "INVALID_PARAM");
+	const { ctx, canvas, cards, catalog } = await prepare(a, prompts[0]!);
+	// --model a,b,c: the same prompt on several models (a comparison), one card each.
+	const wanted = flags(a, "model");
+	const models = (wanted.length ? wanted : [undefined]).map((w) => resolveModel(catalog, "image", w));
+	const modelId = models.map((m) => m.id).join(", ");
+	const extraRefs = await toRefs(ctx, canvas.id, cards, flags(a, "ref"), dryRun);
+	const sourceRef: Ref[] = base ? [{ url: base.source.url!, name: base.source.title ?? base.source.ref, media: "image", card: base.source }] : [];
+	const refs = [...sourceRef, ...extraRefs];
+	const n = Math.max(1, Math.min(8, num(a, "n") ?? 1));
+	const jobs: ImageJob[] = prompts.flatMap((p) =>
+		models.flatMap(({ id, model }) => Array.from({ length: n }, () => ({
+			prompt: p,
+			modelId: id,
+			model,
+			ratio: flag(a, "ratio") ?? (base ? base.source.ratio : undefined),
+			size: flag(a, "size"),
+			quality: flag(a, "quality"),
+			transparent: has(a, "transparent"),
+			refs,
+		}))),
+	);
+	const built = jobs.map((j) => imageRequest(j, "00000000-0000-0000-0000-000000000000", canvas.id));
+	const credits = Math.round(
+		jobs.reduce((sum, j, i) => {
+			const body = built[i]!.body as { quality?: string; aspect_ratio?: string; image_size?: string };
+			const pixels = /^\d+x\d+$/.test(body.aspect_ratio ?? "") ? body.aspect_ratio : undefined;
+			return sum + (estimateCredits(j.model, { quality: body.quality, pixels, size: body.image_size, refs: j.refs.length }) ?? 0);
+		}, 0),
+	);
+	if (has(a, "dry-run")) return out({ model: modelId, jobs: jobs.length, estimatedCredits: credits, requests: built.map((b) => b.body) });
+	const title = flag(a, "title");
+	const items: NewCard[] = jobs.map((j, i) => {
+		const ratio = built[i]!.ratio;
+		const t = title
+			? models.length > 1 ? `${title} · ${j.model.title ?? j.modelId}` : jobs.length > 1 ? `${title} ${i + 1}` : title
+			: titleFrom(j.prompt);
+		return {
+			kind: "image",
+			size: cardSize("image", ratio),
+			data: {
+				...imageCardData(j, t, ratio),
+				...(title ? { customTitle: t } : {}),
+				...(base ? { baseImageNodeId: base.source.id, baseImageUrl: base.source.url } : {}),
+				agentRequest: { kind: "image", body: requestTemplate(built[i]!.body) },
+			},
+		};
+	});
+	const groupName = flag(a, "group") ?? (items.length > 1 ? title ?? titleFrom(prompts[0]!, 20) : undefined);
+	const placed = await placeCards(ctx.api, canvas.id, cards, items, { anchor: base?.source ?? anchorOf(a, cards, refs), group: groupName, into: intoOf(a, cards) });
+	log(`Placed ${placed.ids.length} image card${placed.ids.length > 1 ? "s" : ""} (${modelId}, ~${credits} credits); generating…`);
+	const lost = await sendAll(ctx, placed, (id) => ({ kind: "image", body: imageRequest(jobs[placed.ids.indexOf(id)]!, id, canvas.id).body }));
+	await waitAndReport(ctx, a, canvas.id, placed.ids, 300, { model: modelId, estimatedCredits: credits, ...(placed.groupId ? { group: placed.groupId.slice(0, 8) } : {}) }, lost);
+}
+
+/** Said where a clip's price can't be known before it is made. */
+const UNPRICED = "Unknown until it is made (it depends on a source clip's length the CLI can't read, or on what the provider measures). Ask the user before running it.";
+
+async function cmdVideo(a: Args) {
+	let prompt = a.pos.join(" ").trim();
+	const extend = flag(a, "extend");
+	const editVideo = flag(a, "edit-video");
+	const operation = extend ? "extend" : editVideo ? "edit" : undefined;
+	if (!prompt && !operation && !flag(a, "first") && !flag(a, "from")) throw new CliError('video "prompt" [--first card|file] [--ref …]', "INVALID_PARAM");
+	if (operation === "edit" && !prompt) throw new CliError('video --edit-video <clip> "what to change"', "INVALID_PARAM");
+	const { ctx, canvas, cards, catalog } = await prepare(a, prompt || "Video");
+	const clip = operation ? await toRef(ctx, canvas.id, cards, extend ?? editVideo!, dryRun) : undefined;
+	if (clip && clip.media !== "video") throw new CliError("--extend / --edit-video take a clip.", "INVALID_PARAM");
+	// Extending or editing a clip: Seedance (the canvas's choice) or Gemini Omni, keeping the clip's own model when it is one.
+	const own = clip?.card?.model && /^(seedance-2\.|gemini-omni)/.test(clip.card.model) ? clip.card.model : undefined;
+	const { id: modelId, model } = resolveModel(catalog, "video", flag(a, "model") ?? own);
+	let opRefs: Ref[] = [];
+	let omniOperation: VideoJob["operation"];
+	if (operation && clip) {
+		if (modelId.startsWith("gemini-omni")) {
+			omniOperation = operation;
+			opRefs = [clip];
+			if (!prompt) prompt = "Continue the shot naturally: same subject, light, camera and sound.";
+		} else if (/^seedance-2\./.test(modelId)) {
+			// The canvas's own Seedance extend / edit wording (frontend omni-video-operations.ts seedanceOperationPrompt).
+			const zh = hasHan(prompt) || !prompt;
+			const seconds = flag(a, "duration") ?? "5";
+			const sound = zh ? "声音：现场同期收音，纪录片质感，只有画面里人物的说话声和这个地方的自然声，不要背景音乐。" : "Sound design: raw location recording, documentary style — only the voices of the people on screen and the natural sounds of the place; the scene is otherwise silent.";
+			prompt = operation === "extend"
+				? zh
+					? `把@video1作为同一个连续镜头延长 ${seconds} 秒，从它的最后一帧直接接着拍，主体、光线和机位都不变。${prompt || "动作自然地继续下去。"}\n${sound}`
+					: `Extend @video1 as the same continuous shot for ${seconds} seconds, continuing straight from its last frame with the same subject, light and camera. ${prompt}\n${sound}`
+				: zh
+					? `修改@video1：${prompt.replace(/[。.！!？?\s]+$/u, "")}。@video1里其他的一切保持不变。`
+					: `Edit @video1: ${prompt}. Keep everything else in @video1 the same.`;
+			opRefs = [clip];
+		} else throw new CliError("Extending or editing a clip works with Seedance 2.x or Gemini Omni models.", "INVALID_PARAM");
+	}
+	const firstIn = flag(a, "first") ?? flag(a, "from");
+	const first = firstIn ? await toRef(ctx, canvas.id, cards, firstIn, dryRun) : undefined;
+	const last = flag(a, "last") ? await toRef(ctx, canvas.id, cards, flag(a, "last")!, dryRun) : undefined;
+	const refs = [...opRefs, ...(await toRefs(ctx, canvas.id, cards, flags(a, "ref"), dryRun))];
+	const job: VideoJob = {
+		prompt,
+		modelId,
+		model,
+		ratio: flag(a, "ratio") ?? (clip?.card?.ratio && model.supportedAspectRatios?.includes(clip.card.ratio) ? clip.card.ratio : undefined),
+		duration: flag(a, "duration"),
+		resolution: flag(a, "resolution"),
+		audio: has(a, "no-audio") ? false : has(a, "audio") ? true : undefined,
+		draft: has(a, "draft"),
+		first,
+		last,
+		refs,
+		operation: omniOperation,
+	};
+	const anchor = anchorOf(a, cards, [...(first ? [first] : []), ...refs]);
+	const preview = videoRequest(job, "00000000-0000-0000-0000-000000000000", canvas.id, canvas.id, { x: 0, y: 0 });
+	// Source clips (references, or the clip extended / edited) and their lengths where their cards know them.
+	const clips = [...(first ? [first] : []), ...(last ? [last] : []), ...refs].filter((r) => r.media === "video");
+	const clipSeconds = clips.map((r) => Number(r.card?.data?.duration));
+	const sources = clips.length ? { count: clips.length, seconds: clipSeconds.every((n) => n > 0) ? clipSeconds.reduce((x, y) => x + y, 0) : undefined } : undefined;
+	const credits = await videoPrice(ctx.api, canvas.created ? undefined : canvas.id, preview.body, sources);
+	if (has(a, "dry-run")) return out({ model: modelId, estimatedCredits: credits ?? null, ...(credits === undefined ? { estimateNote: UNPRICED } : {}), request: preview.body });
+	const title = flag(a, "title") ?? (clip?.card && operation ? `${clip.card.title ?? "Clip"} · ${operation === "extend" ? "extended" : "edited"}` : titleFrom(a.pos.join(" ").trim() || "Video"));
+	const ratio = preview.params.aspect_ratio && !["adaptive", "auto"].includes(preview.params.aspect_ratio) ? preview.params.aspect_ratio : "16:9";
+	const placed = await placeCards(
+		ctx.api,
+		canvas.id,
+		cards,
+		// Named, or the worker names a finished clip by its prompt's first five characters.
+		[{ kind: "video", size: cardSize("video", ratio), data: { ...videoCardData(job, title, preview.params, preview.audio), customTitle: title, agentRequest: { kind: "video", body: requestTemplate(preview.body) } } }],
+		{ anchor, group: flag(a, "group"), into: intoOf(a, cards) },
+	);
+	const id = placed.ids[0]!;
+	const row = placed.rows.find((r) => r.id === id)!;
+	log(`Placed video card ${id.slice(0, 8)} (${modelId}, ${preview.params.duration ?? "?"} s, ~${credits ?? "?"} credits); generating…`);
+	const lost = await sendAll(ctx, placed, () => ({ kind: "video", body: videoRequest(job, id, canvas.id, row.p_id ?? canvas.id, row.position ?? { x: 0, y: 0 }).body }));
+	await waitAndReport(ctx, a, canvas.id, [id], 900, { model: modelId, estimatedCredits: credits ?? null, ...(credits === undefined ? { estimateNote: UNPRICED } : {}) }, lost);
+}
+
+async function cmdText(a: Args) {
+	const prompt = a.pos.join(" ").trim();
+	if (!prompt) throw new CliError('text "prompt" [--model a,b] [--ref card]', "INVALID_PARAM");
+	const { ctx, canvas, cards, catalog } = await prepare(a, prompt);
+	const wanted = flags(a, "model");
+	const models = (wanted.length ? wanted : [undefined]).map((w) => resolveModel(catalog, "text", w));
+	const refs = await toRefs(ctx, canvas.id, cards, flags(a, "ref"), dryRun);
+	const title = flag(a, "title") ?? titleFrom(prompt);
+	const jobs: TextJob[] = models.map((m) => ({ prompt, modelId: m.id, system: flag(a, "system"), refs }));
+	if (has(a, "dry-run")) return out({ requests: jobs.map((j) => textRequest(j, "00000000-0000-0000-0000-000000000000", canvas.id)) });
+	// Several models: each card names its model, so the comparison reads at a glance.
+	const items: NewCard[] = jobs.map((j) => ({
+		kind: "text",
+		size: cardSize("text"),
+		data: {
+			...textCardData(
+				j,
+				models.length > 1 ? `${flag(a, "title") ?? titleFrom(prompt, 10)} · ${catalog[j.modelId]?.title ?? j.modelId}` : title,
+				Boolean(flag(a, "title")) || models.length > 1,
+			),
+			agentRequest: { kind: "text", body: requestTemplate(textRequest(j, "x", "x")) },
+		},
+	}));
+	const placed = await placeCards(ctx.api, canvas.id, cards, items, {
+		anchor: anchorOf(a, cards, refs),
+		group: flag(a, "group") ?? (items.length > 1 ? title : undefined),
+		into: intoOf(a, cards),
+	});
+	log(`Placed ${items.length} text card${items.length > 1 ? "s" : ""} (${models.map((m) => m.id).join(", ")}); writing…`);
+	const lost = await sendAll(ctx, placed, (id) => ({ kind: "text", body: textRequest(jobs[placed.ids.indexOf(id)]!, id, canvas.id) }));
+	await waitAndReport(ctx, a, canvas.id, placed.ids, 600, {}, lost);
+}
+
+async function cmdSound(a: Args, tool: "gen_speech" | "gen_music") {
+	const words = a.pos.join(" ").trim();
+	if (!words) throw new CliError(tool === "gen_speech" ? 'speech "text to say" [--for card]' : 'music "style / mood" [--for card]', "INVALID_PARAM");
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a, { create: titleFrom(words, 24) });
+	const [cards, catalog] = await Promise.all([canvas.created && dryRun ? ([] as Card[]) : readCanvas(ctx.api, canvas.id), catalogOf(ctx)]);
+	const wanted = flag(a, "model") ?? (tool === "gen_speech" ? "elevenlabs-v3" : "suno-chirp-v6");
+	const { id: modelId, model } = resolveModel(catalog, "audio", wanted);
+	const spec = AUDIO_MODELS[modelId];
+	if (!spec || spec.tool !== tool) throw new CliError(`${modelId} is not a ${tool === "gen_speech" ? "speech" : "music"} model.`, "INVALID_MODEL");
+	const args: Record<string, unknown> =
+		tool === "gen_speech"
+			? { text: words, model: spec.id, ...(flag(a, "voice") ? { voice: flag(a, "voice") } : {}), ...(flag(a, "language") ? { language_code: flag(a, "language") } : {}) }
+			: {
+					prompt: words,
+					model: spec.id,
+					instrumental: !flag(a, "lyrics") && !has(a, "vocals"),
+					...(flag(a, "lyrics") ? { lyrics_prompt: flag(a, "lyrics") } : {}),
+					...(num(a, "duration") ? { duration: num(a, "duration") } : {}),
+				};
+	const credits = estimateCredits(model, { chars: words.length });
+	if (has(a, "dry-run")) return out({ model: modelId, estimatedCredits: credits, action: { name: tool, args } });
+	// The sound hangs off a card: --for (the clip it scores), else a note holding its words.
+	let source = flag(a, "for") ? findCard(cards, flag(a, "for")!) : undefined;
+	if (!source) {
+		const placed = await placeCards(ctx.api, canvas.id, cards, [
+			{ kind: "note", size: cardSize("note"), data: noteData(words, tool === "gen_speech" ? "Script" : "Music brief") },
+		]);
+		source = cardsFrom(placed.rows)[0]!;
+		cards.push(source);
+	}
+	log(`Making ${tool === "gen_speech" ? "speech" : "music"} with ${modelId} (~${credits ?? "?"} credits)…`);
+	const made = await makeSound(ctx.api, canvas.id, cards, source, { name: tool, args }, { timeoutMs: timeoutOf(a, 600), onTick: () => {} });
+	const rows = await fetchRowsById(ctx.api, made.ids);
+	await finish(ctx, canvas.id, cardsFrom(rows).map(resultOf), { model: modelId, estimatedCredits: credits, source: source.ref });
+}
+
+async function cmdVary(a: Args) {
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a);
+	const cards = await readCanvas(ctx.api, canvas.id);
+	const src = findCard(cards, a.pos[0] ?? "");
+	const req = src.data.agentRequest as { kind?: "image" | "video" | "text"; body?: Record<string, unknown> } | undefined;
+	// A card this CLI made carries its exact request: the same request again, as new cards beside it.
+	if (req?.kind && req.body && !flag(a, "model")) {
+		const n = Math.max(1, Math.min(8, num(a, "n") ?? 1));
+		if (dryRun) return out({ vary: src.ref, copies: n, request: req.body });
+		const { error: _e, error_type: _t, error_code: _c, request_id: _r, group_id: _g, customTitle: _ct, ...data } = src.data;
+		const kind = req.kind === "video" ? "video" : req.kind === "text" ? "text" : "image";
+		const size = kind === "text" ? cardSize("text") : { width: src.rect.width, height: src.rect.height };
+		const items: NewCard[] = Array.from({ length: n }, () => ({ kind, size, data: { ...data, value: "", status: "running", ...(kind === "video" ? { videoId: null } : {}) } }));
+		const placed = await placeCards(ctx.api, canvas.id, cards, items, { anchor: src, group: n > 1 ? flag(a, "group") ?? `${src.title ?? "Variations"}` : undefined });
+		const rowOf = (id: string) => placed.rows.find((r) => r.id === id)!;
+		const lost = await sendAll(ctx, placed, (id) => ({
+			kind: req.kind!,
+			body: { ...req.body, nodeId: id, convId: canvas.id, ...(kind === "video" ? { parentNodeId: rowOf(id).p_id ?? canvas.id, position: rowOf(id).position ?? { x: 0, y: 0 } } : {}) },
+		}));
+		return waitAndReport(ctx, a, canvas.id, placed.ids, kind === "video" ? 900 : 300, placed.groupId ? { group: placed.groupId.slice(0, 8) } : {}, lost);
+	}
+	if (src.kind === "text" && src.prompt && src.model) {
+		const next = parseArgs(["text", src.prompt, "--model", flag(a, "model") ?? src.model, "--near", src.ref]);
+		for (const [k, v] of a.flags) if (k !== "model") next.flags.set(k, v);
+		return cmdText(next);
+	}
+	if (src.kind !== "image" && src.kind !== "video") throw new CliError("vary takes a picture, clip or text card.", "INVALID_PARAM");
+	if (!src.prompt || !src.model) throw new CliError(`${src.ref} has no prompt/model to run again.`, "INVALID_PARAM");
+	// Frames are not references: the first / last frame card goes back as a frame.
+	const frames = [src.data.baseImageNodeId, src.data.lastFrameNodeId].filter(Boolean);
+	const refs = (src.data.promptReferenceNodes ?? [])
+		.filter((p: { id: string }) => !frames.includes(p.id))
+		.map((p: { id: string }) => cards.find((c) => c.id === p.id)?.ref)
+		.filter(Boolean) as string[];
+	const next = parseArgs([src.kind, src.prompt, "--model", flag(a, "model") ?? src.model, "--near", src.ref, ...refs.flatMap((r) => ["--ref", r])]);
+	for (const [k, v] of a.flags) if (k !== "model") next.flags.set(k, v);
+	if (src.ratio && !flag(a, "ratio") && src.kind === "image") next.flags.set("ratio", [src.ratio]);
+	if (src.kind === "image") {
+		if (!next.flags.has("n")) next.flags.set("n", ["1"]);
+		return cmdImage(next);
+	}
+	if (src.data.baseImageNodeId) next.flags.set("first", [String(src.data.baseImageNodeId)]);
+	return cmdVideo(next);
+}
+
+async function cmdEdit(a: Args) {
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a);
+	const cards = await readCanvas(ctx.api, canvas.id);
+	const source = findCard(cards, a.pos[0] ?? "");
+	if (source.kind !== "image" || !source.url) throw new CliError(`${source.ref} is not a finished picture. (For clips: video --edit-video ${source.ref} "…".)`, "INVALID_PARAM");
+	return cmdImage(a, { source });
+}
+
+async function cmdTool(a: Args, tool: "upscale" | "cutout" | "expand") {
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a);
+	const cards = await readCanvas(ctx.api, canvas.id);
+	const source = findCard(cards, a.pos[0] ?? "");
+	if (dryRun)
+		return out({
+			tool,
+			source: source.ref,
+			kind: source.kind,
+			...(tool === "expand" ? { ratio: flag(a, "ratio") ?? a.pos[1] } : {}),
+			...(tool === "upscale" ? { to: flag(a, "to") ?? "next size up", quality: flag(a, "quality") ?? "fast" } : {}),
+			note: "Nothing sent. The canvas prices card tools when they run; `spent` shows the charge afterwards.",
+		});
+	let placed;
+	if (tool === "upscale") placed = source.kind === "video" ? await upscaleVideo(ctx.api, canvas.id, cards, source, flag(a, "to"), flag(a, "quality")) : await upscaleImage(ctx.api, canvas.id, cards, source, flag(a, "to"));
+	else if (tool === "cutout") placed = await cutout(ctx.api, canvas.id, cards, source);
+	else {
+		const ratio = flag(a, "ratio") ?? a.pos[1];
+		if (!ratio) throw new CliError("expand <card> --ratio 16:9", "INVALID_PARAM");
+		placed = await expand(ctx.api, canvas.id, cards, source, ratio);
+	}
+	log(`${tool} started on ${source.ref} → ${placed.ids[0]!.slice(0, 8)}`);
+	await waitAndReport(ctx, a, canvas.id, placed.ids, source.kind === "video" ? 1200 : 600, {}, [], false);
+}
+
+
+/** A request as stored on its card (for `retry`): without the ids and placement it gets when sent. */
+function requestTemplate(body: Record<string, unknown>) {
+	const { nodeId: _n, convId: _c, parentNodeId: _p, position: _pos, ...rest } = body;
 	return rest;
 }
 
-function out(obj: unknown) {
-	console.log(JSON_COMPACT ? JSON.stringify(obj) : JSON.stringify(obj, null, 2));
-}
-
-function resultOut(data: unknown) {
-	out({ type: "result", actionId: crypto.randomUUID(), data });
-}
-
-function progress(msg: string) {
-	if (!QUIET) console.error(msg);
-}
-
-// ============ Direct (headless) commands ============
-//
-// Everything below talks straight to Supabase / the edge worker with the
-// session's access token. No browser tab is needed; when one *is* connected
-// we still nudge it (create-canvas / switch navigate it) so the user sees
-// the cursor land where the work happens.
-
-/** Best-effort: navigate a connected Flowith tab to a canvas. Never throws. */
-async function tryBrowserNavigate(
-	session: CanvasBotSession,
-	userId: string,
-	botClient: string,
-	convId: string,
-): Promise<boolean> {
-	const client = new RealtimeLite(
-		session.supabaseUrl,
-		session.supabaseKey,
-		session.accessToken,
-	);
+/**
+ * Runs failed cards again in place. A card still generating, or finished, is never sent again (it would be charged
+ * twice and the results would overwrite each other). One whose send got no answer is sent again only once it is clear
+ * it never arrived: no charge began while it was sent, and it has stayed generating longer than such a run takes.
+ */
+async function cmdRetry(a: Args) {
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a);
+	const cards = await readCanvas(ctx.api, canvas.id);
+	const requestOf = (c: Card) => c.data.agentRequest as { kind?: "image" | "video" | "text"; body?: Record<string, unknown> } | undefined;
+	const failed = (c: Card) => c.status === "failed" || c.type === "22" || c.type === "25";
+	// Each card once, however often it is named (a ref and its title are the same card).
+	const named = [...new Map(a.pos.map((r) => findCard(cards, r)).map((c) => [c.id, c])).values()];
+	const candidates = named.length ? named : cards.filter(failed);
+	// Checked before anything is sent: only cards carrying their own request run again.
+	const chosen = candidates.filter((c) => requestOf(c)?.kind && requestOf(c)?.body);
+	const skipped = candidates.filter((c) => !chosen.includes(c)).map((c) => c.ref);
+	if (named.length && skipped.length)
+		throw new CliError(`${skipped.join(", ")} weren't made by this CLI's generation, so their request isn't on the card. Use \`vary\` or make them again.`, "INVALID_PARAM");
+	if (!chosen.length) return out({ canvas: canvas.id, note: skipped.length ? `Nothing to retry here (${skipped.join(", ")} weren't made by this CLI).` : "Nothing failed." });
+	const check = async (card: Card) => {
+		if (failed(card)) return;
+		if (card.status === "finished") throw new CliError(`${card.ref} is finished; \`vary ${card.ref}\` makes another take beside it.`, "INVALID_PARAM");
+		const sent = sentOf([card.id])[0];
+		const kind = requestOf(card)!.kind!;
+		if (sent?.answer !== "lost") throw new CliError(`${card.ref} is still generating: \`wait ${card.ref}\`.`, "BUSY");
+		if (canvas.team)
+			throw new CliError(`No answer came back for ${card.ref}, and on a team canvas the team's charges can't be read to tell whether it arrived, so it isn't sent again. \`wait ${card.ref}\`; if it never finishes, delete it and make it again.`, "BUSY");
+		if (chargedSince(sent, await usageOf(ctx.api, canvas.id), serverNow()))
+			throw new CliError(`${card.ref} did reach Flowith (a ${sent.model} charge began on this canvas after it was sent): \`wait ${card.ref}\` for the result.`, "BUSY");
+		const left = sent.to + SETTLE_MS[kind] - serverNow();
+		if (left > 0)
+			throw new CliError(`No charge for ${card.ref} so far, but it may still be on its way. \`wait ${card.ref}\`; if it is still generating in ${Math.ceil(left / 60_000)} min, retry then.`, "BUSY");
+	};
+	for (const card of chosen) await check(card);
+	if (dryRun) return out({ retry: chosen.map((c) => ({ ref: c.ref, kind: requestOf(c)!.kind, model: requestOf(c)!.body!.model })), ...(skipped.length ? { skipped } : {}) });
+	// Two retries of one card at once would both send it: the second finds it taken.
+	const claimed: string[] = [];
+	const busy = chosen.find((c) => (claimRetry(c.id) ? (claimed.push(c.id), false) : true));
+	if (busy) {
+		claimed.forEach(releaseRetry);
+		throw new CliError(`${busy.ref} is being retried by another command: \`wait ${busy.ref}\`.`, "BUSY");
+	}
+	const ids: string[] = [];
+	const lost: string[] = [];
 	try {
-		await client.connect();
-		const ch = `bot_ctrl:${userId}`;
-		await registerWithFrontend(client, session, userId, botClient);
-		if (!(await quickPing(client, ch, session))) return false;
-		const action: BotAction = {
-			actionId: crypto.randomUUID(),
-			sessionId: session.sessionId,
-			timestamp: new Date().toISOString(),
-			type: "switch_canvas",
-			convId,
-		};
-		await sendAndWait(client, ch, action, ACTION_TIMEOUT_MS);
-		return true;
-	} catch {
-		return false;
+		// The first read may have been delayed until another command finished and released its lock.
+		// Validate every card again under the lock before starting any of this batch.
+		const latest = cardsFrom(await fetchRowsById(ctx.api, chosen.map((c) => c.id)));
+		const refreshed = chosen.map((c) => {
+			const card = latest.find((now) => now.id === c.id && now.row.conv_id === canvas.id);
+			if (!card) throw new CliError(`${c.ref} is no longer on this canvas. Nothing was submitted.`, "NOT_FOUND");
+			if (!requestOf(card)?.kind || !requestOf(card)?.body)
+				throw new CliError(`${c.ref}'s request changed. Read it again before retrying.`, "BUSY");
+			return card;
+		});
+		for (const card of refreshed) await check(card);
+		for (const card of refreshed) {
+			const req = requestOf(card)!;
+			const {
+				error: _e, error_type: _t, error_code: _c, request_id: _r,
+				errorMessage: _m, creditFailureReason: _cr, creditFailureStage: _cs, creditFailureCode: _cc, httpCode: _h, attemptedModel: _a,
+				...data
+			} = card.data;
+			// A refusal may have turned it into the canvas's credits or upgrade card: back to the card it was.
+			const type = card.type === "22" || card.type === "25" ? (req.kind === "video" ? "13" : "2") : card.type;
+			// Persist before claiming: a killed process or lost PATCH response must not strand a running card with
+			// no recovery record. A failed claim never reaches sendFor; it is safe to inspect and retry later.
+			const now = serverNow();
+			noteSent({ card: card.id, conv: canvas.id, model: String(req.body!.model), kind: req.kind!, from: now, to: now, answer: "lost" });
+			const claimedCard = await claimCardForRetry(ctx.api, card, type, { ...data, value: "", status: "running", ...(req.kind === "video" ? { videoId: null } : {}) });
+			const body = {
+				...req.body,
+				nodeId: card.id,
+				convId: canvas.id,
+				...(req.kind === "video" ? { parentNodeId: claimedCard.row.p_id ?? canvas.id, position: claimedCard.row.position ?? { x: 0, y: 0 }, rerun: true } : {}),
+			};
+			if ((await sendFor(ctx, req.kind!, body, claimedCard)) === "lost") lost.push(card.id);
+			ids.push(card.id);
+			log(`Retrying ${card.ref} (${req.kind}, ${String(req.body!.model)})…`);
+		}
 	} finally {
-		client.close();
+		claimed.forEach(releaseRetry);
 	}
+	await waitAndReport(ctx, a, canvas.id, ids, chosen.some((c) => c.kind === "video") ? 900 : 300, {}, lost);
 }
 
-const GEN_VALUE_FLAGS = new Set([
-	"--model",
-	"--ratio",
-	"--size",
-	"--quality",
-	"--ref",
-	"--follow",
-	"--duration",
-	"--resolution",
-	"--start",
-	"--end",
-	"--wait",
-	"--timeout",
-	"--title",
-	"--system",
-	"--out",
-	"--jobs",
-]);
-const GEN_BOOL_FLAGS = new Set(["--no-wait", "--no-audio", "--draft"]);
-
-const GEN_USAGE = `gen text|image|video "prompt" ["prompt2" ...] [flags]
-
-  --model <id|best|fast>   default: best (text, image), fast (video). \`models <mode>\` lists ids
-  --follow <nodeId>        continue from a node (text: carries the thread as history)
-  --no-wait                return immediately; poll with: read-db <nodeId>
-  --out <file|dir/>        save the result (image/video download, text as a file)
-  --jobs <file.json>       batch: [{"prompt": "...", "model"?: "...", ...}]; or pass several prompts
-  --json  --verbose        compact one-line JSON (quiet) / keep full node data
-
-  text:   --system "..."
-  image:  --ratio 16:9 --size 2k|2K  --quality q  --ref <img>...
-  video:  --ratio 16:9 --duration 5 --resolution 480p|720p|1080p --no-audio --draft
-          --start <img> [--end <img>]   or   --ref <img|mp4|wav>... (Seedance 2.x: image1/audio1/video1 in the prompt)
-
-Lands on the active canvas (--canvas <id> or FLOWITH_CANVAS=<id>; creates "[Bot] <date>" when none).`;
-
-interface GenJob {
-	prompt: string;
-	model?: string;
-	ratio?: string;
-	size?: string;
-	quality?: string;
-	refs?: string[];
-	follow?: string;
-	duration?: string;
-	resolution?: string;
-	start?: string;
-	end?: string;
-	audio?: boolean;
-	draft?: boolean;
-	system?: string;
-}
-
-interface GenArgs {
-	mode: Mode;
-	jobs: GenJob[];
-	flags: Record<string, string[]>;
-	bools: Set<string>;
-}
-
-/** Normalise one entry of a --jobs file (flag names or camelCase keys both work). */
-function jobFromObject(o: Record<string, unknown>, shared: GenJob): GenJob {
-	const pick = (...keys: string[]): string | undefined => {
-		for (const k of keys) if (typeof o[k] === "string" && o[k]) return o[k] as string;
-		return undefined;
-	};
-	const refsRaw = o.refs ?? o.ref ?? o["--ref"];
-	const refs = Array.isArray(refsRaw)
-		? (refsRaw as unknown[]).map(String)
-		: typeof refsRaw === "string"
-			? [refsRaw]
-			: undefined;
-	const audio =
-		typeof o.audio === "boolean" ? o.audio : o.noAudio === true || o["--no-audio"] === true ? false : undefined;
-	const prompt = pick("prompt", "value", "text");
-	if (!prompt) throw new CliError('Each job needs a "prompt".', "INVALID_PARAM", o);
-	return {
-		...shared,
-		prompt,
-		model: pick("model", "--model") ?? shared.model,
-		ratio: pick("ratio", "aspect_ratio", "--ratio") ?? shared.ratio,
-		size: pick("size", "image_size", "--size") ?? shared.size,
-		quality: pick("quality", "--quality") ?? shared.quality,
-		refs: refs ?? shared.refs,
-		follow: pick("follow", "--follow") ?? shared.follow,
-		duration: pick("duration", "--duration") ?? (o.duration !== undefined ? String(o.duration) : shared.duration),
-		resolution: pick("resolution", "--resolution") ?? shared.resolution,
-		start: pick("start", "imageURL", "--start") ?? shared.start,
-		end: pick("end", "--end") ?? shared.end,
-		audio: audio ?? shared.audio,
-		draft: typeof o.draft === "boolean" ? o.draft : shared.draft,
-		system: pick("system", "--system") ?? shared.system,
-	};
-}
-
-function parseGenArgs(args: string[]): GenArgs {
-	const mode = args[0];
-	if (mode !== "text" && mode !== "image" && mode !== "video")
-		throw new CliError(GEN_USAGE, "INVALID_PARAM");
-	const flags: Record<string, string[]> = {};
-	const bools = new Set<string>();
-	const positional: string[] = [];
-	for (let i = 1; i < args.length; i++) {
-		const a = args[i];
-		const eq = a.startsWith("--") ? a.indexOf("=") : -1;
-		const name = eq === -1 ? a : a.slice(0, eq);
-		if (GEN_BOOL_FLAGS.has(name)) {
-			bools.add(name);
-		} else if (GEN_VALUE_FLAGS.has(name)) {
-			const value = eq === -1 ? args[++i] : a.slice(eq + 1);
-			if (value === undefined || (eq === -1 && value.startsWith("--")))
-				throw new CliError(`${name} needs a value.`, "INVALID_PARAM");
-			(flags[name] ??= []).push(value);
-		} else if (a.startsWith("--")) {
-			throw new CliError(`Unknown flag ${name}.\n\n${GEN_USAGE}`, "INVALID_PARAM");
-		} else {
-			positional.push(a);
-		}
-	}
-	const shared: GenJob = {
-		prompt: "",
-		model: flags["--model"]?.[0],
-		ratio: flags["--ratio"]?.[0],
-		size: flags["--size"]?.[0],
-		quality: flags["--quality"]?.[0],
-		refs: flags["--ref"],
-		follow: flags["--follow"]?.[0],
-		duration: flags["--duration"]?.[0],
-		resolution: flags["--resolution"]?.[0],
-		start: flags["--start"]?.[0],
-		end: flags["--end"]?.[0],
-		audio: bools.has("--no-audio") ? false : undefined,
-		draft: bools.has("--draft") || undefined,
-		system: flags["--system"]?.[0],
-	};
-	let jobs: GenJob[];
-	if (flags["--jobs"]?.[0]) {
-		let parsed: unknown;
-		try {
-			parsed = JSON.parse(readFileSync(flags["--jobs"][0], "utf-8"));
-		} catch (e: any) {
-			throw new CliError(`Could not read --jobs file: ${e?.message ?? e}`, "INVALID_PARAM");
-		}
-		const list = Array.isArray(parsed) ? parsed : Array.isArray((parsed as any)?.jobs) ? (parsed as any).jobs : null;
-		if (!list) throw new CliError("--jobs file must be a JSON array of {prompt, ...}.", "INVALID_PARAM");
-		jobs = list.map((o: unknown) =>
-			typeof o === "string" ? { ...shared, prompt: o } : jobFromObject(o as Record<string, unknown>, shared),
-		);
-		if (positional.length)
-			throw new CliError("Use either --jobs or prompts on the command line, not both.", "INVALID_PARAM");
-	} else {
-		if (positional.length === 0) throw new CliError(`gen needs a quoted prompt.\n\n${GEN_USAGE}`, "INVALID_PARAM");
-		jobs = positional.map((p) => ({ ...shared, prompt: p }));
-	}
-	if (!jobs.length) throw new CliError("No jobs to run.", "INVALID_PARAM");
-	return { mode, jobs, flags, bools };
-}
-
-function requireActiveCanvas(session: CanvasBotSession, what: string): string {
-	if (!session.activeConvId)
-		throw new CliError(
-			`${what}: no active canvas. Run create-canvas, or list → switch <id>, or pass --canvas <id> / FLOWITH_CANVAS.`,
-			"NO_CANVAS",
-		);
-	assertUUID(session.activeConvId, "activeConvId");
-	return session.activeConvId;
-}
-
-/** Run `fn` over `items` with at most `limit` in flight; results keep input order. */
-async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T, i: number) => Promise<R>): Promise<R[]> {
-	const results: R[] = new Array(items.length);
-	let next = 0;
-	const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-		while (next < items.length) {
-			const i = next++;
-			results[i] = await fn(items[i], i);
-		}
-	});
-	await Promise.all(workers);
-	return results;
-}
-
-async function runGen(
-	api: ApiSession,
-	session: CanvasBotSession,
-	g: GenArgs,
-): Promise<void> {
-	const models = await fetchModels(workerUrl(api));
-	const aliases = loadAliasTable();
-
-	let convId = session.activeConvId;
-	if (!convId) {
-		const t = g.flags["--title"]?.[0] ?? new Date().toISOString().slice(0, 10);
-		const title = t.startsWith("[") ? t : `[Bot] ${t}`;
-		const created = await createCanvas(api, title);
-		convId = created.convId;
-		session.activeConvId = convId;
-		saveSession(session);
-		progress(`No active canvas — created "${title}" (${convId}).`);
-	}
-	assertUUID(convId, "convId");
-
-	const wait = !g.bools.has("--no-wait");
-	const waitSec = Number(
-		g.flags["--wait"]?.[0] ?? g.flags["--timeout"]?.[0] ?? (g.mode === "video" ? 600 : 300),
+async function cmdSpent(a: Args) {
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a);
+	const res = await worker<{ data?: Array<{ model: string; tokens_used: number; billing_unit_price: number | null; created_at: string }> }>(
+		ctx.api,
+		`/user/model-usage/group-records?groupIds=${canvas.id}`,
 	);
-	if (!Number.isFinite(waitSec) || waitSec <= 0)
-		throw new CliError("--wait/--timeout must be a positive number of seconds.", "INVALID_PARAM");
-	const outPath = g.flags["--out"]?.[0];
-	if (outPath && !wait) progress("--out is ignored with --no-wait (nothing to save yet).");
-
-	const batch = g.jobs.length > 1;
-	// Plan positions up front so concurrent jobs don't stack on the same spot.
-	const sharedFollow = g.jobs.every((j) => j.follow === g.jobs[0].follow) ? g.jobs[0].follow : undefined;
-	if (sharedFollow) assertUUID(sharedFollow, "follow nodeId");
-	const basePos = batch ? await questionPositionFor(api, convId, sharedFollow) : undefined;
-
-	const runOne = async (job: GenJob, i: number): Promise<GenResult> => {
-		const resolved = resolveModel(models, g.mode, job.model, aliases);
-		if (resolved.note) progress(resolved.note);
-		if (job.follow) assertUUID(job.follow, "follow nodeId");
-		const tag = batch ? `[${i + 1}/${g.jobs.length}] ` : "";
-		const runOpts = {
-			wait,
-			timeoutMs: waitSec * 1000,
-			onProgress: (m: string) => progress(tag + m),
-			...(basePos
-				? { questionPos: sharedFollow ? { x: basePos.x + i * 450, y: basePos.y } : { x: basePos.x, y: basePos.y + i * BATCH_ROW_HEIGHT } }
-				: {}),
-		};
-		const refs = await resolveMedia(api, job.refs ?? [], { convId, quiet: QUIET });
-		let result: GenResult;
-		if (g.mode === "text") {
-			result = await genText(
-				api,
-				models,
-				{ prompt: job.prompt, model: resolved.id, system: job.system, convId, follow: job.follow },
-				runOpts,
-			);
-		} else if (g.mode === "image") {
-			result = await genImage(
-				api,
-				models,
-				{
-					prompt: job.prompt,
-					model: resolved.id,
-					ratio: job.ratio,
-					size: job.size,
-					quality: job.quality,
-					refs,
-					convId,
-					follow: job.follow,
-				},
-				runOpts,
-			);
-		} else {
-			const [start] = job.start ? await resolveMedia(api, [job.start], { convId, quiet: QUIET }) : [];
-			const [end] = job.end ? await resolveMedia(api, [job.end], { convId, quiet: QUIET }) : [];
-			result = await genVideo(
-				api,
-				models,
-				{
-					prompt: job.prompt,
-					model: resolved.id,
-					ratio: job.ratio,
-					duration: job.duration,
-					resolution: job.resolution,
-					audio: job.audio,
-					start,
-					end,
-					refs,
-					draft: job.draft,
-					convId,
-					follow: job.follow,
-				},
-				runOpts,
-			);
-		}
-		if (result.references)
-			progress(
-				`${tag}References: ${Object.entries(result.references)
-					.map(([t, u]) => `${t} → ${u}`)
-					.join(", ")}`,
-			);
-		if (outPath && result.status === "finished" && (result.url || result.text !== undefined)) {
-			const file = outputPathFor(outPath, { nodeId: result.nodeId, index: batch ? i : undefined, url: result.url, kind: g.mode, batch });
-			const saved = await saveResult(file, { url: result.url, text: result.text });
-			(result as GenResult & { file?: string }).file = saved.file;
-			progress(`${tag}Saved → ${saved.file} (${(saved.bytes / 1024).toFixed(0)}KB)`);
-		}
-		return VERBOSE ? result : compactResult(result);
-	};
-
-	const concurrency = g.mode === "video" ? 2 : 4;
-	const results = await mapLimit(g.jobs, concurrency, (job, i) =>
-		runOne(job, i).catch((e) => {
-			// In a batch one bad job must not sink the others; surface it in its slot.
-			if (!batch || !(e instanceof CliError)) throw e;
-			return {
-				status: "failed",
-				kind: g.mode,
-				model: job.model ?? "",
-				convId: convId!,
-				questionNodeId: "",
-				nodeId: "",
-				error: e.message,
-				errorCode: e.code,
-			} as GenResult;
-		}),
-	);
-
-	if (batch) {
-		resultOut(results);
-		if (results.every((r) => r.status === "failed" || r.status === "timeout")) process.exit(1);
-		return;
-	}
-	const r = results[0];
-	if (r.status === "finished" || r.status === "submitted") {
-		resultOut(r);
-		return;
-	}
+	const sinceArg = flag(a, "since");
+	const since = sinceArg ? Date.now() - (Number(sinceArg.replace(/[^0-9.]/g, "")) || 0) * (/h$/.test(sinceArg) ? 3_600_000 : /s$/.test(sinceArg) ? 1000 : 60_000) : 0;
+	const rows = (res?.data ?? []).filter((r) => Date.parse(r.created_at) >= since);
+	const byModel: Record<string, number> = {};
+	for (const r of rows) byModel[r.model] = (byModel[r.model] ?? 0) + creditsOf(r);
+	const total = Object.values(byModel).reduce((x, y) => x + y, 0);
 	out({
-		type: "error",
-		actionId: null,
-		code: r.errorCode ?? (r.status === "timeout" ? "TIMEOUT" : "GENERATION_FAILED"),
-		message: r.error ?? "Generation failed",
-		data: r,
+		canvas: canvas.id,
+		...(sinceArg ? { since: new Date(since).toISOString() } : {}),
+		chargedCredits: Math.round(total * 100) / 100,
+		byModel: Object.fromEntries(Object.entries(byModel).sort((p, q) => q[1] - p[1]).map(([k, v]) => [k, Math.round(v * 100) / 100])),
+		note: "Everything charged on this canvas (by you, Flo, other tabs and agents), refunds included; 1 credit = $0.001.",
 	});
-	process.exit(1);
 }
 
-/** Returns true when `cmd` was handled here. */
-async function runDirectCommand(
-	cmd: string,
-	args: string[],
-	session: CanvasBotSession,
-	userId: string,
-	botClient: string,
-	parallelMode: boolean,
-): Promise<boolean> {
-	const api: ApiSession = session;
+// ---------- commands: placing & organising ----------
 
-	switch (cmd) {
-		// ---- models: public catalogue ----
-		case "models":
-		case "list-models": {
-			const positional = args.slice(1).filter((a) => !a.startsWith("--"));
-			const modeArg = positional.find((a) => ["text", "image", "video", "agent"].includes(a));
-			const modelArg = positional.find((a) => !["text", "image", "video", "agent"].includes(a));
-			const models = await fetchModels(workerUrl(api), { noCache: args.includes("--refresh") });
-			if (args.includes("--aliases")) {
-				const table = loadAliasTable();
-				if (JSON_COMPACT) {
-					resultOut({ aliases: table, defaults: DEFAULT_ALIAS });
-				} else {
-					for (const m of ["text", "image", "video"] as Mode[])
-						console.log(`${m.padEnd(6)} best=${table[m].best}  fast=${table[m].fast}  (default: ${DEFAULT_ALIAS[m]})`);
-					console.log("Override in ~/.flowith/defaults.json, e.g. {\"video\":{\"best\":\"seedance-2.5\"}}");
-				}
-				return true;
-			}
-			if (modelArg) {
-				const m = models[modelArg];
-				if (!m) throw new CliError(`Unknown model "${modelArg}". Run: models <text|image|video>`, "INVALID_MODEL");
-				resultOut(summarizeModel(modelArg, m));
-				return true;
-			}
-			const modes: Mode[] = modeArg && modeArg !== "agent" ? [modeArg as Mode] : ["text", "image", "video"];
-			if (JSON_COMPACT) {
-				const data: Record<string, unknown> = {};
-				if (modeArg !== "agent")
-					for (const m of modes) data[m] = modelsForMode(models, m).map(([id, rm]) => summarizeModel(id, rm));
-				if (!modeArg || modeArg === "agent")
-					data.agent = { outputTypes: ["auto", "text", "slides", "webpage", "game", "video", "images"] };
-				resultOut(data);
-				return true;
-			}
-			const table = loadAliasTable();
-			for (const m of modes) {
-				console.log(`# ${m}  (best=${table[m].best}, fast=${table[m].fast})`);
-				for (const [id, rm] of modelsForMode(models, m)) console.log(compactModelLine(id, rm));
-				console.log("");
-			}
-			console.log("Details: models <id>   ·   full JSON: --json   ·   aliases: models --aliases");
-			return true;
-		}
+/** A finished text card holding given words, as the canvas marks text a person wrote (frontend user-text-node.ts): its footer names the author, not a model. */
+const noteData = (text: string, title?: string) => ({
+	value: text,
+	isImage: false,
+	mode: "text",
+	tag: { text: "User Upload" },
+	status: "finished",
+	title: title ?? titleFrom(text),
+	...(title ? { customTitle: title } : {}),
+});
 
-		case "credits": {
-			resultOut(await workerJson(api, "/user/credits"));
-			return true;
-		}
-
-		case "upload": {
-			const file = args[1];
-			if (!file || file.startsWith("--"))
-				throw new CliError("Usage: upload <file> [--conv <convId>]", "INVALID_PARAM");
-			const { values: conv } = extractFlag(args.slice(2), "--conv");
-			if (conv[0]) assertUUID(conv[0], "convId");
-			resultOut(await uploadFile(api, file, { convId: conv[0] ?? session.activeConvId, quiet: QUIET }));
-			return true;
-		}
-
-		// ---- canvases ----
-		case "list":
-		case "canvases": {
-			resultOut(await listCanvases(api));
-			return true;
-		}
-		case "search": {
-			if (!args[1]) throw new CliError("search requires a query string.", "INVALID_PARAM");
-			resultOut(await listCanvases(api, args[1]));
-			return true;
-		}
-		case "create-canvas": {
-			const rawTitle = args[1] || "Untitled";
-			const title = rawTitle.startsWith("[") ? rawTitle : `[Bot] ${rawTitle}`;
-			const created = await createCanvas(api, title);
-			session.activeConvId = created.convId;
-			saveSession(session);
-			const navigated = parallelMode
-				? false
-				: await tryBrowserNavigate(session, userId, botClient, created.convId);
-			resultOut({ convId: created.convId, title, reused: created.reused, browser: navigated ? "navigated" : "not_connected" });
-			return true;
-		}
-		case "switch": {
-			if (!args[1]) throw new CliError("switch requires convId.", "INVALID_PARAM");
-			assertUUID(args[1], "convId");
-			const canvas = await getCanvas(api, args[1]);
-			session.activeConvId = canvas.id;
-			saveSession(session);
-			const navigated = parallelMode
-				? false
-				: await tryBrowserNavigate(session, userId, botClient, canvas.id);
-			resultOut({ convId: canvas.id, title: canvas.title, browser: navigated ? "navigated" : "not_connected" });
-			return true;
-		}
-
-		// ---- nodes ----
-		case "read-db": {
-			const { values: convValues, rest } = extractFlag(args.slice(1), "--conv");
-			if (convValues[0]) assertUUID(convValues[0], "convId");
-			const convId = convValues[0] || requireActiveCanvas(session, "read-db");
-			const flags = new Set(rest.filter((a) => a.startsWith("--")));
-			const nodeId = rest.find((a) => !a.startsWith("--"));
-			if (nodeId) assertUUID(nodeId, "nodeId");
-			resultOut(
-				await readNodes(api, convId, {
-					nodeId,
-					full: flags.has("--full"),
-					failed: flags.has("--failed"),
-				}),
-			);
-			return true;
-		}
-		case "clean-failed": {
-			resultOut(await cleanFailed(api, requireActiveCanvas(session, "clean-failed")));
-			return true;
-		}
-		case "delete":
-		case "delete-many": {
-			const ids = args.slice(1).filter((a) => !a.startsWith("--"));
-			if (!ids.length) throw new CliError(`${cmd} requires nodeId(s).`, "INVALID_PARAM");
-			for (const id of ids) assertUUID(id, "nodeId");
-			const convId = requireActiveCanvas(session, cmd);
-			await deleteNodes(api, convId, ids);
-			resultOut({ deleted: ids });
-			return true;
-		}
-
-		// ---- memory ----
-		case "recall": {
-			const hasQuery = args[1] !== undefined && !args[1].startsWith("--");
-			const query = hasQuery ? args[1] : "";
-			const flags = args.slice(hasQuery ? 2 : 1);
-			let limit = 10;
-			const filters: Record<string, unknown> = {};
-			for (let i = 0; i < flags.length; i++) {
-				if (flags[i] === "--limit" && flags[i + 1]) limit = parseInt(flags[++i], 10);
-				else if (flags[i] === "--type" && flags[i + 1]) filters.types = [flags[++i]];
-				else if (flags[i] === "--conv" && flags[i + 1]) {
-					assertUUID(flags[i + 1], "convId");
-					filters.convId = flags[++i];
-				}
-			}
-			resultOut(
-				await workerJson(api, "/bookshelf/search", {
-					json: { query, limit, ...(Object.keys(filters).length ? { filters } : {}) },
-				}),
-			);
-			return true;
-		}
-		case "recall-node": {
-			const [convId, nodeId] = [args[1], args[2]];
-			if (!convId || !nodeId)
-				throw new CliError("recall-node requires <convId> <nodeId>.", "INVALID_PARAM");
-			assertUUID(convId, "convId");
-			assertUUID(nodeId, "nodeId");
-			try {
-				resultOut(
-					await workerJson(api, "/bookshelf/get", {
-						json: { pattern: "conv/node", convId, nodeId },
-					}),
-				);
-			} catch (e) {
-				if (e instanceof CliError && e.status === 404) resultOut({ success: true, book: null });
-				else throw e;
-			}
-			return true;
-		}
-
-		// ---- generation ----
-		case "gen": {
-			if (!args[1] || args[1] === "--help" || args[1] === "-h") {
-				console.log(GEN_USAGE);
-				return true;
-			}
-			await runGen(api, session, parseGenArgs(args.slice(1)));
-			return true;
-		}
-
-		default:
-			return false;
+async function cmdAdd(a: Args) {
+	if (!a.pos.length) throw new CliError("add <file|url> […]", "INVALID_PARAM");
+	if (dryRun) return out({ add: a.pos, note: "Nothing uploaded or placed." });
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a, { create: "Imports" });
+	const cards = await readCanvas(ctx.api, canvas.id);
+	const items: NewCard[] = [];
+	for (const input of a.pos) {
+		const up = await toUrl(ctx.api, input, canvas.id);
+		// Named like a file the user uploads in the canvas: the file name as it is.
+		const title = flag(a, "title") ?? up.name;
+		const common = { title, name: up.name, value: up.url, insert: true, mediaSource: "upload", uploadState: "ready", status: "finished" };
+		if (up.media === "image") {
+			const { remoteImageSize } = await import("./lib/media");
+			const size = await remoteImageSize(up.url);
+			const ratio = size ? `${size.width}:${size.height}` : "1:1";
+			items.push({ kind: "image", size: cardSize("image", ratio), data: { ...common, isImage: true, mode: "image", aspect_ratio: ratio } });
+		} else if (up.media === "video") items.push({ kind: "video", size: cardSize("video", flag(a, "ratio") ?? "16:9"), data: { ...common, videoId: up.url, aspect_ratio: flag(a, "ratio") ?? "16:9" } });
+		else if (up.media === "audio") items.push({ kind: "audio", size: cardSize("audio"), data: { ...common, audioUrl: up.url } });
+		else throw new CliError(`${up.name}: add takes pictures, clips and sounds.`, "INVALID_PARAM");
+		log(`Uploaded ${up.name}`);
 	}
+	const placed = await placeCards(ctx.api, canvas.id, cards, items, { anchor: anchorOf(a, cards, []), group: flag(a, "group"), into: intoOf(a, cards) });
+	await finish(ctx, canvas.id, cardsFrom(placed.rows).filter((c) => c.kind !== "group").map(resultOf), placed.groupId ? { group: placed.groupId.slice(0, 8) } : {});
 }
 
-// ============ Main ============
+async function cmdNote(a: Args) {
+	const text = a.pos.join(" ").trim() || (flag(a, "file") ? readFileSync(flag(a, "file")!, "utf8") : "");
+	if (!text) throw new CliError('note "text" (or --file notes.md)', "INVALID_PARAM");
+	if (dryRun) return out({ note: text.slice(0, 200), chars: text.length });
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a, { create: titleFrom(text, 24) });
+	const cards = await readCanvas(ctx.api, canvas.id);
+	const placed = await placeCards(
+		ctx.api,
+		canvas.id,
+		cards,
+		[{ kind: "note", size: cardSize("note"), data: noteData(text, flag(a, "title")) }],
+		{ anchor: anchorOf(a, cards, []), into: intoOf(a, cards) },
+	);
+	await finish(ctx, canvas.id, cardsFrom(placed.rows).map(resultOf));
+}
+
+async function cmdWrite(a: Args) {
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a);
+	const cards = await readCanvas(ctx.api, canvas.id);
+	const card = findCard(cards, a.pos[0] ?? "");
+	const text = a.pos.slice(1).join(" ").trim() || (flag(a, "file") ? readFileSync(flag(a, "file")!, "utf8") : "");
+	if (!text) throw new CliError('write <text card> "new text" (or --file)', "INVALID_PARAM");
+	if (card.kind !== "text" || card.status === "running") throw new CliError(`${card.ref} is not a finished text card.`, "INVALID_PARAM");
+	await patch(ctx.api, card, { data: { ...card.data, value: text } });
+	out({ written: card.ref, chars: text.length });
+}
+
+async function cmdMove(a: Args) {
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a);
+	const cards = await readCanvas(ctx.api, canvas.id);
+	const card = findCard(cards, a.pos[0] ?? "");
+	const to = flag(a, "to");
+	const gap = num(a, "gap") ?? CANVAS_NODE_GAP;
+	let x: number;
+	let y: number;
+	if (to) {
+		const m = /^(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)$/.exec(to);
+		if (!m) throw new CliError("--to x,y (top-left, canvas units)", "INVALID_PARAM");
+		x = Number(m[1]);
+		y = Number(m[2]);
+	} else {
+		const rel = (["right-of", "left-of", "below", "above"] as const).find((k) => flag(a, k));
+		if (!rel) throw new CliError("move <card> --to x,y | --right-of c | --left-of c | --below c | --above c", "INVALID_PARAM");
+		const t = findCard(cards, flag(a, rel)!).rect;
+		x = rel === "right-of" ? t.x + t.width + gap : rel === "left-of" ? t.x - card.rect.width - gap : t.x;
+		y = rel === "below" ? t.y + t.height + gap : rel === "above" ? t.y - card.rect.height - gap : t.y;
+	}
+	await moveTo(ctx.api, [{ card, x: Math.round(x), y: Math.round(y) }]);
+	out({ moved: card.ref, to: { x: Math.round(x), y: Math.round(y) } });
+}
+
+async function cmdArrange(a: Args) {
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a);
+	const cards = await readCanvas(ctx.api, canvas.id);
+	const chosen = a.pos.map((r) => findCard(cards, r));
+	if (chosen.length === 1 && chosen[0]!.kind === "group") {
+		// Lay a group's cards out again on its grid (as Flo's groups are), in reading order.
+		const group = chosen[0]!;
+		const members = cards.filter((c) => c.groupId === group.id).sort((p, q) => p.rect.y - q.rect.y || p.rect.x - q.rect.x);
+		const layout = groupLayout(members.map((m) => ({ width: m.rect.width, height: m.rect.height })));
+		// The frame keeps its corner unless its new size would cover a card; then it moves to the nearest free place.
+		const others = obstaclesOf(cards, [group.id, ...members.map((m) => m.id)]);
+		let corner = { x: group.rect.x, y: group.rect.y };
+		if (!isClear({ ...corner, width: layout.width, height: layout.height }, others)) corner = nearestFree({ width: layout.width, height: layout.height }, corner, others);
+		await Promise.all(members.map((m, i) => patch(ctx.api, m, { position: { x: Math.round(layout.members[i]!.x + m.rect.width / 2), y: Math.round(layout.members[i]!.y) } })));
+		await patch(ctx.api, group, {
+			position: { x: Math.round(corner.x + layout.width / 2), y: corner.y },
+			width: layout.width,
+			height: layout.height,
+			data: { ...group.data, width: layout.width, height: layout.height },
+		});
+		return out({ arranged: group.ref, cards: members.map((m) => m.ref), size: `${layout.width}×${layout.height}` });
+	}
+	if (chosen.length < 2) throw new CliError("arrange <card> <card> … --as row|column|grid  (or arrange <group>)", "INVALID_PARAM");
+	const layout = (flag(a, "as") ?? "row") as Layout;
+	if (!["row", "column", "grid"].includes(layout)) throw new CliError("--as row | column | grid", "INVALID_PARAM");
+	let points = arrangePoints(chosen, layout, num(a, "gap") ?? CANVAS_NODE_GAP, num(a, "cols"));
+	// The lined-up block keeps clear of everything else: if it would cover a card, it moves as a whole to the nearest free place.
+	const box = {
+		x: Math.min(...points.map((p) => p.x)),
+		y: Math.min(...points.map((p) => p.y)),
+		width: Math.max(...points.map((p, i) => p.x + chosen[i]!.rect.width)) - Math.min(...points.map((p) => p.x)),
+		height: Math.max(...points.map((p, i) => p.y + chosen[i]!.rect.height)) - Math.min(...points.map((p) => p.y)),
+	};
+	const others = obstaclesOf(cards, chosen.map((c) => c.id));
+	if (!isClear(box, others)) {
+		const free = nearestFree({ width: box.width, height: box.height }, box, others);
+		points = points.map((p) => ({ x: p.x + free.x - box.x, y: p.y + free.y - box.y }));
+	}
+	await moveTo(ctx.api, chosen.map((card, i) => ({ card, ...points[i]! })));
+	out({ arranged: chosen.map((c) => c.ref), as: layout, at: { x: points[0]!.x, y: points[0]!.y } });
+}
+
+async function cmdGroup(a: Args) {
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a);
+	const cards = await readCanvas(ctx.api, canvas.id);
+	const members = a.pos.map((r) => findCard(cards, r));
+	if (members.length < 1) throw new CliError('group <card> <card> … --name "name"', "INVALID_PARAM");
+	const id = await groupCards(ctx.api, canvas.id, cards, members, flag(a, "name") ?? "Group");
+	out({ group: id.slice(0, 8), cards: members.map((m) => m.ref) });
+}
+
+async function cmdUngroup(a: Args) {
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a);
+	const cards = await readCanvas(ctx.api, canvas.id);
+	const freed = await ungroup(ctx.api, canvas.id, cards, findCard(cards, a.pos[0] ?? ""));
+	out({ ungrouped: freed.map((id) => id.slice(0, 8)) });
+}
+
+async function cmdRename(a: Args) {
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a);
+	const title = a.pos.slice(1).join(" ").trim();
+	if (!a.pos[0] || !title) throw new CliError('rename <card|canvas> "new title"', "INVALID_PARAM");
+	if (a.pos[0] === "canvas") {
+		const { rest } = await import("./lib/http");
+		await rest(ctx.api, `conversation?id=eq.${canvas.id}`, { method: "PATCH", json: { title }, prefer: "return=minimal" });
+		return out({ canvas: canvas.id, title });
+	}
+	const cards = await readCanvas(ctx.api, canvas.id);
+	const card = findCard(cards, a.pos[0]);
+	await rename(ctx.api, card, title);
+	out({ renamed: card.ref, title });
+}
+
+async function cmdLink(a: Args, remove: boolean) {
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a);
+	const cards = await readCanvas(ctx.api, canvas.id);
+	const [from, to] = [findCard(cards, a.pos[0] ?? ""), findCard(cards, a.pos[1] ?? "")];
+	await link(ctx.api, to, from, remove);
+	out({ [remove ? "unlinked" : "linked"]: `${from.ref} → ${to.ref}` });
+}
+
+async function cmdCopy(a: Args) {
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a);
+	const cards = await readCanvas(ctx.api, canvas.id);
+	const src = findCard(cards, a.pos[0] ?? "");
+	if (src.kind === "group") throw new CliError("copy takes a card, not a group.", "INVALID_PARAM");
+	const { group_id: _g, creatorMedia: _c, ...data } = src.data;
+	const rect = placeSingle({ width: src.rect.width, height: src.rect.height }, { obstacles: obstaclesOf(cards), anchor: src.groupId ? cards.find((c) => c.id === src.groupId)?.rect : src.rect });
+	const { rest } = await import("./lib/http");
+	const id = crypto.randomUUID();
+	await rest(ctx.api, "flow_node", {
+		json: [{ id, conv_id: canvas.id, type: src.type, p_id: canvas.id, c_ids: [], position: { x: Math.round(rect.x + rect.width / 2), y: rect.y }, width: src.rect.width, height: src.rect.height, data: { ...data, timestamp: Math.floor(Date.now() / 1000).toString() } }],
+		prefer: "return=minimal",
+	});
+	out({ copied: src.ref, card: id.slice(0, 8), id });
+}
+
+async function cmdDelete(a: Args) {
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a);
+	const cards = await readCanvas(ctx.api, canvas.id);
+	const chosen = a.pos.map((r) => findCard(cards, r, { strict: true }));
+	if (!chosen.length) throw new CliError("delete <card> […]", "INVALID_PARAM");
+	if (dryRun) return out({ wouldDelete: chosen.map((c) => ({ ref: c.ref, kind: c.kind, title: c.title, ...(c.kind === "group" ? { withCards: cards.filter((m) => m.groupId === c.id).length } : {}) })) });
+	// A group goes with its cards, as on the canvas.
+	const ids = [...new Set(chosen.flatMap((c) => (c.kind === "group" ? [c.id, ...cards.filter((m) => m.groupId === c.id).map((m) => m.id)] : [c.id])))];
+	// A group whose every card goes would stay as an empty frame: it goes too.
+	const gone = new Set(ids);
+	for (const g of cards) {
+		const members = cards.filter((m) => m.groupId === g.id);
+		if (g.kind === "group" && !gone.has(g.id) && members.length && members.every((m) => gone.has(m.id))) ids.push(g.id);
+	}
+	await deleteCards(ctx.api, canvas.id, ids);
+	out({ deleted: ids.map((id) => id.slice(0, 8)) });
+}
+
+async function cmdWait(a: Args) {
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a);
+	const cards = await readCanvas(ctx.api, canvas.id);
+	const chosen = a.pos.length ? a.pos.map((r) => findCard(cards, r)) : cards.filter((c) => c.status === "running");
+	if (!chosen.length) return out({ canvas: canvas.id, cards: [], note: "Nothing is generating." });
+	await waitAndReport(ctx, a, canvas.id, chosen.map((c) => c.id), 900);
+}
+
+// ---------- commands: run by the open canvas ----------
+
+/**
+ * Hands an operation to the browser window that has this canvas open (see lib/live.ts): the canvas's own layout,
+ * toolbar, storyboard, character and director tools, exactly as Flo runs them.
+ */
+async function onCanvas(a: Args, operation: string, build: (cards: Card[]) => Record<string, unknown>, waitSec = 0) {
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a);
+	const cards = await readCanvas(ctx.api, canvas.id);
+	const input = build(cards);
+	if (has(a, "dry-run")) return out({ operation, input });
+	const url = canvasUrl(ctx.site, canvas.id);
+	log(`Asking the open canvas to run ${operation}…`);
+	const res = await runOnCanvas(ctx.api, { sessionId: ctx.session.botSessionId, key: ctx.session.agentKey }, ctx.userId, canvas.id, operation, input, {
+		timeoutMs: timeoutOf(a, 600),
+		canvasUrl: url,
+		onAccepted: () => log("The canvas took it on."),
+	});
+	if (!res.ok) throw new CliError(res.error || `${operation} failed on the canvas.`, "CANVAS_ERROR");
+	const ids = (res.nodeIds ?? []).filter((id) => isUuid(id));
+	const { kind: _k, operationId: _o, ok: _ok, nodeIds: _n, ...extra } = res;
+	if (waitSec && ids.length && !has(a, "no-wait")) {
+		const rows = cardsFrom(await fetchRowsById(ctx.api, ids));
+		const generating = rows.filter((c) => c.status === "running" || c.status === "init").map((c) => c.id);
+		if (generating.length) return waitAndReport(ctx, a, canvas.id, ids, waitSec, { operation, ...extra }, [], false);
+	}
+	const rows = ids.length ? cardsFrom(await fetchRowsById(ctx.api, ids)) : [];
+	out({ canvas: canvas.id, url, operation, ...extra, cards: rows.length ? rows.map(resultOf) : ids.map((id) => id.slice(0, 8)) });
+}
+
+const idOf = (cards: Card[], ref: string | undefined, what = "card") => {
+	if (!ref) throw new CliError(`Name the ${what}.`, "INVALID_PARAM");
+	return findCard(cards, ref).id;
+};
+
+const ON_CANVAS: Record<string, (a: Args) => Promise<unknown>> = {
+	focus: (a) => onCanvas(a, "focusCanvasNodes", (cards) => ({ nodeIds: a.pos.map((r) => idOf(cards, r)) })),
+	tidy: (a) =>
+		onCanvas(a, "arrangeCanvasNodes", (cards) => ({
+			...(a.pos.length ? { nodeIds: a.pos.map((r) => idOf(cards, r)) } : {}),
+			...(flag(a, "as") ? { layout: flag(a, "as") } : {}),
+		})),
+	split: (a) =>
+		onCanvas(a, "cardTool", (cards) => ({ nodeId: idOf(cards, a.pos[0]), tool: "split", rows: num(a, "rows") ?? 2, cols: num(a, "cols") ?? 2 }), 300),
+	angles: (a) =>
+		onCanvas(a, "cardTool", (cards) => ({ nodeId: idOf(cards, a.pos[0]), tool: "angles", ...(flags(a, "angles").length ? { angles: flags(a, "angles") } : {}) }), 600),
+	relight: (a) => onCanvas(a, "cardTool", (cards) => ({ nodeId: idOf(cards, a.pos[0]), tool: "relight", relightPreset: flag(a, "preset") ?? "golden" }), 600),
+	lipsync: (a) => onCanvas(a, "cardTool", (cards) => ({ nodeId: idOf(cards, a.pos[0], "clip"), tool: "lipsync", withNodeId: idOf(cards, flag(a, "with"), "sound card (--with)") }), 1200),
+	motion: (a) =>
+		onCanvas(a, "cardTool", (cards) => ({ nodeId: idOf(cards, a.pos[0], "clip"), tool: "motion-transfer", withNodeId: idOf(cards, flag(a, "with"), "character picture (--with)") }), 1200),
+	soundtrack: (a) =>
+		onCanvas(
+			a,
+			"cardTool",
+			(cards) => ({
+				nodeId: idOf(cards, a.pos[0], "clip"),
+				tool: "soundtrack",
+				soundtrack: flag(a, "voice") ? "voice" : "music",
+				...(flag(a, "voice") && flag(a, "voice") !== "true" ? { text: flag(a, "voice") } : {}),
+			}),
+			1200,
+		),
+	breakdown: (a) => onCanvas(a, "breakdownVideo", (cards) => ({ nodeId: idOf(cards, a.pos[0], "clip"), layoutReference: has(a, "layout") }), 900),
+	character: (a) =>
+		onCanvas(a, "makeCharacter", (cards) => {
+			const name = flag(a, "name");
+			if (!name) throw new CliError('character <picture> --name "Mia" [--subject human|animal|anthro|creature] [--style auto|realistic|anime|cartoon3d|picturebook|mascot|pixel]', "INVALID_PARAM");
+			return {
+				nodeId: idOf(cards, a.pos[0], "picture"),
+				name,
+				description: flag(a, "description") ?? "",
+				subject: flag(a, "subject") ?? "human",
+				style: flag(a, "style") ?? "auto",
+			};
+		}, 900),
+	cut: (a) =>
+		onCanvas(a, "addToCut", (cards) => ({
+			nodeIds: a.pos.map((r) => idOf(cards, r)),
+			...(flag(a, "into") ? { cutNodeId: idOf(cards, flag(a, "into"), "cut") } : {}),
+			start: num(a, "start") ?? 0,
+		})),
+	stage: (a) =>
+		onCanvas(a, "buildDirectorStage", (cards) => {
+			const idea = a.pos.join(" ").trim();
+			if (!idea) throw new CliError('stage "who is where, what they do, how each shot frames and moves" [--cast <character cards>] [--into <stage>] [--add]', "INVALID_PARAM");
+			return {
+				idea,
+				mode: has(a, "add") ? "add" : "replace",
+				...(flag(a, "into") ? { nodeId: idOf(cards, flag(a, "into"), "stage") } : {}),
+				...(flag(a, "title") ? { title: flag(a, "title") } : {}),
+				characterNodeIds: flags(a, "cast").map((r) => idOf(cards, r)),
+			};
+		}, 300),
+	shoot: (a) =>
+		onCanvas(a, "shootDirectorShot", (cards) => ({
+			nodeId: idOf(cards, a.pos[0], "stage"),
+			...(flag(a, "shots") ? { shots: flag(a, "shots") === "all" ? "all" : flags(a, "shots") } : {}),
+		})),
+	do: (a) => {
+		const operation = a.pos[0];
+		if (!operation) throw new CliError("do <operation> --json '{…}'  (an operation the canvas runs for Flo; ids are full card ids)", "INVALID_PARAM");
+		const raw = flag(a, "input") ?? a.pos[1] ?? "{}";
+		let input: Record<string, unknown>;
+		try {
+			input = JSON.parse(raw);
+		} catch {
+			throw new CliError("--input must be JSON.", "INVALID_PARAM");
+		}
+		return onCanvas(a, operation, () => input, 900);
+	},
+};
+
+// ---------- commands: models ----------
+
+async function cmdModels(a: Args) {
+	const ctx = await context(a).catch(() => null);
+	// Not logged in: the worker the site's pages use (FLOWITH_URL, else the default site).
+	const catalog = await fetchCatalog(ctx?.session.workerURL ?? workerFor(siteUrl()), { fresh: has(a, "fresh") });
+	const kinds = (a.pos[0] && ["image", "video", "text", "audio"].includes(a.pos[0]) ? [a.pos[0]] : ["image", "video", "text", "audio"]) as Kind[];
+	const id = a.pos.find((p) => !["image", "video", "text", "audio"].includes(p));
+	if (id) {
+		const m = catalog[id] ?? Object.entries(catalog).find(([, v]) => v.title?.toLowerCase() === id.toLowerCase())?.[1];
+		if (!m) throw new CliError(`No model "${id}".`, "INVALID_MODEL");
+		const { logo: _l, icon: _i, descI18n: _d, titleI18n: _t, ...rest } = m as Record<string, unknown>;
+		return out({ id, ...rest });
+	}
+	if (jsonOut) return out(Object.fromEntries(kinds.map((k) => [k, modelsOf(catalog, k).map(([mid]) => mid)])));
+	for (const k of kinds) {
+		console.log(`\n${k.toUpperCase()}  (default: ${defaultModel(catalog, k === "audio" ? "audio" : k)})`);
+		for (const [mid, m] of modelsOf(catalog, k)) console.log(`  ${modelLine(mid, m)}`);
+	}
+	console.log("\n`models <id>` for one model's full limits. 1 credit = $0.001.");
+}
+
+// ---------- help ----------
+
+const HELP = `canvas-cowork — work on a Flowith 3.0 canvas. Every card you make shows up live on the user's canvas.
+
+  bun scripts/index.ts <command> [args] [--flags]
+
+SET UP      login [--site next-gen.flowith.io] · whoami · credits · spent [--since 30m] · logout
+CANVASES    canvases [search] · new "title" · use <canvas|url> · open · rename canvas "title"
+SEE         look [words] [--kind image]  every card: ref, kind, title, model, status, place, links
+            read <card…> [--full]        full prompt / text / media of cards
+            shots [card…] [--full]       download previews to look at (Read the files)
+            save <card…> [--out dir]     download originals / text
+MAKE        image "prompt" ["prompt"…]   [--model] [--ratio 16:9] [--size 2k] [--n 4] [--ref card|file|url]… [--transparent]
+            edit <card> "change" ["change2"…]  new pictures made from that one, beside it [--model] [--ratio] [--size] [--title]
+            vary <card> [--n 3]           run a picture, clip or text card's prompt again, beside it
+            retry [card…]                 run failed cards again in place (all failed cards when none named)
+            video "prompt"               [--model] [--first card|file] [--last …] [--ref …]… [--duration 5] [--resolution 720p]
+                                         [--ratio] [--no-audio] [--draft] [--extend clip] [--edit-video clip]
+            text "prompt"                [--model a,b,c] [--ref card]… [--system "…"]
+            speech "words"  · music "style"   [--model] [--voice id] [--for card] [--lyrics "…"] [--duration s]
+TOOLS       upscale <card> [--to 4k] · cutout <card> · expand <card> --ratio 16:9
+ARRANGE     add <file|url…> · note "text" · write <card> "text" · move <card> --to x,y | --right-of c | --below c
+            arrange <cards…> --as row|column|grid  ·  arrange <group>  ·  group <cards…> --name "…" · ungroup <group>
+            rename <card> "title" · link <from> <to> · unlink <from> <to> · copy <card> · delete <card…>
+            wait [card…]
+ON CANVAS   (run by the user's open canvas window, as Flo's operations are)
+            focus <refs…> · tidy [refs…] [--as row|column|grid|left|top|hdistribute…] (no refs: Organize)
+            split <ref> --rows 2 --cols 2 · angles <ref> [--angles low,closeUp,wide,side,back,high,overShoulder]
+            relight <ref> --preset window|golden|blueHour|neon|rim|noir|studio|candle
+            lipsync <clip> --with <sound> · motion <clip> --with <picture> · soundtrack <clip> [--voice "text"]
+            breakdown <clip> [--layout] · character <picture> --name "Mia" [--subject animal] · cut <refs…>
+            stage "scene idea" [--cast refs] · shoot <stage> [--shots all] · do <operation> --input '{…}'
+MODELS      models [image|video|text|audio] · models <id>
+
+Placement   new cards sit beside --near <card> (or the first --ref card), else in free space; several
+            results form one group (--group "name"); --into <group> adds to an existing group.
+Cards       a card is named by its ref (first 8 hex of its id, shown by look), a longer id prefix, or its title.
+References  in prompts, name references @image1 @image2 @video1 @audio1 in --ref order; the CLI rewrites
+            them to each model's own naming (Seedance 图片1, Kling @image_1, image models 图1/image 1).
+Global      --canvas <ref>  --json  --quiet  --no-wait  --timeout <s>
+            --dry-run (making commands, add, note, delete: show the request and credits; send nothing)
+            --agent <claude-code|codex|…> (auto-detected)  ·  env FLOWITH_URL, FLOWITH_CANVAS, FLOWITH_HOME
+`;
+
+// ---------- main ----------
+
+const COMMANDS: Record<string, (a: Args) => Promise<unknown>> = {
+	login: cmdLogin,
+	whoami: cmdWhoami,
+	status: cmdWhoami,
+	credits: cmdCredits,
+	logout: async () => {
+		const { ended, note } = await logout();
+		const oldLogin = forgetOldLogin();
+		out({ signInEnded: ended, ...(note ? { note } : {}), ...(oldLogin ? { removedOldLogin: "~/.flowith/bot-session.json" } : {}) });
+		if (!ended && note?.startsWith("Couldn't")) process.exitCode = 1;
+	},
+	canvases: cmdCanvases,
+	list: cmdCanvases,
+	new: cmdNew,
+	use: cmdUse,
+	switch: cmdUse,
+	open: cmdOpen,
+	look: cmdLook,
+	read: cmdRead,
+	shots: cmdShots,
+	save: cmdSave,
+	image: (a) => cmdImage(a),
+	edit: cmdEdit,
+	vary: cmdVary,
+	video: cmdVideo,
+	text: cmdText,
+	speech: (a) => cmdSound(a, "gen_speech"),
+	music: (a) => cmdSound(a, "gen_music"),
+	upscale: (a) => cmdTool(a, "upscale"),
+	cutout: (a) => cmdTool(a, "cutout"),
+	expand: (a) => cmdTool(a, "expand"),
+	add: cmdAdd,
+	note: cmdNote,
+	write: cmdWrite,
+	move: cmdMove,
+	arrange: cmdArrange,
+	group: cmdGroup,
+	ungroup: cmdUngroup,
+	rename: cmdRename,
+	link: (a) => cmdLink(a, false),
+	unlink: (a) => cmdLink(a, true),
+	copy: cmdCopy,
+	delete: cmdDelete,
+	wait: cmdWait,
+	retry: cmdRetry,
+	spent: cmdSpent,
+	models: cmdModels,
+	...ON_CANVAS,
+};
+
+/** Commands of the previous canvas-cowork and what replaced them. */
+const RENAMED: Record<string, string> = {
+	"create-canvas": "new",
+	gen: "image / video / text",
+	submit: "image / video / text",
+	"submit-batch": 'image "p1" "p2" … (one call, one group)',
+	"read-db": "look / read",
+	"list-models": "models",
+	upload: "add (puts it on the canvas) or --ref <file>",
+	"delete-many": "delete",
+	"clean-failed": "delete <card…>",
+	recall: "canvases <search> + look",
+};
+
+/** Commands whose --dry-run shows what they would do (requests, cards, credits) without doing it. */
+const PREVIEWS = new Set(["image", "edit", "vary", "retry", "video", "text", "speech", "music", "upscale", "cutout", "expand", "add", "note", "delete"]);
+/** Commands that only read Flowith: --dry-run leaves them as they are. */
+const READS = new Set(["whoami", "status", "credits", "canvases", "list", "look", "read", "models", "spent", "wait"]);
 
 async function main() {
-	const { args: args0, botClient } = parseBotClient(process.argv.slice(2));
-	const { args: args1, canvasId: explicitCanvasId } = parseCanvasFlag(args0);
-	const { args: args2, parallel: parallelMode } = parseParallelFlag(args1);
-	const { args: args3, agentId } = parseAgentIdFlag(args2);
-	const args = parseJsonFlag(args3);
-
-	if (parallelMode && !explicitCanvasId) {
-		console.error("Error: --parallel requires --canvas <convId>.");
-		process.exit(1);
+	const a = parseArgs(process.argv.slice(2));
+	jsonOut = has(a, "json");
+	quiet = has(a, "quiet") || jsonOut;
+	dryRun = has(a, "dry-run");
+	if (dryRun && COMMANDS[a.cmd]) {
+		if (!PREVIEWS.has(a.cmd) && !READS.has(a.cmd))
+			throw new CliError(`\`${a.cmd}\` has no dry run: it changes things when it runs. Leave out --dry-run (\`look\` shows the canvas as it is).`, "INVALID_PARAM");
+		// Whatever a preview misses, nothing that would change the canvas or spend credits leaves the machine.
+		forbidWrites();
 	}
-
-	if (!args.length || args[0] === "-h" || args[0] === "--help") {
-		printUsage();
-		process.exit(args.length ? 0 : 1);
+	if (a.cmd === "help") return void process.stdout.write(HELP);
+	if (has(a, "help")) {
+		// The help lines that name this command, with the shared notes.
+		const lines = HELP.split("\n").filter((l) => new RegExp(`(^|[\\s·(])${a.cmd}\\b`).test(l));
+		return void process.stdout.write(`${lines.join("\n") || HELP}\n\n${HELP.slice(HELP.indexOf("Placement"))}`);
 	}
-	const cmd = args[0];
-
-	// ---- status ----
-	// Default: fast, file-only snapshot. --live: also probe the browser tab so
-	// the reported state reflects reality (the file alone can lie mid-login).
-	if (cmd === "status") {
-		const s = loadSession();
-		if (!s) {
-			console.log(JSON.stringify({ status: "no_session" }));
-			return;
-		}
-		const base: Record<string, unknown> = {
-			status: "ok",
-			activeUser: getJwtUserId(s.accessToken) ?? null,
-			activeConvId: s.activeConvId ?? null,
-			expiresAt: s.expiresAt,
-			tokenExpiresAt: jwtExpiresAtIso(s.accessToken),
-			tokenExpired: isJwtExpired(s.accessToken),
-			canRefresh: Boolean(s.refreshToken),
-		};
-		if (args.includes("--live")) {
-			const connected = await liveBrowserPing(s);
-			base.browser = connected ? "connected" : "disconnected";
-		}
-		console.log(JSON.stringify(base));
-		return;
+	const run = COMMANDS[a.cmd];
+	if (!run) {
+		const moved = RENAMED[a.cmd];
+		throw new CliError(moved ? `\`${a.cmd}\` is now: ${moved}. See \`help\`.` : `Unknown command "${a.cmd}". See \`help\`.`, "INVALID_PARAM");
 	}
-
-	// ---- whoami: identify the logged-in user without side effects ----
-	if (cmd === "whoami") {
-		const s = loadSession();
-		console.log(
-			JSON.stringify(
-				s
-					? { userId: getJwtUserId(s.accessToken), expiresAt: s.expiresAt }
-					: { userId: null, status: "no_session" },
-			),
-		);
-		return;
-	}
-
-	// ---- login / connect: explicit session handshake (no other side effects) ----
-	// Replaces the old pattern of triggering login as a side effect of
-	// list-models. Establishes (or reuses) a session, then reports browser state.
-	if (cmd === "login" || cmd === "connect") {
-		const s = await acquireSession(botClient);
-		const connected = await liveBrowserPing(s);
-		console.log(
-			JSON.stringify({
-				status: "connected",
-				activeUser: getJwtUserId(s.accessToken),
-				activeConvId: s.activeConvId ?? null,
-				expiresAt: s.expiresAt,
-				browser: connected ? "connected" : "disconnected",
-			}),
-		);
-		return;
-	}
-
-	// ---- open ----
-	if (cmd === "open") {
-		const existing = loadSession();
-		const arg = args[1];
-
-		// Full URL mode: open directly in browser, preserving all query params (invitation links etc.)
-		if (arg && /^https?:\/\//i.test(arg)) {
-			await openInBrowser(arg);
-			if (existing) {
-				existing.lastBrowserOpenAt = new Date().toISOString();
-				const m = arg.match(/\/conv\/([0-9a-f-]{36})/i);
-				if (m) existing.activeConvId = m[1];
-				saveSession(existing);
-			}
-			console.error(`Opened ${arg} (full URL)`);
-			return;
-		}
-
-		const convId = arg || existing?.activeConvId;
-
-		// If we have a session and a convId, try same-tab navigation via broadcast first
-		if (existing && convId) {
-			const uid = getJwtUserId(existing.accessToken);
-			if (uid) {
-				const client = new RealtimeLite(
-					existing.supabaseUrl,
-					existing.supabaseKey,
-					existing.accessToken,
-				);
-				try {
-					await client.connect();
-					const ch = `bot_ctrl:${uid}`;
-					await client.join(ch);
-					if (await quickPing(client, ch, existing)) {
-						// Browser is alive — navigate in same tab
-						assertUUID(convId, "convId");
-						const action: BotAction = {
-							actionId: crypto.randomUUID(),
-							sessionId: existing.sessionId,
-							timestamp: new Date().toISOString(),
-							type: "switch_canvas",
-							convId,
-						};
-						await sendAndWait(client, ch, action, ACTION_TIMEOUT_MS);
-						if (args[1]) existing.activeConvId = args[1];
-						saveSession(existing);
-						console.error(`Navigated to canvas ${convId} (same tab)`);
-						return;
-					}
-				} catch (e: any) {
-					// Any failure (WS connect, ping, switch) — fall through to openInBrowser
-					if (e?.message)
-						console.error(`Same-tab navigation failed: ${e.message}`);
-				} finally {
-					client.close();
-				}
-			}
-		}
-
-		// Fallback: open new browser tab (no browser connected or no session)
-		const base = await getFlowithUrl();
-		const target = convId ? `${base}/conv/${convId}` : base;
-		await openInBrowser(target);
-		if (existing) {
-			existing.lastBrowserOpenAt = new Date().toISOString();
-			if (args[1]) existing.activeConvId = args[1];
-			saveSession(existing);
-		}
-		console.error(`Opened ${target} (new tab)`);
-		return;
-	}
-
-	// ---- batches (file I/O only, no session needed) ----
-	// Audit submit-batch runs after a timeout/interrupt: which prompts landed
-	// as nodes (questionNodeId set) vs. never submitted.
-	if (cmd === "batches") {
-		const id = args.find((a, i) => i > 0 && !a.startsWith("--"));
-		if (id) {
-			const rec = loadBatch(id);
-			if (!rec) {
-				console.log(
-					JSON.stringify({ type: "error", code: "NOT_FOUND", batchId: id }),
-				);
-				process.exit(1);
-			}
-			console.log(JSON.stringify(rec, null, 2));
-		} else {
-			console.log(
-				JSON.stringify(
-					listBatches().map((r) => ({
-						batchId: r.batchId,
-						convId: r.convId,
-						updatedAt: r.updatedAt,
-						submitted: r.items.filter((it) => it.status === "submitted").length,
-						total: r.total,
-					})),
-					null,
-					2,
-				),
-			);
-		}
-		return;
-	}
-
-	// ---- dream-init (file I/O only, no session needed) ----
-	if (cmd === "dream-init") {
-		const theme = args[1];
-		if (!theme) {
-			console.error('Usage: dream-init "theme" [--mode image|video|text]');
-			process.exit(1);
-		}
-		const mi = args.indexOf("--mode");
-		const mode = mi !== -1 && args[mi + 1] ? args[mi + 1] : "image";
-		const el = theme.split(/[\s×x+&,、·:]+/).filter(Boolean);
-		const elStr = el.join(", ");
-		const md = [
-			`# Creative Journal`,
-			``,
-			`## Meta`,
-			`- theme: ${theme}`,
-			`- mode: ${mode}`,
-			`- round: 0`,
-			`- canvasId:`,
-			`- createdAt: ${new Date().toISOString()}`,
-			``,
-			`## Directions`,
-			``,
-			`### d1: ${theme}`,
-			`- base: ${theme}`,
-			`- elements: ${elStr}`,
-			`- status: new`,
-			`- score: 0`,
-			`- rounds: 0`,
-			``,
-			`## History`,
-			``,
-			`(none yet)`,
-			``,
-			`## Config`,
-			`- pauseStreakBelow: 4`,
-			`- pauseStreakLength: 3`,
-			``,
-		].join("\n");
-		mkdirSync(SESSION_DIR, { recursive: true });
-		writeFileSync(JOURNAL_FILE, md);
-		console.log(
-			JSON.stringify(
-				{
-					type: "result",
-					actionId: crypto.randomUUID(),
-					data: { theme, mode, directions: ["d1"], journal: JOURNAL_FILE },
-				},
-				null,
-				2,
-			),
-		);
-		return;
-	}
-
-	// ---- All other commands: acquire session (auto-handshake if needed) ----
-	const session = await acquireSession(botClient);
-	const userId = getJwtUserId(session.accessToken);
-	if (!userId) {
-		console.error("Error: Invalid token.");
-		process.exit(1);
-	}
-
-	// --canvas (or FLOWITH_CANVAS): explicitly target a canvas (skip auto-alignment).
-	// Only create-canvas / switch persist a canvas; this stays in-memory.
-	const canvasOverride = explicitCanvasId || process.env.FLOWITH_CANVAS;
-	if (canvasOverride) {
-		assertUUID(canvasOverride, "canvas id");
-		session.activeConvId = canvasOverride;
-	}
-
-	// ---- current: ask browser what canvas user is viewing ----
-	if (cmd === "current") {
-		const action: BotAction = {
-			actionId: crypto.randomUUID(),
-			sessionId: session.sessionId,
-			timestamp: new Date().toISOString(),
-			type: "get_current_canvas",
-			includeTitle: true,
-		};
-		const result = await connectAndExecute(
-			session,
-			userId,
-			`bot_ctrl:${userId}`,
-			action,
-			QUICK_PING_MS,
-			botClient,
-		);
-		console.log(JSON.stringify(result, null, 2));
-		return;
-	}
-
-	// ---- Direct (headless) commands: plain HTTP, no browser needed ----
-	if (await runDirectCommand(cmd, args, session, userId, botClient, parallelMode))
-		return;
-
-	// ---- submit-batch: fire N submits over one connection ----
-	if (cmd === "submit-batch") {
-		// POSIX-style "--" separator: everything after the first bare "--" is a
-		// literal prompt, never parsed as a flag. Lets users submit prompts that
-		// legitimately start with "--" (otherwise the unknown-flag guard rejects them).
-		const rawBatchArgs = args.slice(1);
-		const sepIdx = rawBatchArgs.indexOf("--");
-		const flagSegment =
-			sepIdx === -1 ? rawBatchArgs : rawBatchArgs.slice(0, sepIdx);
-		const literalPrompts =
-			sepIdx === -1 ? [] : rawBatchArgs.slice(sepIdx + 1);
-
-		const { values: followFlag, rest: batchRest0 } = extractFlag(
-			flagSegment,
-			"--follow",
-		);
-		const { values: modesBatchFlag, rest: batchRest1 } = extractFlag(
-			batchRest0,
-			"--mode",
-		);
-		const { values: modelsBatchFlag, rest: batchRest2 } = extractFlag(
-			batchRest1,
-			"--models",
-		);
-		// --model (singular) is a forgiving alias for --models with one model.
-		// Without it, "--model x" leaks the flag value "x" as an extra prompt.
-		const { values: modelBatchFlag, rest: batchRest3 } = extractFlag(
-			batchRest2,
-			"--model",
-		);
-		const { values: ratioBatchFlag, rest: batchRest4 } = extractFlag(
-			batchRest3,
-			"--ratio",
-		);
-		const { values: sizeBatchFlag, rest: batchRest } = extractFlag(
-			batchRest4,
-			"--size",
-		);
-		const follow = followFlag[0];
-		if (follow) assertUUID(follow, "follow nodeId");
-		const batchMode = modesBatchFlag[0]; // e.g. "image"
-		if (batchMode && !VALID_MODES.has(batchMode)) {
-			console.error(
-				`Error: invalid mode "${batchMode}". Valid: ${Array.from(VALID_MODES).join(", ")}`,
-			);
-			process.exit(1);
-		}
-		// --model and --models are redundant ways to say the same thing; if both
-		// are given the merge order is non-obvious, so warn rather than guess.
-		if (modelsBatchFlag.length > 0 && modelBatchFlag.length > 0) {
-			console.error(
-				"[canvas-cowork] WARNING: both --models and --model given; merging both (--models first).",
-			);
-		}
-		// Accept both --models "a,b" and --model "a"; merge into one list.
-		const modelList = [
-			...(modelsBatchFlag[0]?.split(",") ?? []),
-			...modelBatchFlag,
-		]
-			.map((m) => m.trim())
-			.filter(Boolean); // e.g. ["gpt-image-1.5", "seedream-v4.5"]
-		// A model flag was supplied but resolved to nothing (e.g. --models "" or
-		// --model "  "): that's a usage error, not a silent fall-through to default.
-		if (
-			(modelsBatchFlag.length > 0 || modelBatchFlag.length > 0) &&
-			modelList.length === 0
-		) {
-			console.error(
-				"Error: --models/--model was given but empty. Pass at least one model id, or omit the flag.",
-			);
-			process.exit(1);
-		}
-		const aspectRatio = ratioBatchFlag[0];
-		const imageSize = sizeBatchFlag[0];
-
-		// Fail fast on any leftover flag: never silently treat a flag value as a
-		// prompt (historically "--size 2K" leaked "2K" as an extra generation).
-		// A value-taking flag with no value (e.g. trailing "--ratio") also lands
-		// here, since extractFlag only consumes a following non-flag token.
-		const unknownFlag = batchRest.find((a) => a.startsWith("--"));
-		if (unknownFlag) {
-			console.error(
-				`Error: submit-batch does not support "${unknownFlag}" (or it was given without a value).\n` +
-					'Supported flags: --follow <nodeId> --mode <m> --models "m1,m2,..." (or --model <m>) --ratio <r> --size <s>\n' +
-					'To submit a prompt that starts with "--", put it after a "--" separator.',
-			);
-			process.exit(1);
-		}
-		const prompts = [...batchRest, ...literalPrompts];
-		if (!prompts.length) {
-			console.error(
-				'Error: submit-batch requires at least one prompt.\nUsage: submit-batch [--follow <nodeId>] [--mode <m>] [--models "m1,m2,..."] [--ratio <r>] [--size <s>] "prompt1" "prompt2" ...',
-			);
-			process.exit(1);
-		}
-
-		// Same footgun guard as single submit: image/video without a model lets
-		// the canvas pick a default that has historically misrouted credits.
-		if (
-			batchMode &&
-			modelList.length === 0 &&
-			(batchMode === "image" || batchMode === "video")
-		) {
-			console.error(
-				`[canvas-cowork] WARNING: submit-batch --mode ${batchMode} without --models/--model.`,
-			);
-			console.error(
-				`  The canvas will pick a default model (bot default → first available).`,
-			);
-			console.error(
-				`  Pass --models "<id>" (or --model <id>) to control which model runs;`,
-			);
-			console.error(`  run list-models ${batchMode} to see the active options.`);
-		}
-
-		if (!session.activeConvId) {
-			session.activeConvId = "00000000-0000-0000-0000-000000000000";
-		}
-		assertUUID(session.activeConvId!, "activeConvId");
-		const ch = `bot:${session.activeConvId}`;
-
-		const client = new RealtimeLite(
-			session.supabaseUrl,
-			session.supabaseKey,
-			session.accessToken,
-		);
-		try {
-			await client.connect();
-			await registerWithFrontend(client, session, userId, botClient);
-			await ensureBrowserConnected(client, session, userId, botClient);
-			await client.join(ch);
-
-			// Journal the batch up front so an interrupt mid-run is recoverable:
-			// each item flips pending → submitted/failed and is persisted as it lands.
-			const batch: BatchRecord = {
-				batchId: crypto.randomUUID(),
-				convId: session.activeConvId!,
-				mode: batchMode,
-				models: modelList,
-				createdAt: new Date().toISOString(),
-				updatedAt: new Date().toISOString(),
-				total: prompts.length,
-				items: prompts.map((prompt, index) => ({
-					index,
-					prompt,
-					status: "pending" as const,
-				})),
-			};
-			saveBatch(batch);
-			console.error(
-				`Batch ${batch.batchId} — ${prompts.length} prompts. ` +
-					`Recover with: batches ${batch.batchId}`,
-			);
-
-			const makeAction = (fields: BotActionPayload): BotAction =>
-				({
-					actionId: crypto.randomUUID(),
-					sessionId: session.sessionId,
-					timestamp: new Date().toISOString(),
-					...fields,
-				}) as BotAction;
-
-			for (let i = 0; i < prompts.length; i++) {
-				const perModel =
-					modelList.length > 0
-						? modelList[Math.min(i, modelList.length - 1)]
-						: undefined;
-				const submitAction = makeAction({
-					type: "submit",
-					value: prompts[i],
-					...(follow ? { follow } : {}),
-					...(batchMode ? { mode: batchMode } : {}),
-					...(perModel ? { model: perModel } : {}),
-					...(aspectRatio ? { aspectRatio } : {}),
-					...(imageSize ? { imageSize } : {}),
-				});
-				let qid: string | undefined;
-				let ok = false;
-				let failReason: "rate_limited" | "error" = "error";
-				// LOCKED is the frontend's rate-limit signal (>30 actions/10s), not a
-				// real failure — back off and retry instead of dropping the prompt.
-				for (let attempt = 0; attempt <= BATCH_LOCKED_RETRIES; attempt++) {
-					try {
-						const resp = await sendAndWait(
-							client,
-							ch,
-							submitAction,
-							ORACLE_TIMEOUT_MS,
-						);
-						if (resp.type === "error" && (resp as any).code === "LOCKED") {
-							// Still rate-limited. Retry with backoff while budget remains;
-							// once exhausted, record it as rate_limited (not a hard error)
-							// so a re-run knows it was throttled, not broken.
-							failReason = "rate_limited";
-							if (attempt < BATCH_LOCKED_RETRIES) {
-								const backoff = 4_000 * (attempt + 1);
-								console.error(
-									`  [${i + 1}/${prompts.length}] rate-limited, backing off ${backoff / 1000}s...`,
-								);
-								await new Promise((r) => setTimeout(r, backoff));
-								continue;
-							}
-						}
-						qid =
-							resp.type === "result"
-								? (resp.data as any)?.questionNodeId
-								: undefined;
-						ok = resp.type === "result" && (resp.data as any)?.success !== false;
-					} catch (e: any) {
-						// One slow/failed submit shouldn't sink the rest of the batch.
-						failReason = "error";
-						console.error(`  [${i + 1}/${prompts.length}] error: ${e.message}`);
-					}
-					break;
-				}
-				batch.items[i].status = ok ? "submitted" : "failed";
-				batch.items[i].questionNodeId = qid;
-				if (!ok) batch.items[i].reason = failReason;
-				saveBatch(batch);
-				console.error(
-					`  [${i + 1}/${prompts.length}] ${ok ? "✓" : "✗"} ${prompts[i].slice(0, 40)}...`,
-				);
-
-				// Brief pause so the cursor doesn't look frantic
-				if (i < prompts.length - 1)
-					await new Promise((r) => setTimeout(r, 500));
-			}
-			const submitted = batch.items.filter(
-				(it) => it.status === "submitted",
-			).length;
-			console.log(
-				JSON.stringify(
-					{
-						type: "result",
-						actionId: crypto.randomUUID(),
-						data: {
-							batchId: batch.batchId,
-							submitted,
-							total: batch.total,
-							results: batch.items.map((it) => ({
-								prompt: it.prompt,
-								questionNodeId: it.questionNodeId,
-								success: it.status === "submitted",
-								...(it.reason ? { reason: it.reason } : {}),
-							})),
-						},
-					},
-					null,
-					2,
-				),
-			);
-		} finally {
-			client.close();
-		}
-		return;
-	}
-
-	// Build action
-	const actionId = crypto.randomUUID();
-	const base: BotActionBase = {
-		actionId,
-		sessionId: session.sessionId,
-		timestamp: new Date().toISOString(),
-		...(agentId ? { agentId } : {}),
-	};
-	let action: BotAction;
-	let channelName: string;
-	let timeout = ACTION_TIMEOUT_MS;
-
-	const requireCanvas = () => {
-		// activeConvId may be null if session was created while browser was on homepage.
-		// The auto-align in connectAndExecute will detect the browser's actual canvas
-		// via get_current_canvas — so we only need a placeholder here.
-		// Use a dummy UUID that connectAndExecute will override.
-		if (!session.activeConvId) {
-			session.activeConvId = "00000000-0000-0000-0000-000000000000";
-		}
-		assertUUID(session.activeConvId!, "activeConvId");
-	};
-	const canvasCh = () => `bot:${session.activeConvId}`;
-
-	switch (cmd) {
-		// -- Control channel (any page) --
-		case "ping":
-			action = { ...base, type: "ping" };
-			channelName = `bot_ctrl:${userId}`;
-			break;
-		// -- Canvas channel: atomic store operations --
-		case "set-mode": {
-			if (!args[1]) {
-				console.error(
-					"Error: set-mode requires mode (text|image|video|agent|neo).",
-				);
-				process.exit(1);
-			}
-			if (!VALID_MODES.has(args[1])) {
-				console.error(
-					`Error: invalid mode "${args[1]}". Valid modes: ${Array.from(VALID_MODES).join(", ")}`,
-				);
-				process.exit(1);
-			}
-			requireCanvas();
-			action = { ...base, type: "set_mode", mode: args[1] };
-			channelName = canvasCh();
-			break;
-		}
-		case "set-model": {
-			if (!args[1]) {
-				console.error("Error: set-model requires model id.");
-				process.exit(1);
-			}
-			requireCanvas();
-			action = { ...base, type: "set_model", model: args[1] };
-			channelName = canvasCh();
-			break;
-		}
-		case "comment": {
-			if (!args[1]) {
-				console.error("Error: comment requires nodeId.");
-				process.exit(1);
-			}
-			if (!args[2]) {
-				console.error("Error: comment requires text.");
-				process.exit(1);
-			}
-			requireCanvas();
-			action = { ...base, type: "comment", nodeId: args[1], text: args[2] };
-			channelName = canvasCh();
-			break;
-		}
-
-		// -- Canvas channel: submit (triggers the full generation pipeline) --
-		case "submit": {
-			if (!args[1]) {
-				console.error("Error: submit requires text.");
-				process.exit(1);
-			}
-			requireCanvas();
-			const { values: imagePaths } = extractFlag(args.slice(2), "--image");
-			const { values: modeFlag } = extractFlag(args.slice(2), "--mode");
-			const { values: modelFlag } = extractFlag(args.slice(2), "--model");
-			const { values: followFlag } = extractFlag(args.slice(2), "--follow");
-			const { values: ratioFlag } = extractFlag(args.slice(2), "--ratio");
-			const { values: sizeFlag } = extractFlag(args.slice(2), "--size");
-			const { values: durationFlag } = extractFlag(args.slice(2), "--duration");
-			const hasLoop = args.slice(2).includes("--loop");
-			const hasNoAudio = args.slice(2).includes("--no-audio");
-
-			// Validate mode if provided
-			let inlineMode: string | undefined;
-			if (modeFlag.length > 0) {
-				if (!VALID_MODES.has(modeFlag[0])) {
-					console.error(
-						`Error: invalid mode "${modeFlag[0]}". Valid: ${Array.from(VALID_MODES).join(", ")}`,
-					);
-					process.exit(1);
-				}
-				inlineMode = modeFlag[0] === "neo" ? "agent" : modeFlag[0];
-			}
-			const inlineModel = modelFlag[0];
-
-			// Warn when --mode is supplied without --model on a billable generation
-			// mode (image/video). Without --model the canvas picks a bot-default or
-			// first-available model, which has historically routed traffic to the
-			// wrong model and burned credits. Agent mode has no chargeable model.
-			if (inlineMode && !inlineModel && (inlineMode === "image" || inlineMode === "video")) {
-				console.error(
-					`[canvas-cowork] WARNING: submit --mode ${inlineMode} without --model.`,
-				);
-				console.error(
-					`  The canvas will pick a default model (bot default → first available).`,
-				);
-				console.error(
-					`  To control which model runs, pass --model <id> explicitly, or run`,
-				);
-				console.error(
-					`  list-models ${inlineMode} to see the active options.`,
-				);
-			}
-
-			// In parallel mode or when --model is provided, bundle mode+model into
-			// the submit action for atomic execution (no separate set_mode call).
-			// In non-parallel mode without --model, fall back to separate set_mode
-			// for backward compatibility with frontends that don't support inline mode.
-			if (!parallelMode && inlineMode && !inlineModel) {
-				const modeAction: BotAction = {
-					...base,
-					actionId: crypto.randomUUID(),
-					type: "set_mode",
-					mode: inlineMode,
-				};
-				const modeResult = await connectAndExecute(
-					session,
-					userId,
-					canvasCh(),
-					modeAction,
-					ACTION_TIMEOUT_MS,
-					botClient,
-				);
-				console.log(JSON.stringify(modeResult, null, 2));
-				inlineMode = undefined; // Already applied, don't send again
-			}
-
-			// --follow: specify parent node for follow-up
-			const follow = followFlag[0];
-			if (follow) assertUUID(follow, "follow nodeId");
-			const files =
-				imagePaths.length > 0
-					? await resolveImages(imagePaths, session)
-					: undefined;
-			const aspectRatio = ratioFlag[0];
-			const imageSize = sizeFlag[0];
-			const videoDuration = durationFlag[0];
-			action = {
-				...base,
-				type: "submit",
-				value: args[1],
-				...(files ? { files } : {}),
-				...(follow ? { follow } : {}),
-				...(aspectRatio ? { aspectRatio } : {}),
-				...(imageSize ? { imageSize } : {}),
-				...(videoDuration ? { videoDuration } : {}),
-				...(hasLoop ? { videoLoop: true } : {}),
-				...(hasNoAudio ? { videoAudio: false } : {}),
-				...(inlineMode ? { mode: inlineMode } : {}),
-				...(inlineModel ? { model: inlineModel } : {}),
-			};
-			channelName = canvasCh();
-			timeout = ORACLE_TIMEOUT_MS;
-			break;
-		}
-
-		// -- Canvas channel: read / delete --
-		case "read": {
-			requireCanvas();
-			action =
-				args[1] && args[1] !== "--all"
-					? { ...base, type: "read_node", nodeId: args[1] }
-					: { ...base, type: "read_all_nodes" };
-			channelName = canvasCh();
-			break;
-		}
-		default:
-			console.error(`Unknown command: ${cmd}`);
-			printUsage();
-			process.exit(1);
-	}
-
-	// Record submit time BEFORE connectAndExecute: the browser awaits full generation
-	// before responding, so nodes are created long before the CLI receives the response.
-	const preSubmitTime = new Date(Date.now() - 10_000).toISOString();
-
-	const result = await connectAndExecute(
-		session,
-		userId,
-		channelName,
-		action,
-		timeout,
-		botClient,
-		parallelMode ? { parallel: true } : undefined,
-	);
-
-	// Echo the model(s) that actually ran for a submit, so the user/agent can
-	// confirm it matches their intent (especially after --mode without --model).
-	if (
-		action.type === "submit" &&
-		result.type === "result" &&
-		Array.isArray((result.data as any)?.models) &&
-		(result.data as any).models.length > 0
-	) {
-		const models = (result.data as any).models as string[];
-		console.error(`[canvas-cowork] submitted with model(s): ${models.join(", ")}`);
-	}
-
-	console.log(JSON.stringify(result, null, 2));
-
-	// --wait: poll database until the generated node is finished
-	if (
-		action.type === "submit" &&
-		args.some((a) => a === "--wait" || a.startsWith("--wait="))
-	) {
-		const waitArg = args.find((a) => a.startsWith("--wait"))!;
-		const parsed = waitArg.includes("=")
-			? parseInt(waitArg.split("=")[1], 10)
-			: 300;
-		if (waitArg.includes("=") && (!Number.isFinite(parsed) || parsed <= 0)) {
-			console.error(
-				`Warning: invalid --wait value "${waitArg.split("=")[1]}", defaulting to 300s`,
-			);
-		}
-		const waitSec = Number.isFinite(parsed) && parsed > 0 ? parsed : 300;
-		const deadline = Date.now() + waitSec * 1000;
-		const convId = session.activeConvId!; // Already validated by requireCanvas() in submit
-
-		console.error(`Waiting for generation (timeout: ${waitSec}s)...`);
-
-		const submitTime = preSubmitTime;
-		// Extract questionNodeId from submit response for precise polling
-		const questionNodeId =
-			result.type === "result"
-				? (result.data as any)?.questionNodeId
-				: undefined;
-
-		// Poll via browser broadcast
-		const pollClient = new RealtimeLite(
-			session.supabaseUrl,
-			session.supabaseKey,
-			session.accessToken,
-		);
-		await pollClient.connect();
-		const ctrlCh = `bot_ctrl:${userId}`;
-		await pollClient.join(ctrlCh);
-		let interval = 2_000;
-		let pollCount = 0;
-		try {
-			while (Date.now() < deadline) {
-				await new Promise((r) => setTimeout(r, interval));
-				interval = Math.min(interval + Math.floor(interval * 0.5), 10_000);
-				pollCount++;
-
-				try {
-					const pollAction: BotAction = {
-						actionId: crypto.randomUUID(),
-						sessionId: session.sessionId,
-						timestamp: new Date().toISOString(),
-						type: "poll_generation",
-						convId,
-						createdAfter: submitTime,
-						...(questionNodeId ? { parentId: questionNodeId } : {}),
-					};
-					const resp = await sendAndWait(
-						pollClient,
-						ctrlCh,
-						pollAction,
-						ACTION_TIMEOUT_MS,
-					);
-
-					if (resp.type === "error") {
-						console.error(
-							`  poll #${pollCount} error: ${(resp as any).message}`,
-						);
-						continue;
-					}
-
-					const data = (resp as any).data;
-					const status = data?.status;
-
-					if (pollCount === 1 || pollCount % 5 === 0) {
-						console.error(`  poll #${pollCount}: status: ${status ?? "none"}`);
-					}
-
-					if (status === "finished") {
-						console.error("Generation finished.");
-						console.log(
-							JSON.stringify(
-								{ type: "result", actionId: action.actionId, data: data.node },
-								null,
-								2,
-							),
-						);
-						return;
-					}
-					if (status === "failed") {
-						if (data.isNoCredits) {
-							console.error("No credits remaining.");
-							console.log(
-								JSON.stringify({
-									type: "error",
-									actionId: action.actionId,
-									code: "NO_CREDITS",
-									message:
-										"It looks like you've run out of credits. Visit /pricing to subscribe and keep creating: https://flowith.io/pricing",
-									data: data.node,
-								}),
-							);
-						} else {
-							console.error("Generation failed.");
-							console.log(
-								JSON.stringify({
-									type: "error",
-									actionId: action.actionId,
-									code: "GENERATION_FAILED",
-									message: "Generation failed",
-									data: data.node,
-								}),
-							);
-						}
-						return;
-					}
-				} catch (e: any) {
-					console.error(`  poll #${pollCount} error: ${e.message}`);
-				}
-			}
-		} finally {
-			pollClient.close();
-		}
-		console.error(
-			`Timed out after ${waitSec}s. Use 'read-db' to check node status manually.`,
-		);
-	}
+	await run(a);
 }
 
-function sendAndWait(
-	client: RealtimeLite,
-	ch: string,
-	action: BotAction,
-	timeout: number,
-): Promise<BotResponse> {
-	return new Promise((res, rej) => {
-		const t = setTimeout(() => {
-			cleanup();
-			rej(
-				new Error(
-					`Timeout (${timeout / 1000}s). Is Flowith open on the correct canvas?`,
-				),
-			);
-		}, timeout);
-		const cleanup = client.onBroadcast(
-			ch,
-			BOT_EVENTS.RESPONSE,
-			(r: BotResponse) => {
-				if (r.actionId !== action.actionId || r.type === "ack") return;
-				clearTimeout(t);
-				cleanup();
-				res(r);
-			},
-		);
-		client.broadcast(ch, BOT_EVENTS.ACTION, action);
-	});
-}
-
-function printUsage() {
-	console.log(`
-canvas-cowork — Flowith canvas from the CLI.   bun scripts/index.ts --bot <identity> <command>
-
-Generate (no browser needed):
-  gen text|image|video "prompt" [--model best|fast|<id>] [--follow id] [--no-wait] [--out f] [--json]
-                                  text: --system "..."   image: --ratio --size --ref...
-                                  video: --duration --resolution --no-audio --start/--end --ref... --draft
-                                  several prompts or --jobs file.json = batch (one JSON array back)
-  upload <file>                   image/video/audio/pdf → URL
-  models [text|image|video] [id]  catalogue (compact table; --json full; --aliases; --refresh)
-  credits                         remaining credits
-
-Canvases & nodes (no browser needed):
-  create-canvas "title" · switch <id> · list · search "q"
-  read-db [nodeId] [--full] [--failed] [--conv id] · clean-failed · delete <id>...
-  recall "q" [--type t] [--conv id] · recall-node <conv> <node>
-
-Session: login · status [--live] · whoami · open [convId|url]
-Live cursor (needs a Flowith tab): set-mode · set-model · submit "..." [--wait] · submit-batch · comment · read · ping
-
-Global: --bot <id> (required)  --canvas <id> | FLOWITH_CANVAS  --json  --verbose  --quiet  --parallel --agent-id
-Full reference: references/cli.md · raw HTTP: references/api.md
-`);
-}
-
-main().catch((e) => {
-	const message = e.message || String(e);
-	const code =
-		e instanceof BrowserConnectionError || e instanceof CliError
-			? e.code
-			: message.includes("Timeout")
-				? "TIMEOUT"
-				: "UNKNOWN_ERROR";
-
-	// Structured JSON to stdout so the calling agent can parse it
-	out({
-		type: "error",
-		actionId: null,
-		code,
-		message,
-		...(e instanceof CliError && e.data !== undefined ? { data: e.data } : {}),
-	});
+main().catch((e: unknown) => {
+	const err = e instanceof CliError ? e : new CliError(e instanceof Error ? e.message : String(e), "ERROR");
+	process.stdout.write(`${JSON.stringify({ error: err.code, message: err.message, ...(err.data && typeof err.data === "object" && !Array.isArray(err.data) && Object.keys(err.data).length < 8 ? { data: err.data } : {}) })}\n`);
 	process.exit(1);
 });
+

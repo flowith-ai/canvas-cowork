@@ -1,0 +1,247 @@
+/**
+ * A stand-in Flowith (Supabase auth + PostgREST + worker) for running the real CLI end to end in tests: it serves a
+ * small canvas and catalogue, records every request, and answers generation calls as each test says.
+ */
+import { mkdtempSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+import { isDeepStrictEqual } from "node:util";
+
+export const USER = "11111111-1111-4111-8111-111111111111";
+export const CONV = "22222222-2222-4222-8222-222222222222";
+export const ids = {
+	group: "a0000000-0000-4000-8000-000000000001",
+	image: "a1000000-0000-4000-8000-000000000002",
+	running: "a2000000-0000-4000-8000-000000000003",
+	failed: "a3000000-0000-4000-8000-000000000004",
+	video: "a4000000-0000-4000-8000-000000000005",
+	text: "a5000000-0000-4000-8000-000000000006",
+	finishedAgent: "a6000000-0000-4000-8000-000000000007",
+};
+
+const imageRequest = { kind: "image", body: { target_feature: "image_generation", model: "z-image-turbo", messages: [{ role: "user", content: "a cat" }] } };
+const at = "2026-11-17T00:00:00.000Z";
+const row = (id: string, type: string, data: Record<string, unknown>, x = 0, y = 0, width = 384, height = 384) => ({
+	id, conv_id: CONV, type, p_id: CONV, position: { x, y }, width, height, data, created_at: at, prompt: null,
+});
+
+export function canvasRows() {
+	return [
+		row(ids.group, "11", { name: "Group" }, 2000, 0, 464, 560),
+		row(ids.image, "2", { isImage: true, mode: "image_generation", value: "https://cdn.test/a.png", status: "finished", model: "z-image-turbo", title: "Cat", aspect_ratio: "1:1" }, 0, 0),
+		row(ids.running, "2", { isImage: true, mode: "image_generation", value: "", status: "running", model: "z-image-turbo", title: "Running", madeBy: "claude-code", agentRequest: imageRequest }, 500, 0),
+		row(ids.failed, "2", { isImage: true, mode: "image_generation", value: "", status: "failed", error: "provider_error", model: "z-image-turbo", title: "Failed", madeBy: "claude-code", agentRequest: imageRequest }, 1000, 0),
+		row(ids.video, "13", { videoId: "https://cdn.test/v.mp4", status: "finished", model: "seedance-2.5-flash", title: "Clip", aspect_ratio: "16:9", duration: 5 }, 0, 600, 384, 216),
+		row(ids.text, "2", { value: "hello there", mode: "text", status: "finished", title: "Note", tag: { text: "User Upload" } }, 500, 600, 384, 520),
+		row(ids.finishedAgent, "2", { isImage: true, mode: "image_generation", value: "https://cdn.test/b.png", status: "finished", model: "z-image-turbo", title: "Done", madeBy: "claude-code", agentRequest: imageRequest }, 1500, 0),
+	];
+}
+
+export const catalog = {
+	"z-image-turbo": { media: "image", title: "Z Image Turbo", consume_num: 5, price: { completion: 5000, prompt: 0 }, supportedAspectRatios: ["1:1", "16:9"], supportsImageInput: true },
+	"seedance-2.5-flash": {
+		media: "video", title: "Seedance 2.5 Flash", supportedDurations: ["-1", "4", "5", "10"], supportedResolutions: ["480p", "720p"],
+		supportedAspectRatios: ["adaptive", "16:9", "9:16", "1:1"], pricePerSecond: { audioOff: 80704, audioOn: 80704 }, price: { completion: 403520, prompt: 0 },
+		estimatedPricePer5s: 406.88, supportsAudio: true, supportsMultimodalRef: true, supportsFirstFrame: true,
+	},
+	"seedance-2.5": {
+		media: "video", title: "Seedance 2.5", supportedDurations: ["-1", "4", "5", "10"], supportedResolutions: ["480p", "720p", "1080p"],
+		supportedAspectRatios: ["adaptive", "16:9", "9:16", "1:1"], pricePerSecond: { audioOff: 123600, audioOn: 123600 }, price: { completion: 616800, prompt: 0 },
+		estimatedPricePer5s: 621.944, supportsAudio: true, supportsMultimodalRef: true, supportsFirstFrame: true,
+	},
+	"kling-video/v4": {
+		media: "video", title: "Kling 4.0", supportedDurations: ["3", "5", "10"], supportedResolutions: ["720p", "1080p"], supportedAspectRatios: ["16:9", "9:16", "1:1"],
+		pricePerSecond: { audioOff: 305500, audioOn: 305500 }, pricePerSecondByResolution: { "720p": { audioOff: 204100, audioOn: 204100 }, "1080p": { audioOff: 305500, audioOn: 305500 } },
+		price: { completion: 1527500, prompt: 0 }, supportsMultimodalRef: true, supportsFirstFrame: true,
+		referenceAssetLimits: { total: 15, image: 10, video: 5, audio: 0 },
+	},
+	"muse-video": { media: "video", title: "Muse Video", supportedDurations: ["5"], supportedResolutions: ["720p"], supportedAspectRatios: ["16:9"], pricePerSecond: { audioOff: 3000, audioOn: 3000 }, price: { completion: 15000, prompt: 0 } },
+	"gemini-3.8-flash": { media: "text", title: "Gemini 3.8 Flash", price: { prompt: 1, completion: 4 } },
+	"elevenlabs-v3": { media: "tool", title: "ElevenLabs v3", audioPricing: { credits: 100, per: "1k_chars" } },
+	"suno-chirp-v6": { media: "tool", title: "Suno v6", audioPricing: { credits: 120, per: "song" } },
+};
+
+/**
+ * The worker's own clip price (flo-workers calculateVideoPrice, dev 8ccc1028) for the stand-in /video/price:
+ * Seedance by tokens (width × height × (24 s + 1) / 1024, ceiled) at its rate per resolution; 422 for a source clip
+ * the worker would measure.
+ */
+const SEEDANCE_RATES: Record<string, Record<string, number>> = {
+	"seedance-2.5-flash": { base: 8.4 },
+	"seedance-2.5": { base: 12.84, "1080p": 14.04 },
+};
+const PIXELS: Record<string, Record<string, [number, number]>> = {
+	"480p": { "16:9": [854, 480] },
+	"720p": { "16:9": [1280, 720], "9:16": [720, 1280] },
+	"1080p": { "16:9": [1920, 1080] },
+};
+export function workerVideoPrice(input: any, model: string): number | undefined {
+	if (input.video_urls?.length && model.startsWith("kling")) return undefined;
+	const rates = SEEDANCE_RATES[model];
+	if (!rates) return undefined;
+	const [w, h] = PIXELS[input.resolution ?? "720p"]![input.aspect_ratio ?? "16:9"] ?? PIXELS["720p"]!["16:9"]!;
+	const tokens = Math.ceil((w * h * (Number(input.duration ?? 5) * 24 + 1)) / 1024);
+	return (tokens * (rates[input.resolution] ?? rates.base!)) / 1000;
+}
+
+export interface Recorded {
+	method: string;
+	path: string;
+	body: unknown;
+}
+
+export interface UsageRecord {
+	model: string;
+	req_id: string;
+	tokens_used: number;
+	billing_unit_price: number | null;
+	created_at: string;
+	conv_id: string;
+	reason?: string | null;
+}
+
+export interface FakeOptions {
+	/** Pause a snapshotted read, or a PATCH before it checks its condition, to exercise real CLI races. */
+	afterNodeRead?: () => Promise<void>;
+	nodeReadStatus?: number;
+	beforeNodePatch?: () => Promise<void>;
+	patchStatus?: number;
+	dropPatchReply?: boolean;
+	/**
+	 * How a generation submit is answered: ok; an HTTP refusal; the gateway giving up on the worker (504); or the
+	 * connection breaking off mid-answer (the CLI sees a network error).
+	 */
+	submit?: "ok" | "drop" | "reset" | { status: number; body: unknown };
+	/** Usage records the canvas has (they may be added while a test runs). */
+	usage?: UsageRecord[];
+	/** A usage record the worker writes when a submit is accepted (the precharge). */
+	precharge?: (model: string) => UsageRecord | undefined;
+	/** Supabase's answer about the sign-in (403: it was ended, e.g. a Disconnect in Flowith). */
+	userStatus?: number;
+	/** false: the worker doesn't know this login as an agent sign-in (an older page gave the browser's own). */
+	agentSession?: boolean;
+	/** A team canvas (its charges go to the team's payer, out of the user's sight). */
+	team?: boolean;
+}
+
+/** A precharge record as the worker writes it when it takes a request: now, under a fresh attempt id. */
+export const precharge = (credits: number) => (model: string): UsageRecord => ({
+	model, req_id: crypto.randomUUID(), tokens_used: credits * 1000, billing_unit_price: null, created_at: new Date().toISOString(), conv_id: CONV,
+});
+
+export function fakeFlowith(opts: FakeOptions = {}) {
+	const requests: Recorded[] = [];
+	const rows = canvasRows();
+	const usage = opts.usage ?? [];
+	const hangUp = Bun.listen({ hostname: "localhost", port: 0, socket: { open: (socket) => void socket.end(), data: () => {} } });
+	const server = Bun.serve({
+		port: 0,
+		async fetch(req) {
+			const url = new URL(req.url);
+			const body = req.method === "GET" ? undefined : await req.text().then((t) => { try { return JSON.parse(t); } catch { return t; } });
+			requests.push({ method: req.method, path: url.pathname + url.search, body });
+			const p = url.pathname;
+			if (p === "/auth/v1/user") return Response.json(opts.userStatus && opts.userStatus !== 200 ? { error_code: "session_not_found" } : { id: USER }, { status: opts.userStatus ?? 200 });
+			if (p === "/auth/v1/logout") return new Response(null, { status: 204 });
+			if (p === "/auth/v1/token") return Response.json({ access_token: jwt(), refresh_token: "r2", expires_in: 3600 });
+			if (p === "/models") return Response.json(catalog);
+			if (p.startsWith("/rest/v1/conversation")) {
+				if (req.method !== "GET") return Response.json([{ id: CONV, title: "T", updated_at: at }]);
+				return Response.json([{ id: CONV, title: "Test canvas", updated_at: at, metadata: {}, team_id: opts.team ? "33333333-3333-4333-8333-333333333333" : null }]);
+			}
+			if (p.startsWith("/rest/v1/flow_node")) {
+				if (req.method === "GET") {
+					if (opts.nodeReadStatus) return new Response("read unavailable", { status: opts.nodeReadStatus });
+					const only = url.searchParams.get("id");
+					const want = only?.startsWith("in.(") ? only.slice(4, -1).split(",") : undefined;
+					const snapshot = Response.json((want ? rows.filter((r) => want.includes(r.id)) : rows).filter((r) => !(r as any).is_delete));
+					await opts.afterNodeRead?.();
+					return snapshot;
+				}
+				// Placed cards are kept (and read back) like the real table; a PATCH changes the card it names.
+				if (req.method === "POST") {
+					const placed = (Array.isArray(body) ? body : [body]).map((b: any) => ({ ...row(b.id, b.type ?? "2", {}), ...b, created_at: b.created_at ?? new Date().toISOString() }));
+					rows.push(...placed);
+					return Response.json(placed);
+				}
+				const id = url.searchParams.get("id")?.replace(/^eq\./, "");
+				await opts.beforeNodePatch?.();
+				if (opts.patchStatus) return Response.json({ message: "patch refused" }, { status: opts.patchStatus });
+				const previous = url.searchParams.get("data");
+				const hit = rows.filter((r) => r.id === id
+					&& (!url.searchParams.has("created_at") || url.searchParams.get("created_at") === `eq.${r.created_at}`)
+					&& (!url.searchParams.has("type") || url.searchParams.get("type") === `eq.${r.type}`)
+					&& (!url.searchParams.has("conv_id") || url.searchParams.get("conv_id") === `eq.${r.conv_id}`)
+					&& (!url.searchParams.has("is_delete") || !(r as any).is_delete)
+					&& (!previous || (previous === "is.null" ? r.data === null : isDeepStrictEqual(r.data, JSON.parse(previous.slice(3))))));
+				for (const r of hit) Object.assign(r, body);
+				if (opts.dropPatchReply) return new Response("reply lost after write", { status: 504 });
+				return Response.json(hit);
+			}
+			if (p === "/user/model-usage/group-records") return Response.json({ success: true, data: usage });
+			if (p === "/video/price") {
+				const credits = workerVideoPrice((body as any)?.input ?? {}, String((body as any)?.model));
+				return credits === undefined ? Response.json({ reason: "priced_on_submit" }, { status: 422 }) : Response.json({ credits });
+			}
+			if (p === "/user/agent-session/end") {
+				const asked = ((body as any)?.sessionIds ?? []) as string[];
+				return Response.json(opts.agentSession === false ? { ended: [], refused: asked } : { ended: asked, refused: [] });
+			}
+			if (p === "/user/credits") return Response.json([]);
+			if (["/image_gen/async", "/video/async", "/completion/async"].includes(p)) {
+				const submit = opts.submit ?? "ok";
+				if (submit === "reset") {
+					const pre = opts.precharge?.(String((body as any)?.model));
+					if (pre) usage.unshift(pre);
+					// Sent on to a socket that hangs up: the CLI's fetch fails with a network error, no answer at all.
+					return new Response(null, { status: 307, headers: { location: `http://localhost:${hangUp.port}/` } });
+				}
+				if (submit === "drop") {
+					const pre = opts.precharge?.(String((body as any)?.model));
+					if (pre) usage.unshift(pre);
+					// The worker's answer never reaches the CLI: the gateway answers for it.
+					return new Response("upstream timed out", { status: 504 });
+				}
+				if (submit !== "ok") return Response.json(submit.body, { status: submit.status });
+				const pre = opts.precharge?.(String((body as any)?.model));
+				if (pre) usage.unshift(pre);
+				// The result lands on the card a moment later, as the worker's workflow writes it.
+				const card = rows.find((r) => r.id === (body as any)?.nodeId);
+				if (card) setTimeout(() => Object.assign(card.data, p === "/video/async" ? { status: "finished", videoId: "https://cdn.test/new.mp4" } : { status: "finished", value: p === "/completion/async" ? "an answer" : "https://cdn.test/new.png" }), 100);
+				return Response.json({ nodeId: (body as any)?.nodeId, convId: CONV, status: "processing" });
+			}
+			return Response.json({});
+		},
+	});
+	const origin = `http://localhost:${server.port}`;
+	const newHome = () => {
+		const directory = mkdtempSync(join(tmpdir(), "cw-test-"));
+		writeFileSync(
+			join(directory, "canvas-session.json"),
+			JSON.stringify({ site: origin, supabaseUrl: origin, supabaseKey: "k", accessToken: jwt(), refreshToken: "r1", workerURL: origin, canvas: CONV, savedAt: at }),
+			{ mode: 0o600 },
+		);
+		return directory;
+	};
+	const home = newHome();
+	/** Runs the real CLI against this fake; resolves with its JSON output (or error line) and exit code. */
+	const runFrom = async (directory: string, ...args: string[]) => {
+		const env = { ...process.env, FLOWITH_HOME: directory, FLOWITH_AGENT: "claude-code" } as Record<string, string | undefined>;
+		delete env.FLOWITH_URL;
+		delete env.FLOWITH_CANVAS;
+		const proc = Bun.spawn(["bun", join(import.meta.dir, "..", "index.ts"), ...args, "--json", "--quiet"], { env, stdout: "pipe", stderr: "pipe" });
+		const [stdout, code] = [await new Response(proc.stdout).text(), await proc.exited];
+		let json: any;
+		try { json = JSON.parse(stdout.trim().split("\n").at(-1) ?? ""); } catch { json = stdout; }
+		return { json, code };
+	};
+	const run = (...args: string[]) => runFrom(home, ...args);
+	const writes = () => requests.filter((r) => r.method !== "GET" && !r.path.startsWith("/auth/v1/"));
+	return { origin, home, newHome, rows, requests, writes, usage, opts, run, runFrom, stop: () => (server.stop(true), hangUp.stop(true)) };
+}
+
+/** A token the CLI accepts as unexpired (it only reads the claims). */
+function jwt() {
+	const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
+	return `${b64({ alg: "HS256" })}.${b64({ sub: USER, exp: Math.floor(Date.now() / 1000) + 3600, session_id: "s-1", email: "t@test" })}.sig`;
+}

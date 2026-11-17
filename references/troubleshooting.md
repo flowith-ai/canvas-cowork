@@ -1,56 +1,47 @@
 # Troubleshooting
 
-## Error Format
-
-Errors are structured JSON on stdout (exit code 1):
-```json
-{"type":"error","actionId":null,"code":"NOT_LOGGED_IN","message":"...","data":{...}}
-```
-`data` carries the backend body when there is one (e.g. the failed node for `gen`).
-
-## Error Codes
+Errors print one JSON line `{"error": CODE, "message": …}` and exit 1.
 
 | Code | Meaning | What to do |
 |---|---|---|
-| `NO_CREDITS` | Account has no remaining credits (HTTP 402 / node type 22) | **Stop immediately. Do NOT retry or switch models.** Send the pricing link: https://flowith.io/pricing |
-| `MODEL_LOCKED` | Model needs a paid plan (node type 25 / 402 `is_free_user`) | Tell the user; pick a model their plan allows |
-| `NOT_LOGGED_IN` | Token expired or revoked and no refresh token | Re-run `login` (log in at the opened browser), then retry |
-| `INVALID_PARAM` | A flag value isn't valid for the model | The message lists the allowed values; fix and retry |
-| `INVALID_MODEL` | Unknown model id / wrong mode | `list-models <mode>`; `data.available` lists ids |
-| `INVALID_INPUT` / `CONTENT_POLICY` | Backend rejected reference media or settings (HTTP 500 with `error_type:"content_policy"`) | Use real photos/clips (tiny synthetic images are rejected as Seedance references), audio at least as long as the clip, frames **or** refs not both |
-| `GENERATION_FAILED` | The model failed; credits are refunded (`data.refund_amount`) | Simplify the prompt / change model; `clean-failed` to tidy |
-| `RATE_LIMITED` | HTTP 429 | Wait `retryAfterSeconds` (in `data`), retry |
-| `TIMEOUT` | `gen --wait` ran out | `read-db <nodeId>` later; the job keeps running server-side |
-| `NO_CANVAS` | No active canvas for a node command | `create-canvas`, `switch <id>`, `--canvas <id>` or env `FLOWITH_CANVAS=<id>` |
-| `BROWSER_NOT_CONNECTED` | Canvas-mode command, tab didn't respond | Ensure the Flowith tab is fully loaded, or use the direct command instead |
-| `LOCKED` | Frontend rate limit (30 actions / 10 s) | Wait 2 s, retry |
-| `INVALID_SESSION` | Session file corrupted | Delete `~/.flowith/bot-session.json`, re-run `login` |
-| `Submit handler not available` | `submit` without a canvas page open | `create-canvas` or `switch <id>` first, or use `gen` |
+| `NOT_LOGGED_IN` | No session, it expired and couldn't renew, or it was ended (Disconnect in Flowith, `logout`) | `cw login` (the user types the code and clicks Allow in the browser) |
+| `LOGIN_TIMEOUT` | Nobody allowed the connection within 2.5 minutes | Run `login` again; the user opens the link, types the printed code and clicks Allow |
+| `CANVAS_NOT_OPEN` | A "run by the open canvas" command found no window with that canvas | `cw open`, in the browser where `login` was allowed (each browser that allowed the agent holds its key); then run it again |
+| `CANVAS_ERROR` | The canvas refused the operation (wrong card kind, still generating…) | Read the message; `cw look` |
+| `LOGIN_DENIED` | The user clicked Deny | Ask before trying again |
+| `NO_CANVAS` | No canvas chosen | `cw use <ref|title|url>` or `cw new "title"` (generation commands create one when none is active) |
+| `NOT_FOUND` / `AMBIGUOUS` | A card or canvas ref didn't match exactly one | `cw look` / `cw canvases` and use the 8-hex ref |
+| `INVALID_PARAM` | A value the model doesn't offer (ratio, size, duration, frames + refs…) | The message lists what is allowed; `cw models <id>` |
+| `INVALID_MODEL` | Not a model of that kind | `cw models image|video|text|audio` |
+| `NO_CREDITS` | Not enough credits, or the plan's credits don't cover that model tier | Tell the user (https://flowith.io/pricing); don't switch models silently |
+| `MODEL_LOCKED` | The model needs a higher plan | Tell the user; offer a standard model |
+| `RATE_LIMITED` | Too many requests | Wait a minute; batch prompts in one call |
+| `GENERATION_FAILED` / `CONTENT_POLICY` / `INVALID_INPUT` | The provider refused or failed (credits are refunded) | The card's `error` says why (`cw read <ref>`). Transient ("Workflow delivery failed", timeouts): `cw retry <ref>`. Refusals: rephrase, another reference, or another model |
+| `TIMEOUT` | The command stopped waiting | The work continues on the server: `cw wait <ref>` |
+| `SENT_UNKNOWN` (a card's `code`) | The request went out but no answer came back (network, gateway timeout): Flowith may have taken it | `cw wait <ref>`: it finishes if it was taken. `cw retry <ref>` sends it again only once the canvas's charges show it never arrived (it says when) |
+| `BUSY` | The card is still generating (or its last send may still be on its way) | `cw wait <ref>`; don't send it again |
+| `DRY_RUN` | Internal guard: a dry run was about to change something and stopped | Report it: a preview should never reach this |
 
-## Session & tokens
+Other things worth knowing:
 
-- `status` shows `tokenExpiresAt`, `tokenExpired`, `canRefresh`.
-- `canRefresh: true` means the frontend handed over a refresh token; direct
-  commands refresh automatically when < 5 min remain. If a refresh is rejected
-  (the browser tab rotated the token first) the CLI drops it and falls back to
-  the browser handshake — just run `login`.
-- `login` on macOS with Safari as the default browser: the handshake page is
-  opened in Chrome/Arc/Edge/Brave instead (Safari blocks `ws://127.0.0.1`).
-  If that browser isn't logged in to Flowith, log in there once.
-
-## Generation notes
-
-- Direct `gen` writes the question + response nodes itself, then the backend
-  fills the result in. A tab open on that canvas shows them live via realtime.
-- Draft mode (`--draft`, Seedance 2.5) always renders 480p.
-- Video resolution is only honoured when the model lists `supportedResolutions`.
-- `read-db <nodeId>` on a video node: `data.status`, `data.videoId` (URL),
-  `data.resolution`, `data.refund_amount` on failure.
-
-## Canvas mode
-
-- `--wait` blocks the CLI; you cannot change the model mid-generation. Submit
-  without `--wait`, then `read-db`.
-- Batches: `batches` lists runs, `batches <id>` per-prompt status; items with a
-  `questionNodeId` landed — only resubmit the others.
-- Commands auto-retry up to 2 times on WebSocket failure, re-opening the browser.
+- **A card shows "…" for a long time**: video providers queue; Muse Video can take 5–10 minutes. `cw wait`.
+- **`shots`** downloads each card's preview when the canvas made one (clips: a frame), else the original
+  picture; `--full` always downloads originals.
+- **A cut-out looks like it still has a background**: transparent PNGs keep their colours under zero
+  alpha and some viewers draw them; on the canvas it is transparent.
+- **The user doesn't see new cards**: they appear live in an open canvas tab of the same account; ask
+  the user to open `cw open` (or the `url` in any result). Cards placed far away are brought into view.
+- **Several machines / accounts**: `FLOWITH_HOME=/path` keeps a separate session. `login --site <host>`
+  (e.g. `next-gen.flowith.io`) signs in to another Flowith site and every later command follows that
+  session (default https://beta.flowith.io while 3.0 is in beta; `FLOWITH_URL` does the same per shell).
+- Session and caches live in `~/.flowith/` (`canvas-session.json`, mode 600, holds the login token —
+  never print or share it). The CLI gets a sign-in of its own (it never shares the browser's), so it can
+  renew itself without signing the browser out. `logout` ends that sign-in and forgets it here;
+  on sites with the Disconnect update, the page can end it too. New commands check Auth with a
+  two-minute cache; running commands do not periodically check. Existing access tokens may still
+  work until expiry (up to one hour), and accepted generations are not cancelled. Beta includes the
+  Disconnect update from hypergpt-frontend #753. If you logged in before that update, use CLI `logout`
+  and `login` again so the page can track and end the independent sign-in.
+- **Retry says the card changed**: another client edited, deleted or claimed it after it was read.
+  Run `look` again. Updated CLIs coordinate retries through a conditional database claim; the page's
+  Retry button and older CLIs do not, so avoid retrying the same card from both at once.

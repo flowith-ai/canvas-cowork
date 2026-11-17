@@ -3,6 +3,7 @@
  * small canvas and catalogue, records every request, and answers generation calls as each test says.
  */
 import { copyFileSync, mkdtempSync, writeFileSync } from "fs";
+import { isDeepStrictEqual } from "node:util";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -126,6 +127,15 @@ export interface FakeOptions {
 	readOnly?: boolean;
 	/** Only these cards may not be changed (row-level security on some rows). */
 	readOnlyIds?: string[];
+	/** Pause a read of cards after its answer is made (it answers with the cards as they were), or a PATCH before it applies. */
+	afterNodeRead?: () => Promise<void>;
+	beforeNodePatch?: () => Promise<void>;
+	/** Reads of cards fail with this status. */
+	nodeReadStatus?: number;
+	/** PATCHes of cards are refused with this status, changing nothing. */
+	patchStatus?: number;
+	/** A PATCH of cards is made, but its answer never comes back (504). */
+	dropPatchReply?: boolean;
 }
 
 /** A filter the stand-in doesn't know fails the test instead of passing every row. */
@@ -137,6 +147,11 @@ function unsupported(key: string, cond: string): never {
 function passes(row: Record<string, any>, params: URLSearchParams) {
 	for (const [key, cond] of params) {
 		if (["select", "order", "limit"].includes(key)) continue;
+		// The whole data compared as jsonb (key order doesn't matter).
+		if (key === "data") {
+			if (cond === "is.null" ? row.data !== null && row.data !== undefined : !cond.startsWith("eq.") ? unsupported(key, cond) : !isDeepStrictEqual(row.data, JSON.parse(cond.slice(3)))) return false;
+			continue;
+		}
 		const json = /^data->>(.+)$/.exec(key);
 		const raw = json ? row.data?.[json[1]!] : row[key];
 		const value = raw === undefined || raw === null ? null : typeof raw === "object" ? JSON.stringify(raw) : String(raw);
@@ -198,7 +213,12 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 				return Response.json([{ id: CONV, title: "Test canvas", updated_at: at, metadata: {}, team_id: opts.team ? "33333333-3333-4333-8333-333333333333" : null }]);
 			}
 			if (p.startsWith("/rest/v1/flow_node")) {
-				if (req.method === "GET") return Response.json(structuredClone(rows.filter((r) => passes(r, url.searchParams))));
+				if (req.method === "GET") {
+					if (opts.nodeReadStatus) return new Response("read unavailable", { status: opts.nodeReadStatus });
+					const snapshot = Response.json(structuredClone(rows.filter((r) => passes(r, url.searchParams))));
+					await opts.afterNodeRead?.();
+					return snapshot;
+				}
 				// Placed cards are kept (and read back) like the real table; a PATCH changes the card it names.
 				if (req.method === "POST") {
 					const placed = (Array.isArray(body) ? body : [body]).map((b: any) => ({ ...row(b.id, b.type ?? "2", {}), ...b, created_at: b.created_at ?? new Date().toISOString() }));
@@ -206,11 +226,13 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 					return Response.json(placed);
 				}
 				// Only the rows every filter passes are changed, in one step (as PostgreSQL's UPDATE … WHERE).
+				await opts.beforeNodePatch?.();
+				if (opts.patchStatus) return Response.json({ message: "patch refused" }, { status: opts.patchStatus });
 				if (opts.readOnly) return Response.json([]);
 				if (opts.claimAnswer === "drop-unmade" && url.searchParams.has("data->>agentAttempt")) return new Response("upstream timed out", { status: 504 });
 				const hit = rows.filter((r) => passes(r, url.searchParams) && !opts.readOnlyIds?.includes(r.id));
 				for (const r of hit) Object.assign(r, structuredClone(body));
-				if (opts.claimAnswer === "drop" && url.searchParams.has("data->>agentAttempt")) return new Response("upstream timed out", { status: 504 });
+				if ((opts.claimAnswer === "drop" && url.searchParams.has("data->>agentAttempt")) || opts.dropPatchReply) return new Response("upstream timed out", { status: 504 });
 				return Response.json(hit);
 			}
 			if (p === "/user/model-usage/group-records") return Response.json({ success: true, data: usage });
@@ -262,6 +284,7 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 	};
 	/** Runs the real CLI against this fake; resolves with its JSON output (or error line) and exit code. */
 	const run = (...args: string[]) => runWith({}, ...args);
+	const runFrom = (directory: string, ...args: string[]) => runWith({ home: directory }, ...args);
 	const runWith = async (at: { home?: string; env?: Record<string, string> }, ...args: string[]) => {
 		const env = { ...process.env, FLOWITH_HOME: at.home ?? home, FLOWITH_AGENT: "claude-code", ...at.env } as Record<string, string | undefined>;
 		delete env.FLOWITH_URL;
@@ -273,7 +296,7 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 		return { json, code };
 	};
 	const writes = () => requests.filter((r) => r.method !== "GET" && !r.path.startsWith("/auth/v1/"));
-	return { origin, home, requests, writes, usage, opts, rows, run, runWith, newHome, hold, stop: () => (server.stop(true), hangUp.stop(true)) };
+	return { origin, home, requests, writes, usage, opts, rows, run, runWith, runFrom, newHome, hold, stop: () => (server.stop(true), hangUp.stop(true)) };
 }
 
 /** A token the CLI accepts as unexpired (it only reads the claims). */

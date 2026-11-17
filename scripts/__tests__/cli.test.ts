@@ -3,7 +3,7 @@
  * twice, a lost answer leaves the card alone, charges are tied to their own attempts, and logout ends the sign-in.
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { CONV, fakeFlowith, ids, precharge } from "./fake-flowith";
 
@@ -68,6 +68,111 @@ describe("--dry-run sends nothing that changes the canvas", () => {
 });
 
 describe("retry never sends a card twice", () => {
+	const latch = () => {
+		let release!: () => void;
+		const promise = new Promise<void>((resolve) => { release = resolve; });
+		return { promise, release };
+	};
+
+	test("a delayed failed-card response cannot resubmit after another process releases its lock", async () => {
+		const captured = latch(), resume = latch();
+		let first = true;
+		const f = fake({ precharge: precharge(5), afterNodeRead: async () => {
+			if (first) { first = false; captured.release(); await resume.promise; }
+		} });
+		const slow = f.run("retry", ref(ids.failed), "--no-wait");
+		await captured.promise;
+		try { expect((await f.run("retry", ref(ids.failed), "--no-wait")).code).toBe(0); }
+		finally { resume.release(); }
+		expect((await slow).code).toBe(1);
+		expect(f.writes().filter((w) => w.path.startsWith("/image_gen/async"))).toHaveLength(1);
+		expect(f.usage).toHaveLength(1);
+	});
+
+	test("two machines that both read failed compete for one database claim", async () => {
+		const both = latch();
+		let pending = 0;
+		const f = fake({ precharge: precharge(5), beforeNodePatch: async () => {
+			if (++pending === 2) both.release();
+			await both.promise;
+		} });
+		const outcomes = await Promise.all([
+			f.run("retry", ref(ids.failed), "--no-wait"),
+			f.runFrom(f.newHome(), "retry", ref(ids.failed), "--no-wait"),
+		]);
+		expect(outcomes.map((r) => r.code).sort()).toEqual([0, 1]);
+		expect(outcomes.find((r) => r.code === 1)?.json.error).toBe("BUSY");
+		expect(f.writes().filter((w) => w.path.startsWith("/image_gen/async"))).toHaveLength(1);
+		expect(f.usage).toHaveLength(1);
+	});
+
+	test("an edit after validation is preserved and is not submitted", async () => {
+		const f = fake();
+		f.opts.beforeNodePatch = async () => {
+			f.rows.find((r) => r.id === ids.failed)!.data.title = "Changed meanwhile";
+		};
+		const result = await f.run("retry", ref(ids.failed), "--no-wait");
+		expect(result.json.error).toBe("BUSY");
+		expect(f.rows.find((r) => r.id === ids.failed)!.data.title).toBe("Changed meanwhile");
+		expect(f.writes().filter((w) => w.path.startsWith("/image_gen/async"))).toHaveLength(0);
+	});
+
+	test("a card deleted after validation cannot be claimed", async () => {
+		const f = fake();
+		f.opts.beforeNodePatch = async () => { Object.assign(f.rows.find((r) => r.id === ids.failed)!, { is_delete: true }); };
+		expect((await f.run("retry", ref(ids.failed), "--no-wait")).json.error).toBe("NOT_FOUND");
+		expect(f.writes().filter((w) => w.path.startsWith("/image_gen/async"))).toHaveLength(0);
+	});
+
+	test("a lost claim response is recovered only by reading its unique marker", async () => {
+		const f = fake({ dropPatchReply: true, precharge: precharge(5) });
+		expect((await f.run("retry", ref(ids.failed), "--no-wait")).code).toBe(0);
+		expect(f.writes().filter((w) => w.path.startsWith("/image_gen/async"))).toHaveLength(1);
+		expect(f.usage).toHaveLength(1);
+	});
+
+	test("an unreadable lost claim sends nothing and leaves a recovery record", async () => {
+		const f = fake({ dropPatchReply: true });
+		f.opts.beforeNodePatch = async () => { f.opts.nodeReadStatus = 503; };
+		expect((await f.run("retry", ref(ids.failed), "--no-wait")).json.error).toBe("SERVER_ERROR");
+		expect(f.writes().filter((w) => w.path.startsWith("/image_gen/async"))).toHaveLength(0);
+		const file = join(f.home, "sent", `${ids.failed}.json`);
+		const sent = JSON.parse(readFileSync(file, "utf8"));
+		expect(sent.answer).toBe("claiming");
+		writeFileSync(file, JSON.stringify({ ...sent, from: sent.from - 3_600_000, to: sent.to - 3_600_000 }));
+		delete f.opts.beforeNodePatch;
+		delete f.opts.nodeReadStatus;
+		delete f.opts.dropPatchReply;
+		expect((await f.run("retry", ref(ids.failed), "--no-wait")).code).toBe(0);
+		expect(f.writes().filter((w) => w.path.startsWith("/image_gen/async"))).toHaveLength(1);
+	});
+
+	test("a batch is revalidated under the lock: a card that changed is left out, the rest go, no lock is left", async () => {
+		const f = fake();
+		const second = structuredClone(f.rows.find((r) => r.id === ids.failed)!);
+		second.id = "b3000000-0000-4000-8000-000000000004";
+		f.rows.push(second);
+		let first = true;
+		f.opts.afterNodeRead = async () => {
+			if (first) { first = false; second.data.status = "running"; }
+		};
+		const r = await f.run("retry", ref(ids.failed), ref(second.id), "--no-wait");
+		expect(r.code).toBe(0);
+		expect(f.writes().filter((w) => w.path.startsWith("/image_gen/async")).map((w) => (w.body as any).nodeId)).toEqual([ids.failed]);
+		expect(JSON.stringify(r.json.notRetried)).toContain(ref(second.id));
+		expect(readdirSync(join(f.home, "sent")).filter((name) => name.endsWith(".retry"))).toEqual([]);
+	});
+
+	test("a refused patch releases every lock in the batch", async () => {
+		const f = fake({ patchStatus: 403 });
+		const second = structuredClone(f.rows.find((r) => r.id === ids.failed)!);
+		second.id = "b3000000-0000-4000-8000-000000000004";
+		f.rows.push(second);
+		expect((await f.run("retry", ref(ids.failed), ref(second.id), "--no-wait")).json.error).toBe("FORBIDDEN");
+		expect(readdirSync(join(f.home, "sent")).filter((name) => name.endsWith(".retry"))).toEqual([]);
+		expect(f.writes().filter((w) => w.path.startsWith("/image_gen/async"))).toHaveLength(0);
+	});
+
 	test("a card still generating is refused", async () => {
 		const f = fake();
 		const r = await f.run("retry", ref(ids.running), "--no-wait");
@@ -136,10 +241,23 @@ describe("retry decides on the card as it is once it holds the card (Codex's slo
 
 describe("retry's claim, when it can't be made", () => {
 	const submits = (f: ReturnType<typeof fake>) => f.writes().filter((w) => w.path.startsWith("/image_gen"));
+	/** The claim is made but its answer is lost, and reading the card back fails too: only the record can tell later. */
+	const loseClaim = (f: ReturnType<typeof fake>) => {
+		f.opts.claimAnswer = "drop";
+		f.opts.beforeNodePatch = async () => {
+			f.opts.nodeReadStatus = 503;
+		};
+	};
+	const restore = (f: ReturnType<typeof fake>) => {
+		f.opts.claimAnswer = undefined;
+		f.opts.beforeNodePatch = undefined;
+		f.opts.nodeReadStatus = undefined;
+	};
 	const sentFile = (f: ReturnType<typeof fake>, id: string) => join(f.home, "sent", `${id}.json`);
 
 	test("a claim whose answer is lost: nothing was sent, and the next retry sends it at once (other charges meanwhile don't hold it)", async () => {
-		const f = fake({ claimAnswer: "drop", finish: false, precharge: precharge(5) });
+		const f = fake({ finish: false, precharge: precharge(5) });
+		loseClaim(f);
 		const r = await f.run("retry", ref(ids.failed), "--no-wait");
 		expect(r.json.error).toBe("SERVER_ERROR");
 		expect(r.json.message).toContain("nothing was sent");
@@ -150,15 +268,16 @@ describe("retry's claim, when it can't be made", () => {
 		expect(sent).toMatchObject({ answer: "claiming", attempt: card.data.agentAttempt });
 		// The same model charged on this canvas meanwhile (another card): not taken for this card's send.
 		f.usage.unshift(precharge(5)("z-image-turbo"));
-		f.opts.claimAnswer = undefined;
+		restore(f);
 		const again = await f.run("retry", ref(ids.failed), "--no-wait");
 		expect(again.code).toBe(0);
 		expect(submits(f)).toHaveLength(1);
 	});
 	test("a claim that took on another machine (its mark, not this one's) isn't sent from here", async () => {
-		const f = fake({ claimAnswer: "drop", finish: false });
+		const f = fake({ finish: false });
+		loseClaim(f);
 		await f.run("retry", ref(ids.failed), "--no-wait");
-		f.opts.claimAnswer = undefined;
+		restore(f);
 		f.rows.find((x) => x.id === ids.failed)!.data.agentAttempt = "another-machine";
 		const r = await f.run("retry", ref(ids.failed), "--no-wait");
 		expect(r.json.error).toBe("BUSY");
@@ -192,8 +311,10 @@ describe("retry's claim, when it can't be made", () => {
 		expect(submits(f)).toHaveLength(2);
 	});
 	test("two claims in a row without an answer (the first made, the second not): the card is still sent, once", async () => {
-		const f = fake({ claimAnswer: "drop", finish: false });
+		const f = fake({ finish: false });
+		loseClaim(f);
 		await f.run("retry", ref(ids.failed), "--no-wait");
+		restore(f);
 		f.opts.claimAnswer = "drop-unmade";
 		expect((await f.run("retry", ref(ids.failed), "--no-wait")).json.error).toBe("SERVER_ERROR");
 		f.opts.claimAnswer = undefined;
@@ -202,9 +323,10 @@ describe("retry's claim, when it can't be made", () => {
 		expect(submits(f)).toHaveLength(1);
 	});
 	test("a claim that took, then the card was run from the page: not sent again", async () => {
-		const f = fake({ claimAnswer: "drop", finish: false, precharge: precharge(5) });
+		const f = fake({ finish: false, precharge: precharge(5) });
+		loseClaim(f);
 		await f.run("retry", ref(ids.failed), "--no-wait");
-		f.opts.claimAnswer = undefined;
+		restore(f);
 		// The page's retry merges into the card's data (the mark stays) and is charged.
 		Object.assign(f.rows.find((x) => x.id === ids.failed)!.data, { expired: false, error: null, refund_amount: null, value: "" });
 		f.usage.unshift(precharge(5)("z-image-turbo"));
@@ -213,9 +335,10 @@ describe("retry's claim, when it can't be made", () => {
 		expect(submits(f)).toHaveLength(0);
 	});
 	test("a claim that took, then only the page's view changed the card: sent once it clearly never ran", async () => {
-		const f = fake({ claimAnswer: "drop", finish: false });
+		const f = fake({ finish: false });
+		loseClaim(f);
 		await f.run("retry", ref(ids.failed), "--no-wait");
-		f.opts.claimAnswer = undefined;
+		restore(f);
 		Object.assign(f.rows.find((x) => x.id === ids.failed)!.data, { title: "Renamed in the page" });
 		expect((await f.run("retry", ref(ids.failed), "--no-wait")).json.error).toBe("BUSY");
 		const file = sentFile(f, ids.failed);
@@ -225,8 +348,10 @@ describe("retry's claim, when it can't be made", () => {
 		expect(submits(f)).toHaveLength(1);
 	});
 	test("`wait` on a card claimed but never sent says to retry it, without waiting", async () => {
-		const f = fake({ claimAnswer: "drop", finish: false });
+		const f = fake({ finish: false });
+		loseClaim(f);
 		await f.run("retry", ref(ids.failed), "--no-wait");
+		restore(f);
 		const started = Date.now();
 		const r = await f.run("wait", ref(ids.failed), "--timeout", "60");
 		expect(Date.now() - started).toBeLessThan(10_000);
@@ -245,6 +370,15 @@ describe("retry's claim, when it can't be made", () => {
 		expect((await f.run("retry", ref(ids.failed), "--no-wait")).code).toBe(0);
 		read.release();
 		expect((await slow).json.error).toBe("BUSY");
+		expect(submits(f)).toHaveLength(1);
+	});
+	test("a card too large to compare whole in a URL is still claimed (by its status and retry mark)", async () => {
+		const f = fake({ finish: false });
+		Object.assign(f.rows.find((x) => x.id === ids.failed)!.data, { notes: "字".repeat(6000) });
+		expect((await f.run("retry", ref(ids.failed), "--no-wait")).code).toBe(0);
+		const patchUrl = f.writes().find((w) => w.method === "PATCH")!.path;
+		expect(patchUrl).not.toContain("&data=");
+		expect(patchUrl).toContain("agentAttempt");
 		expect(submits(f)).toHaveLength(1);
 	});
 	test("a canvas the user can't edit says so (not that another retry ran it)", async () => {

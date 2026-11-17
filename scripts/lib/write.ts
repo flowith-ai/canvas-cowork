@@ -90,6 +90,19 @@ const markOf = (data: Record<string, unknown> | undefined, key: string) => {
 };
 
 /** done; or not, because the card changed, is gone, isn't the user's to edit, or couldn't be read back to tell. */
+/** Longest whole-data condition sent (URL-encoded). */
+const WHOLE_LIMIT = 12_000;
+
+/** A PostgREST condition that the column holds exactly this data, or undefined when it would be too long. */
+function wholeData(raw: unknown): string | undefined {
+	const cond = raw === null || raw === undefined ? "is.null" : `eq.${JSON.stringify(raw)}`;
+	return encodeURIComponent(cond).length <= WHOLE_LIMIT ? cond : undefined;
+}
+
+/** Data with object keys in order, to compare what jsonb holds. */
+const sorted = (v: unknown): unknown =>
+	Array.isArray(v) ? v.map(sorted) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sorted((v as Record<string, unknown>)[k])])) : v;
+
 export type PatchOutcome = "done" | "changed" | "gone" | "forbidden" | "unchecked";
 
 /**
@@ -100,9 +113,9 @@ export type PatchOutcome = "done" | "changed" | "gone" | "forbidden" | "unchecke
  */
 export async function tryPatch(
 	api: Api,
-	card: Pick<Card, "id" | "createdAt"> & { type?: string; data?: Record<string, unknown>; row?: { data?: unknown } },
+	card: Pick<Card, "id" | "createdAt"> & { type?: string; data?: Record<string, unknown>; row?: { data?: unknown; conv_id?: string } },
 	fields: Record<string, unknown>,
-	opts: { asRead?: Record<string, unknown>; type?: boolean } = {},
+	opts: { asRead?: Record<string, unknown>; type?: boolean; whole?: boolean } = {},
 ): Promise<PatchOutcome> {
 	const q = new URLSearchParams({ id: `eq.${card.id}`, created_at: `eq.${card.createdAt}`, is_delete: "not.is.true", select: "id" });
 	const read = opts.asRead ?? ("data" in fields ? card.data : undefined);
@@ -114,6 +127,12 @@ export async function tryPatch(
 		q.append(`data->>${key}`, v === null ? "is.null" : `eq.${v}`);
 	}
 	if (opts.type && card.type) q.set("type", `eq.${card.type}`);
+	// With `whole`, all of the card's data must be as read (jsonb equality, key order aside): an edit made meanwhile is
+	// never written over. Only while the condition stays short enough for a URL (Supabase refuses ~20 KB); past that,
+	// status and retry mark alone.
+	const whole = opts.whole && card.row ? wholeData(card.row.data) : undefined;
+	if (whole) q.set("data", whole);
+	if (opts.whole && card.row?.conv_id) q.set("conv_id", `eq.${card.row.conv_id}`);
 	const rows = await rest<Array<{ id: string }>>(api, `flow_node?${q}`, { method: "PATCH", json: fields, prefer: "return=representation" });
 	if (rows?.length) return "done";
 	// Nothing was changed: why, from the card as it is now.
@@ -124,6 +143,7 @@ export async function tryPatch(
 		return "unchecked";
 	}
 	if (!now) return "gone";
+	if (whole && JSON.stringify(sorted(now.row.data)) !== JSON.stringify(sorted(card.row!.data))) return "changed";
 	if (read && stringRow && typeof now.row.data !== "string") return "changed";
 	if (read && (markOf(now.data, "status") !== markOf(read, "status") || markOf(now.data, "agentAttempt") !== markOf(read, "agentAttempt"))) return "changed";
 	if (opts.type && card.type && now.type !== card.type) return "changed";
@@ -145,10 +165,11 @@ export async function patch(
 }
 
 /**
- * Claims a card for a retry: changed only if its type, status and retry mark are still as read (the claim writes a new
- * mark). When two clients (other machines) claim the same card at once, the database lets only one change it.
+ * Claims a card for a retry: changed only if it is still as read, its type and all of its data (the claim writes a new
+ * retry mark). When two clients (other machines) claim the same card at once, the database lets only one change it,
+ * and an edit made meanwhile (in the page, say) is never written over.
  */
-export const claim = (api: Api, card: Card, fields: Record<string, unknown>) => tryPatch(api, card, fields, { type: true });
+export const claim = (api: Api, card: Card, fields: Record<string, unknown>) => tryPatch(api, card, fields, { type: true, whole: true });
 
 /** A card still generating gets its result written by the worker; changing its data now could undo that. */
 export function settled(card: Card, what: string) {

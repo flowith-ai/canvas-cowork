@@ -1012,10 +1012,19 @@ async function cmdRetry(a: Args) {
 				if (e instanceof CliError && (e.status === undefined || e.status < 500)) {
 					putBack();
 					stopped = e;
+					break;
+				}
+				// No answer: read the card back. Carrying this claim's mark, it took (nothing sent yet): go on. Otherwise it
+				// hasn't taken (yet); the claiming record stays, so a late one is still sent once and never twice.
+				const back = await fetchRowsById(ctx.api, [card.id]).then(cardsFrom).catch(() => undefined);
+				if (back?.[0]?.data.agentAttempt === data.agentAttempt) outcome = "done";
+				else if (back) {
+					notSent.push(new CliError(`No answer came back while claiming ${card.ref}, and the claim hasn't taken; nothing was sent. \`retry ${card.ref}\` again.`, "SERVER_ERROR"));
+					continue;
 				} else {
 					stopped = new CliError(`No answer came back while claiming ${card.ref} (${e instanceof Error ? e.message : String(e)}); nothing was sent. \`retry ${card.ref}\` again: it carries on from here.`, "SERVER_ERROR");
+					break;
 				}
-				break;
 			}
 			if (outcome !== "done") {
 				putBack();

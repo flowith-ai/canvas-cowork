@@ -35,6 +35,9 @@ Other things worth knowing:
 - **Several machines / accounts**: `FLOWITH_HOME=/path` keeps a separate session. `login --site <host>`
   (e.g. `next-gen.flowith.io`) signs in to another Flowith site and every later command follows that
   session (default https://beta.flowith.io while 3.0 is in beta; `FLOWITH_URL` does the same per shell).
+- **Retry says a card changed**: another `retry` (another machine), an edit or its result came in after it
+  was read. Run `look` again. Retries from this CLI are claimed in Flowith; a retry clicked on the page
+  or from an older canvas-cowork isn't, so don't retry one card from both at once.
 - Session and caches live in `~/.flowith/` (`canvas-session.json`, mode 600, holds the login token —
   never print or share it). The CLI gets a sign-in of its own (it never shares the browser's), so it can
   renew itself without signing the browser out. `logout` ends that sign-in and forgets it here;

@@ -96,10 +96,27 @@ What ending it does, and what it doesn't:
 - **Not at once**: the access token already issued (it lasts up to 1 hour) is still accepted by
   Flowith's data and generation APIs until it expires. Anyone holding a copy of it could use it until
   then; nothing else of the login (no renewal) is left.
+- Ending a sign-in doesn't cancel a generation Flowith already took.
 - On beta, the page's Disconnect only drops the canvas operation key until the frontend that ends the
-  sign-in reaches it (it is on the next-gen preview); `logout` ends it on every site.
+  sign-in reaches it (hypergpt-frontend #753; it is on the next-gen preview); `logout` ends it on every
+  site.
 
 The login link and code are for you alone: never forward them.
+
+## Retrying safely
+
+`retry` runs failed cards again in place, and never sends one twice:
+
+- It checks each card again once it holds it on this machine, then claims it in Flowith with one
+  conditional database update: only if the card is still exactly as read (its type and data). Of two
+  `retry` commands on one card, even on different machines, only one claims it; the other sends nothing
+  and says `BUSY`. A card that changed or was removed is left out; the rest of a batch still goes.
+- If the claim's answer is lost, the card is read back: carrying this command's claim, it is sent;
+  otherwise nothing is sent, and the next `retry` tells from the card whether the claim took.
+- This holds between copies of this CLI. A retry clicked on the canvas page, or from an older
+  canvas-cowork, doesn't take part: don't retry a card from the page and an agent at the same moment.
+- A send whose answer was lost (`SENT_UNKNOWN`) is sent again only once the canvas's charges show it
+  never arrived.
 
 ## Going live on flowith.io
 

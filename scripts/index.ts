@@ -988,8 +988,12 @@ async function cmdRetry(a: Args) {
 				errorMessage: _m, creditFailureReason: _cr, creditFailureStage: _cs, creditFailureCode: _cc, httpCode: _h, attemptedModel: _a,
 				...rest
 			} = card.data;
-			// A fresh retry mark: a retry elsewhere that read the card before this one can no longer claim it.
-			const data = { ...rest, value: "", status: "running", agentAttempt: crypto.randomUUID(), ...(req.kind === "video" ? { videoId: null } : {}) };
+			// A fresh retry mark: a retry elsewhere that read the card before this one can no longer claim it. With when it
+			// was made (server time), so the canvas page tells this live run from a stale card and won't retry it on top.
+			const data = {
+				...rest, value: "", status: "running", agentAttempt: crypto.randomUUID(), agentAttemptAt: new Date(serverNow()).toISOString(),
+				...(req.kind === "video" ? { videoId: null } : {}),
+			};
 			// A refusal may have turned it into the canvas's credits or upgrade card: back to the card it was.
 			const type = card.type === "22" || card.type === "25" ? (req.kind === "video" ? "13" : "2") : card.type;
 			// Written down before the claim, with its mark: if the claim's answer is lost, the next retry sees whether it

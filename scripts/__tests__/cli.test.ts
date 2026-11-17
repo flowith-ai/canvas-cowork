@@ -185,6 +185,12 @@ describe("retry never sends a card twice", () => {
 		expect(r.json.error).toBe("INVALID_PARAM");
 		expect(f.writes()).toEqual([]);
 	});
+	test("a claim records when it was made, so the canvas page sees the run as live", async () => {
+		const f = fake({ finish: false });
+		await f.run("retry", ref(ids.failed), "--no-wait");
+		const at = Date.parse(String(f.rows.find((r) => r.id === ids.failed)!.data.agentAttemptAt));
+		expect(Math.abs(Date.now() - at)).toBeLessThan(60_000);
+	});
 	test("a failed card runs again", async () => {
 		const f = fake();
 		await f.run("retry", ref(ids.failed), "--no-wait");

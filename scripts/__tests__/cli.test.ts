@@ -87,6 +87,64 @@ describe("retry never sends a card twice", () => {
 	});
 });
 
+describe("retry decides on the card as it is once it holds the card (Codex's slow-read case)", () => {
+	const submits = (f: ReturnType<typeof fake>) => f.writes().filter((w) => w.path.startsWith("/image_gen"));
+	const canvasRead = (method: string, url: URL) => method === "GET" && url.pathname === "/rest/v1/flow_node" && url.searchParams.has("conv_id");
+	const cardRead = (method: string, url: URL) => method === "GET" && url.pathname === "/rest/v1/flow_node" && !!url.searchParams.get("id")?.startsWith("in.(");
+
+	test("a retry whose read was slow finds the card already retried and sends nothing", async () => {
+		const f = fake({ precharge: precharge(5), finish: false });
+		// The slow command's read of the canvas (the card failed) is held back while another retry runs it.
+		const read = f.hold(canvasRead);
+		const slow = f.run("retry", ref(ids.failed), "--no-wait");
+		await read.arrived;
+		const fast = await f.run("retry", ref(ids.failed), "--no-wait");
+		expect(fast.code).toBe(0);
+		read.release();
+		const late = await slow;
+		expect(late.json.error).toBe("BUSY");
+		expect(submits(f)).toHaveLength(1);
+		expect(f.usage).toHaveLength(1);
+	});
+	test("on another machine (no shared lock), the card is claimed in Flowith: only one retry is taken", async () => {
+		const f = fake({ precharge: precharge(5), finish: false });
+		const other = f.newHome();
+		// The other machine re-reads the card once it holds its own lock; that answer (still failed) arrives late.
+		const read = f.hold(cardRead);
+		const slow = f.runWith({ home: other }, "retry", ref(ids.failed), "--no-wait");
+		await read.arrived;
+		const fast = await f.run("retry", ref(ids.failed), "--no-wait");
+		expect(fast.code).toBe(0);
+		read.release();
+		const late = await slow;
+		expect(late.json.error).toBe("BUSY");
+		expect(late.json.message).toContain("changed");
+		expect(submits(f)).toHaveLength(1);
+		expect(f.usage).toHaveLength(1);
+	});
+	test("a card that failed again after a retry can be retried again", async () => {
+		const f = fake({ precharge: precharge(5), finish: false });
+		expect((await f.run("retry", ref(ids.failed), "--no-wait")).code).toBe(0);
+		const card = f.rows.find((r) => r.id === ids.failed)!;
+		Object.assign(card.data, { status: "failed", error: "provider_error" });
+		expect((await f.run("retry", ref(ids.failed), "--no-wait")).code).toBe(0);
+		expect(submits(f)).toHaveLength(2);
+	});
+});
+
+describe("a long command keeps checking the sign-in", () => {
+	test("a Disconnect during `wait` stops it within the check interval", async () => {
+		const f = fake();
+		const started = Date.now();
+		const waiting = f.runWith({ env: { FLOWITH_SIGNIN_CHECK_MS: "300" } }, "wait", ref(ids.running), "--timeout", "30");
+		await Bun.sleep(1_500);
+		f.opts.userStatus = 403;
+		const r = await waiting;
+		expect(r.json.error).toBe("NOT_LOGGED_IN");
+		expect(Date.now() - started).toBeLessThan(15_000);
+	}, 20_000);
+});
+
 describe("a send whose answer is lost", () => {
 	test.each(["drop", "reset"] as const)("(%s) leaves the card generating (never marked failed) and says so", async (submit) => {
 		const f = fake({ submit, precharge: precharge(5) });

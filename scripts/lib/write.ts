@@ -96,6 +96,21 @@ export async function patch(api: Api, card: Pick<Card, "id" | "createdAt">, fiel
 	if (!rows?.length) throw new CliError(`Card ${card.id.slice(0, 8)} couldn't be changed (gone, or not yours to edit).`, "FORBIDDEN");
 }
 
+/**
+ * Changes a card only if it is still as it was read: the same type, status and retry mark (`agentAttempt`, which each
+ * retry renews). One UPDATE … WHERE in Flowith's database, so when two clients (other machines, tabs) claim the same
+ * card only one gets it. False when it had changed.
+ */
+export async function claim(api: Api, card: Card, fields: Record<string, unknown>): Promise<boolean> {
+	const q = new URLSearchParams({ id: `eq.${card.id}`, created_at: `eq.${card.createdAt}`, type: `eq.${card.type}`, select: "id" });
+	for (const key of ["status", "agentAttempt"]) {
+		const v = card.data[key];
+		q.append(`data->>${key}`, v === undefined || v === null ? "is.null" : `eq.${typeof v === "object" ? JSON.stringify(v) : String(v)}`);
+	}
+	const rows = await rest<Array<{ id: string }>>(api, `flow_node?${q}`, { method: "PATCH", json: fields, prefer: "return=representation" });
+	return !!rows?.length;
+}
+
 /** A card still generating gets its result written by the worker; changing its data now could undo that. */
 export function settled(card: Card, what: string) {
 	if (card.status === "running" || card.status === "init")

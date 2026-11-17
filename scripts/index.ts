@@ -81,6 +81,7 @@ import {
 	type Placed,
 	arrangePoints,
 	cardSize,
+	claim,
 	deleteCards,
 	groupCards,
 	link,
@@ -887,6 +888,10 @@ function requestTemplate(body: Record<string, unknown>) {
  * Runs failed cards again in place. A card still generating, or finished, is never sent again (it would be charged
  * twice and the results would overwrite each other). One whose send got no answer is sent again only once it is clear
  * it never arrived: no charge began while it was sent, and it has stayed generating longer than such a run takes.
+ *
+ * Decided twice: on the first read, and again on a fresh read once this machine holds the cards (another retry may
+ * have run them while the first read was on its way). Each card is then claimed in Flowith only if it is still exactly
+ * as read, so a retry from another machine or tab that got there first wins and this one sends nothing.
  */
 async function cmdRetry(a: Args) {
 	const ctx = await context(a);
@@ -903,23 +908,27 @@ async function cmdRetry(a: Args) {
 	if (named.length && skipped.length)
 		throw new CliError(`${skipped.join(", ")} weren't made by this CLI's generation, so their request isn't on the card. Use \`vary\` or make them again.`, "INVALID_PARAM");
 	if (!chosen.length) return out({ canvas: canvas.id, note: skipped.length ? `Nothing to retry here (${skipped.join(", ")} weren't made by this CLI).` : "Nothing failed." });
-	const records = chosen.some((c) => !failed(c)) ? await usageOf(ctx.api, canvas.id) : [];
-	for (const card of chosen) {
-		if (failed(card)) continue;
-		if (card.status === "finished") throw new CliError(`${card.ref} is finished; \`vary ${card.ref}\` makes another take beside it.`, "INVALID_PARAM");
-		const sent = sentOf([card.id])[0];
-		const kind = requestOf(card)!.kind!;
-		if (sent?.answer !== "lost") throw new CliError(`${card.ref} is still generating: \`wait ${card.ref}\`.`, "BUSY");
-		if (canvas.team)
-			throw new CliError(`No answer came back for ${card.ref}, and on a team canvas the team's charges can't be read to tell whether it arrived, so it isn't sent again. \`wait ${card.ref}\`; if it never finishes, delete it and make it again.`, "BUSY");
-		if (chargedSince(sent, records, serverNow()))
-			throw new CliError(`${card.ref} did reach Flowith (a ${sent.model} charge began on this canvas after it was sent): \`wait ${card.ref}\` for the result.`, "BUSY");
-		const left = sent.to + SETTLE_MS[kind] - serverNow();
-		if (left > 0)
-			throw new CliError(`No charge for ${card.ref} so far, but it may still be on its way. \`wait ${card.ref}\`; if it is still generating in ${Math.ceil(left / 60_000)} min, retry then.`, "BUSY");
-	}
+	/** Throws unless every card may run again, as read now (its send record read now too). */
+	const mayRun = async (list: Card[]) => {
+		const records = list.some((c) => !failed(c)) ? await usageOf(ctx.api, canvas.id) : [];
+		for (const card of list) {
+			if (failed(card)) continue;
+			if (card.status === "finished") throw new CliError(`${card.ref} is finished; \`vary ${card.ref}\` makes another take beside it.`, "INVALID_PARAM");
+			const sent = sentOf([card.id])[0];
+			const kind = requestOf(card)!.kind!;
+			if (sent?.answer !== "lost") throw new CliError(`${card.ref} is still generating: \`wait ${card.ref}\`.`, "BUSY");
+			if (canvas.team)
+				throw new CliError(`No answer came back for ${card.ref}, and on a team canvas the team's charges can't be read to tell whether it arrived, so it isn't sent again. \`wait ${card.ref}\`; if it never finishes, delete it and make it again.`, "BUSY");
+			if (chargedSince(sent, records, serverNow()))
+				throw new CliError(`${card.ref} did reach Flowith (a ${sent.model} charge began on this canvas after it was sent): \`wait ${card.ref}\` for the result.`, "BUSY");
+			const left = sent.to + SETTLE_MS[kind] - serverNow();
+			if (left > 0)
+				throw new CliError(`No charge for ${card.ref} so far, but it may still be on its way. \`wait ${card.ref}\`; if it is still generating in ${Math.ceil(left / 60_000)} min, retry then.`, "BUSY");
+		}
+	};
+	await mayRun(chosen);
 	if (dryRun) return out({ retry: chosen.map((c) => ({ ref: c.ref, kind: requestOf(c)!.kind, model: requestOf(c)!.body!.model })), ...(skipped.length ? { skipped } : {}) });
-	// Two retries of one card at once would both send it: the second finds it taken.
+	// Two retries of one card on this machine: the second finds it held.
 	const claimed: string[] = [];
 	const busy = chosen.find((c) => (claimRetry(c.id) ? (claimed.push(c.id), false) : true));
 	if (busy) {
@@ -928,31 +937,44 @@ async function cmdRetry(a: Args) {
 	}
 	const ids: string[] = [];
 	const lost: string[] = [];
-	for (const card of chosen) {
-		const req = requestOf(card)!;
-		const {
-			error: _e, error_type: _t, error_code: _c, request_id: _r,
-			errorMessage: _m, creditFailureReason: _cr, creditFailureStage: _cs, creditFailureCode: _cc, httpCode: _h, attemptedModel: _a,
-			...data
-		} = card.data;
-		// A refusal may have turned it into the canvas's credits or upgrade card: back to the card it was.
-		const type = card.type === "22" || card.type === "25" ? (req.kind === "video" ? "13" : "2") : card.type;
-		await patch(ctx.api, card, { ...(type !== card.type ? { type } : {}), data: { ...data, value: "", status: "running", ...(req.kind === "video" ? { videoId: null } : {}) } });
-		const body = {
-			...req.body,
-			nodeId: card.id,
-			convId: canvas.id,
-			...(req.kind === "video" ? { parentNodeId: card.row.p_id ?? canvas.id, position: card.row.position ?? { x: 0, y: 0 }, rerun: true } : {}),
-		};
-		try {
+	const changed: string[] = [];
+	try {
+		// The first read may be stale by now: decide again on the cards as they are, and their send records as they are.
+		const fresh = cardsFrom(await fetchRowsById(ctx.api, chosen.map((c) => c.id)));
+		const gone = chosen.filter((c) => !fresh.some((f) => f.id === c.id)).map((c) => c.ref);
+		if (gone.length) throw new CliError(`${gone.join(", ")} is no longer on the canvas.`, "NOT_FOUND");
+		await mayRun(fresh);
+		for (const card of fresh) {
+			const req = requestOf(card)!;
+			const {
+				error: _e, error_type: _t, error_code: _c, request_id: _r,
+				errorMessage: _m, creditFailureReason: _cr, creditFailureStage: _cs, creditFailureCode: _cc, httpCode: _h, attemptedModel: _a,
+				...rest
+			} = card.data;
+			// A fresh retry mark: a retry elsewhere that read the card before this one can no longer claim it.
+			const data = { ...rest, value: "", status: "running", agentAttempt: crypto.randomUUID(), ...(req.kind === "video" ? { videoId: null } : {}) };
+			// A refusal may have turned it into the canvas's credits or upgrade card: back to the card it was.
+			const type = card.type === "22" || card.type === "25" ? (req.kind === "video" ? "13" : "2") : card.type;
+			if (!(await claim(ctx.api, card, { ...(type !== card.type ? { type } : {}), data }))) {
+				changed.push(card.ref);
+				continue;
+			}
+			const body = {
+				...req.body,
+				nodeId: card.id,
+				convId: canvas.id,
+				...(req.kind === "video" ? { parentNodeId: card.row.p_id ?? canvas.id, position: card.row.position ?? { x: 0, y: 0 }, rerun: true } : {}),
+			};
 			if ((await sendFor(ctx, req.kind!, body, { id: card.id, createdAt: card.createdAt, type, data })) === "lost") lost.push(card.id);
-		} finally {
-			releaseRetry(card.id);
+			ids.push(card.id);
+			log(`Retrying ${card.ref} (${req.kind}, ${String(req.body!.model)})…`);
 		}
-		ids.push(card.id);
-		log(`Retrying ${card.ref} (${req.kind}, ${String(req.body!.model)})…`);
+	} finally {
+		claimed.forEach(releaseRetry);
 	}
-	await waitAndReport(ctx, a, canvas.id, ids, chosen.some((c) => c.kind === "video") ? 900 : 300, {}, lost);
+	const why = `changed since it was read (another retry, on another machine or in Flowith, ran it first; or its result came in)`;
+	if (!ids.length) throw new CliError(`${changed.join(", ")} ${why}, so nothing was sent: \`look\` or \`wait ${changed[0]}\`.`, "BUSY");
+	await waitAndReport(ctx, a, canvas.id, ids, chosen.some((c) => c.kind === "video") ? 900 : 300, changed.length ? { notRetried: changed, note: `${changed.join(", ")} ${why}; not sent.` } : {}, lost);
 }
 
 async function cmdSpent(a: Args) {

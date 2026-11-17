@@ -20,6 +20,8 @@ export interface Api {
 	agent: string;
 	/** Renews the access token (a long wait can outlive it); updates this object. */
 	renew?: () => Promise<void>;
+	/** Asks Flowith now and then whether the sign-in is still on, so a long command stops on a Disconnect too. */
+	recheck?: () => Promise<void>;
 }
 
 export class CliError extends Error {
@@ -112,6 +114,7 @@ export interface WorkerInit {
 export async function worker<T = unknown>(api: Api, path: string, init: WorkerInit = {}): Promise<T> {
 	const method = init.method ?? (init.json !== undefined || init.body ? "POST" : "GET");
 	if (!init.read) guardWrite(method, path.split("?")[0]!);
+	await api.recheck?.();
 	const send = () =>
 		fetch(`${api.workerURL.replace(/\/$/, "")}${path}`, {
 			method,
@@ -144,6 +147,7 @@ export interface RestInit {
 export async function rest<T = unknown>(api: Api, query: string, init: RestInit = {}): Promise<T> {
 	const method = init.method ?? (init.json !== undefined ? "POST" : "GET");
 	guardWrite(method, query.split("?")[0]!);
+	await api.recheck?.();
 	const send = () =>
 		fetch(`${api.supabaseUrl.replace(/\/$/, "")}/rest/v1/${query}`, {
 			method,

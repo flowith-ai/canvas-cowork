@@ -50,7 +50,8 @@ cw models video · cw credits
 - **Login**: after you type the CLI's code on Flowith's connect page and allow it, the page gives the
   CLI a sign-in of its own, seals it to the CLI's one-time key and hands it over Flowith's realtime
   service (no local ports, so it works in every browser). Stored in `~/.flowith/canvas-session.json`
-  (mode 600); it renews itself, and checks every few minutes that it hasn't been disconnected.
+  (mode 600); it renews itself, and checks every 2 minutes, also during a long command, that it hasn't been
+  disconnected.
 - **Canvas tools that live in the page** (split, angles, relight, lip-sync, breakdown, characters, the
   director stage, Organize…) are handed to your open canvas, sealed with a key that browser gave the
   agent at login; disconnecting the agent in Flowith revokes it.
@@ -83,9 +84,22 @@ This is a new skill, not a drop-in update: commands, output and login changed.
 
 `logout` ends this CLI's sign-in at Flowith and deletes it here (a login an older page made from the
 browser's own session is only forgotten, never signed out: that would sign the browser out).
-Disconnecting the agent in Flowith (Settings → Agents, or the canvas's agent menu) ends it too: canvas
-operations stop at once, Supabase drops the sign-in, so it can't renew and its token is refused, and the
-next command asks to `login`. The login link and code are for you alone: never forward them.
+Disconnecting the agent in Flowith (Settings → Agents, or the canvas's agent menu) ends it too.
+
+What ending it does, and what it doesn't:
+
+- **At once**: the sign-in can't be renewed or used to open another; Supabase Auth refuses its token;
+  operations handed to the open canvas stop.
+- **Within 2 minutes**: this CLI stops. It asks Flowith whether the sign-in is still on when a command
+  starts and every 2 minutes while one runs (a long `wait` included), then says `NOT_LOGGED_IN` and
+  deletes the login here.
+- **Not at once**: the access token already issued (it lasts up to 1 hour) is still accepted by
+  Flowith's data and generation APIs until it expires. Anyone holding a copy of it could use it until
+  then; nothing else of the login (no renewal) is left.
+- On beta, the page's Disconnect only drops the canvas operation key until the frontend that ends the
+  sign-in reaches it (it is on the next-gen preview); `logout` ends it on every site.
+
+The login link and code are for you alone: never forward them.
 
 ## Going live on flowith.io
 

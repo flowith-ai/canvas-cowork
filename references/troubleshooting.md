@@ -19,7 +19,7 @@ Errors print one JSON line `{"error": CODE, "message": …}` and exit 1.
 | `GENERATION_FAILED` / `CONTENT_POLICY` / `INVALID_INPUT` | The provider refused or failed (credits are refunded) | The card's `error` says why (`cw read <ref>`). Transient ("Workflow delivery failed", timeouts): `cw retry <ref>`. Refusals: rephrase, another reference, or another model |
 | `TIMEOUT` | The command stopped waiting | The work continues on the server: `cw wait <ref>` |
 | `SENT_UNKNOWN` (a card's `code`) | The request went out but no answer came back (network, gateway timeout): Flowith may have taken it | `cw wait <ref>`: it finishes if it was taken. `cw retry <ref>` sends it again only once the canvas's charges show it never arrived (it says when) |
-| `BUSY` | The card is still generating (or its last send may still be on its way) | `cw wait <ref>`; don't send it again |
+| `BUSY` | The card is still generating (or its last send may still be on its way), or another retry (another machine, a tab) ran it first | `cw wait <ref>` or `cw look`; don't send it again |
 | `DRY_RUN` | Internal guard: a dry run was about to change something and stopped | Report it: a preview should never reach this |
 
 Other things worth knowing:
@@ -37,5 +37,6 @@ Other things worth knowing:
 - Session and caches live in `~/.flowith/` (`canvas-session.json`, mode 600, holds the login token —
   never print or share it). The CLI gets a sign-in of its own (it never shares the browser's), so it can
   renew itself without signing the browser out. `logout` ends that sign-in and forgets it here;
-  "Disconnect" in Flowith ends it too (operations stop at once; Supabase drops the sign-in, so the next
-  command says `NOT_LOGGED_IN`).
+  "Disconnect" in Flowith ends it too: it can't renew, canvas operations stop at once, and the CLI says
+  `NOT_LOGGED_IN` within 2 minutes (it checks when a command starts and every 2 minutes while one runs).
+  The access token already issued stays usable by the APIs until it expires (up to 1 hour).

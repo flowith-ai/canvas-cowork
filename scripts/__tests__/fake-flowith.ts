@@ -2,7 +2,7 @@
  * A stand-in Flowith (Supabase auth + PostgREST + worker) for running the real CLI end to end in tests: it serves a
  * small canvas and catalogue, records every request, and answers generation calls as each test says.
  */
-import { mkdtempSync, writeFileSync } from "fs";
+import { copyFileSync, mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -115,6 +115,24 @@ export interface FakeOptions {
 	agentSession?: boolean;
 	/** A team canvas (its charges go to the team's payer, out of the user's sight). */
 	team?: boolean;
+	/** false: a submitted card stays generating (the worker hasn't written its result yet). */
+	finish?: boolean;
+}
+
+/** Whether a row passes PostgREST filters (`col=eq.v`, `is.null`, `in.(…)`, `not.is.true`; `data->>key` reads data). */
+function passes(row: Record<string, any>, params: URLSearchParams) {
+	for (const [key, cond] of params) {
+		if (key === "select") continue;
+		const json = /^data->>(.+)$/.exec(key);
+		const raw = json ? row.data?.[json[1]!] : row[key];
+		const value = raw === undefined || raw === null ? null : typeof raw === "object" ? JSON.stringify(raw) : String(raw);
+		if (cond === "is.null" ? value !== null
+			: cond === "not.is.true" ? value === "true"
+			: cond.startsWith("eq.") ? value !== cond.slice(3)
+			: cond.startsWith("in.(") ? !cond.slice(4, -1).split(",").includes(value ?? "")
+			: true) return false;
+	}
+	return true;
 }
 
 /** A precharge record as the worker writes it when it takes a request: now, under a fresh attempt id. */
@@ -127,12 +145,35 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 	const rows = canvasRows();
 	const usage = opts.usage ?? [];
 	const hangUp = Bun.listen({ hostname: "localhost", port: 0, socket: { open: (socket) => void socket.end(), data: () => {} } });
+	const holds: Array<{ match: (method: string, url: URL) => boolean; arrive: () => void; gate: Promise<void>; taken?: boolean }> = [];
+	/**
+	 * Holds back the answer to the next request that matches: it is made when the request arrives (so a read answers
+	 * with the canvas as it was then) and delivered on release — a slow network, as the CLI meets it.
+	 */
+	const hold = (match: (method: string, url: URL) => boolean) => {
+		let arrive!: () => void;
+		let release!: () => void;
+		const arrived = new Promise<void>((r) => (arrive = r));
+		holds.push({ match, arrive, gate: new Promise<void>((r) => (release = r)) });
+		return { arrived, release };
+	};
 	const server = Bun.serve({
 		port: 0,
 		async fetch(req) {
 			const url = new URL(req.url);
 			const body = req.method === "GET" ? undefined : await req.text().then((t) => { try { return JSON.parse(t); } catch { return t; } });
 			requests.push({ method: req.method, path: url.pathname + url.search, body });
+			const answer = await handle(req, url, body);
+			const held = holds.find((h) => !h.taken && h.match(req.method, url));
+			if (held) {
+				held.taken = true;
+				held.arrive();
+				await held.gate;
+			}
+			return answer;
+		},
+	});
+	async function handle(req: Request, url: URL, body: unknown): Promise<Response> {
 			const p = url.pathname;
 			if (p === "/auth/v1/user") return Response.json(opts.userStatus && opts.userStatus !== 200 ? { error_code: "session_not_found" } : { id: USER }, { status: opts.userStatus ?? 200 });
 			if (p === "/auth/v1/logout") return new Response(null, { status: 204 });
@@ -154,9 +195,9 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 					rows.push(...placed);
 					return Response.json(placed);
 				}
-				const id = url.searchParams.get("id")?.replace(/^eq\./, "");
-				const hit = rows.filter((r) => r.id === id);
-				for (const r of hit) Object.assign(r, body);
+				// Only the rows every filter passes are changed, in one step (as PostgreSQL's UPDATE … WHERE).
+				const hit = rows.filter((r) => passes(r, url.searchParams));
+				for (const r of hit) Object.assign(r, structuredClone(body));
 				return Response.json(hit);
 			}
 			if (p === "/user/model-usage/group-records") return Response.json({ success: true, data: usage });
@@ -187,13 +228,12 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 				const pre = opts.precharge?.(String((body as any)?.model));
 				if (pre) usage.unshift(pre);
 				// The result lands on the card a moment later, as the worker's workflow writes it.
-				const card = rows.find((r) => r.id === (body as any)?.nodeId);
+				const card = opts.finish === false ? undefined : rows.find((r) => r.id === (body as any)?.nodeId);
 				if (card) setTimeout(() => Object.assign(card.data, p === "/video/async" ? { status: "finished", videoId: "https://cdn.test/new.mp4" } : { status: "finished", value: p === "/completion/async" ? "an answer" : "https://cdn.test/new.png" }), 100);
 				return Response.json({ nodeId: (body as any)?.nodeId, convId: CONV, status: "processing" });
 			}
 			return Response.json({});
-		},
-	});
+	}
 	const origin = `http://localhost:${server.port}`;
 	const home = mkdtempSync(join(tmpdir(), "cw-test-"));
 	writeFileSync(
@@ -201,9 +241,16 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 		JSON.stringify({ site: origin, supabaseUrl: origin, supabaseKey: "k", accessToken: jwt(), refreshToken: "r1", workerURL: origin, canvas: CONV, savedAt: at }),
 		{ mode: 0o600 },
 	);
+	/** Another machine logged in to the same account: a home of its own (its own send records and retry locks). */
+	const newHome = () => {
+		const other = mkdtempSync(join(tmpdir(), "cw-test-"));
+		copyFileSync(join(home, "canvas-session.json"), join(other, "canvas-session.json"));
+		return other;
+	};
 	/** Runs the real CLI against this fake; resolves with its JSON output (or error line) and exit code. */
-	const run = async (...args: string[]) => {
-		const env = { ...process.env, FLOWITH_HOME: home, FLOWITH_AGENT: "claude-code" } as Record<string, string | undefined>;
+	const run = (...args: string[]) => runWith({}, ...args);
+	const runWith = async (at: { home?: string; env?: Record<string, string> }, ...args: string[]) => {
+		const env = { ...process.env, FLOWITH_HOME: at.home ?? home, FLOWITH_AGENT: "claude-code", ...at.env } as Record<string, string | undefined>;
 		delete env.FLOWITH_URL;
 		delete env.FLOWITH_CANVAS;
 		const proc = Bun.spawn(["bun", join(import.meta.dir, "..", "index.ts"), ...args, "--json", "--quiet"], { env, stdout: "pipe", stderr: "pipe" });
@@ -213,7 +260,7 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 		return { json, code };
 	};
 	const writes = () => requests.filter((r) => r.method !== "GET" && !r.path.startsWith("/auth/v1/"));
-	return { origin, home, requests, writes, usage, opts, run, stop: () => (server.stop(true), hangUp.stop(true)) };
+	return { origin, home, requests, writes, usage, opts, rows, run, runWith, newHome, hold, stop: () => (server.stop(true), hangUp.stop(true)) };
 }
 
 /** A token the CLI accepts as unexpired (it only reads the claims). */

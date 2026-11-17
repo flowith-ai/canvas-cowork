@@ -177,15 +177,18 @@ export async function activeSession(opts: { force?: boolean } = {}): Promise<Ses
 	return next;
 }
 
-/** How often a command asks Supabase whether the sign-in is still on, between renewals. */
-const CHECK_EVERY_MS = 2 * 60_000;
+/**
+ * How often a command asks Supabase whether the sign-in is still on, between renewals: when it starts and, in a long
+ * run, as it goes. (FLOWITH_SIGNIN_CHECK_MS only shortens it for tests.)
+ */
+const checkEveryMs = () => Number(process.env.FLOWITH_SIGNIN_CHECK_MS) || 2 * 60_000;
 
 /**
  * The session, once Supabase has confirmed in the last two minutes that it is still on: a Disconnect in Flowith (or
  * `logout` elsewhere) ends it at once there, while its access token would otherwise keep working until it expires.
  */
 async function confirmed(s: Session): Promise<Session> {
-	if (!s.refreshToken || Date.now() - (s.checkedAt ?? 0) < CHECK_EVERY_MS) return s;
+	if (!s.refreshToken || Date.now() - (s.checkedAt ?? 0) < checkEveryMs()) return s;
 	const resp = await fetch(`${s.supabaseUrl}/auth/v1/user`, {
 		headers: { apikey: s.supabaseKey, Authorization: `Bearer ${s.accessToken}` },
 		signal: AbortSignal.timeout(10_000),
@@ -209,6 +212,13 @@ export function apiOf(s: Session, agent: string): Api {
 	const api: Api = { supabaseUrl: s.supabaseUrl, supabaseKey: s.supabaseKey, accessToken: s.accessToken, workerURL: s.workerURL, agent };
 	api.renew = async () => {
 		api.accessToken = (await activeSession({ force: true })).accessToken;
+	};
+	// A long command (a clip's wait) asks again as it goes: a Disconnect stops it within the interval, not only the next one.
+	let asked = Date.now();
+	api.recheck = async () => {
+		if (Date.now() - asked < checkEveryMs()) return;
+		asked = Date.now();
+		api.accessToken = (await activeSession()).accessToken;
 	};
 	return api;
 }

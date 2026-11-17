@@ -227,14 +227,20 @@ async function toRefs(ctx: Ctx, convId: string, cards: Card[], inputs: string[],
 
 const timeoutOf = (a: Args, fallbackSec: number) => (num(a, "timeout") ?? fallbackSec) * 1000;
 
-/** What this canvas was actually charged since `since` (model_usage, refunds included), in credits. */
-async function chargedSince(ctx: Ctx, convId: string, since: number): Promise<number | undefined> {
+/**
+ * What this command was charged since `since` (model_usage, refunds included), in credits. The records name the
+ * canvas and the model, not the card, so only the models this command ran count: the user working on the same canvas
+ * meanwhile isn't billed to it. Records under other names only (a tool billed by another id) still count.
+ */
+async function chargedSince(ctx: Ctx, convId: string, since: number, models: Set<string>): Promise<number | undefined> {
 	try {
-		const res = await worker<{ data?: Array<{ tokens_used: number; billing_unit_price: number | null; created_at: string }> }>(
+		const res = await worker<{ data?: Array<{ model: string; tokens_used: number; billing_unit_price: number | null; created_at: string }> }>(
 			ctx.api,
 			`/user/model-usage/group-records?groupIds=${convId}`,
 		);
-		const rows = (res?.data ?? []).filter((r) => Date.parse(r.created_at) >= since - 2000);
+		const recent = (res?.data ?? []).filter((r) => Date.parse(r.created_at) >= since - 2000);
+		const ours = recent.filter((r) => models.has(r.model));
+		const rows = ours.length ? ours : recent;
 		return Math.round(rows.reduce((sum, r) => sum + creditsOf(r), 0) * 100) / 100;
 	} catch {
 		return undefined;
@@ -248,7 +254,8 @@ async function finish(ctx: Ctx, convId: string, results: Result[], extra: Record
 	const failed = results.filter((r) => r.status === "failed");
 	const running = results.filter((r) => r.status === "running");
 	// Refunds of a precharge land right after a card finishes.
-	const charged = since !== undefined && !running.length ? (await sleep(1500), await chargedSince(ctx, convId, since)) : undefined;
+	const models = new Set(results.map((r) => r.model).filter((m): m is string => !!m));
+	const charged = since !== undefined && !running.length ? (await sleep(1500), await chargedSince(ctx, convId, since, models)) : undefined;
 	const next = [
 		...(failed.some((r) => r.code === "NO_CREDITS" || r.code === "MODEL_LOCKED")
 			? ["Stop: not enough credits, or the plan doesn't include this model. Tell the user (https://flowith.io/pricing); don't retry or switch models unasked."]

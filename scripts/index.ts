@@ -159,6 +159,9 @@ function agentName(a: Args): string {
 	const named = flag(a, "agent") ?? flag(a, "bot") ?? process.env.FLOWITH_AGENT;
 	if (named) return named;
 	const e = process.env;
+	// DeepSeek Harness (dsh) sets DSH_SHELL=1 on every command its model runs and drops any DSH_* it inherited, so
+	// it names the agent running this command even when the user's environment carries another's (CODEX_HOME…).
+	if (e.DSH_SHELL) return "dsh";
 	if (e.CLAUDECODE || e.CLAUDE_CODE_ENTRYPOINT) return "claude-code";
 	if (e.CODEX_HOME || e.CODEX_SANDBOX || e.CODEX_MANAGED_BY_NPM || e.CODEX_CI) return "codex";
 	if (e.CURSOR_AGENT || e.CURSOR_TRACE_ID) return "cursor";

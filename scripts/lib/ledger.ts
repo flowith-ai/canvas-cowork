@@ -21,8 +21,22 @@ export interface Sent {
 	/** Server time the request went out, and its answer came back (or the connection failed). */
 	from: number;
 	to: number;
-	/** "lost": no answer came back, so whether Flowith took it is unknown. */
-	answer: "taken" | "refused" | "lost";
+	/**
+	 * "lost": no answer came back, so whether Flowith took it is unknown. "claiming": a retry was claiming the card under
+	 * the mark `attempt` and nothing has been sent yet (if the claim took, the card carries that mark).
+	 */
+	answer: "taken" | "refused" | "lost" | "claiming";
+	attempt?: string;
+	/** "claiming": the card's data as the claim wrote it (`fingerprint`), and the send before the claim. */
+	fingerprint?: string;
+	prev?: Sent;
+}
+
+/** Card data in a form that survives the database (jsonb reorders keys): the same data gives the same string. */
+export function fingerprint(data: unknown): string {
+	const canon = (v: unknown): unknown =>
+		Array.isArray(v) ? v.map(canon) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canon((v as Record<string, unknown>)[k])])) : v;
+	return Bun.hash(JSON.stringify(canon(data))).toString(36);
 }
 
 export interface UsageRecord {
@@ -82,6 +96,13 @@ export function releaseRetry(card: string) {
 	} catch {}
 }
 
+/** Forgets a card's send record (a send written down ahead that never went). */
+export function forgetSent(card: string) {
+	try {
+		unlinkSync(fileOf(card));
+	} catch {}
+}
+
 export function sentOf(cards: string[]): Sent[] {
 	return cards.flatMap((card) => {
 		try {
@@ -133,7 +154,9 @@ export type Charge = { credits: number } | { unknown: string };
  * are matched together (a batch goes out at once): exactly as many charges of that model began on the canvas while
  * they were being sent as were taken, or it is unknown.
  */
-export function chargeOf(sends: Sent[], records: UsageRecord[], expected: number): Charge {
+export function chargeOf(all: Sent[], records: UsageRecord[], expected: number): Charge {
+	// A card only claimed for a retry was never sent from here.
+	const sends = all.filter((s) => s.answer !== "claiming");
 	if (sends.length < expected)
 		return { unknown: "the CLI ties charges only to pictures and clips it sent from this machine (not card tools, or cards made elsewhere); `spent` shows the canvas's charges" };
 	if (sends.some((s) => s.kind === "text")) return { unknown: "text is charged by its tokens when the answer finishes, not tied to a request; `spent` shows the canvas's charges" };

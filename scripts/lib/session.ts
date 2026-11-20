@@ -135,14 +135,14 @@ export function jwtClaims(jwt: string): { sub?: string; exp?: number; email?: st
 const REFRESH_AHEAD_MS = 20 * 60_000;
 
 /** The session, refreshed when it is about to expire (or `force`). Throws NOT_LOGGED_IN when there is none. */
-export async function activeSession(opts: { force?: boolean } = {}): Promise<Session> {
+export async function activeSession(opts: { force?: boolean; confirm?: boolean } = {}): Promise<Session> {
 	const s = loadSession();
 	if (!s) throw new CliError("Not logged in. Run `login` once (opens Flowith in your browser).", "NOT_LOGGED_IN");
 	// The session belongs to the site it was allowed on; only an explicit FLOWITH_URL elsewhere asks for a new login.
 	if (process.env.FLOWITH_URL && s.site !== siteUrl())
 		throw new CliError(`Logged in to ${s.site}, but FLOWITH_URL is ${siteUrl()}. Run \`login\` again.`, "NOT_LOGGED_IN");
 	const exp = (jwtClaims(s.accessToken).exp ?? 0) * 1000;
-	if (!opts.force && exp - Date.now() > REFRESH_AHEAD_MS) return confirmed(s);
+	if (!opts.force && exp - Date.now() > REFRESH_AHEAD_MS) return confirmed(s, opts.confirm);
 	if (!s.refreshToken) {
 		if (exp > Date.now()) return s;
 		throw new CliError("Session expired. Run `login` again.", "NOT_LOGGED_IN");
@@ -177,15 +177,19 @@ export async function activeSession(opts: { force?: boolean } = {}): Promise<Ses
 	return next;
 }
 
-/** How often a command asks Supabase whether the sign-in is still on, between renewals. */
-const CHECK_EVERY_MS = 2 * 60_000;
+/**
+ * How often a command asks Supabase whether the sign-in is still on, between renewals: when it starts and, in a long
+ * run, as it goes. (FLOWITH_SIGNIN_CHECK_MS only shortens it for tests.)
+ */
+const checkEveryMs = () => Number(process.env.FLOWITH_SIGNIN_CHECK_MS) || 2 * 60_000;
 
 /**
  * The session, once Supabase has confirmed in the last two minutes that it is still on: a Disconnect in Flowith (or
  * `logout` elsewhere) ends it at once there, while its access token would otherwise keep working until it expires.
  */
-async function confirmed(s: Session): Promise<Session> {
-	if (!s.refreshToken || Date.now() - (s.checkedAt ?? 0) < CHECK_EVERY_MS) return s;
+async function confirmed(s: Session, now = false): Promise<Session> {
+	// A command starting skips the check when another one made it lately; a long command's own check (`now`) never does.
+	if (!s.refreshToken || (!now && Date.now() - (s.checkedAt ?? 0) < checkEveryMs())) return s;
 	const resp = await fetch(`${s.supabaseUrl}/auth/v1/user`, {
 		headers: { apikey: s.supabaseKey, Authorization: `Bearer ${s.accessToken}` },
 		signal: AbortSignal.timeout(10_000),
@@ -207,8 +211,24 @@ async function confirmed(s: Session): Promise<Session> {
 
 export function apiOf(s: Session, agent: string): Api {
 	const api: Api = { supabaseUrl: s.supabaseUrl, supabaseKey: s.supabaseKey, accessToken: s.accessToken, workerURL: s.workerURL, agent };
+	// The login this command began with: if another terminal meanwhile logged in to another account or site, this command
+	// stops rather than carry on (and spend) as someone else.
+	const who = jwtClaims(s.accessToken).sub;
+	const same = (next: Session) => {
+		if (jwtClaims(next.accessToken).sub !== who || next.site !== s.site)
+			throw new CliError("The login here changed while this command ran (another terminal logged in to another account or site). Run the command again.", "NOT_LOGGED_IN");
+		return next;
+	};
 	api.renew = async () => {
-		api.accessToken = (await activeSession({ force: true })).accessToken;
+		api.accessToken = same(await activeSession({ force: true })).accessToken;
+	};
+	// A long command (a clip's wait) asks Flowith again as it goes: a Disconnect stops it within the interval, not only
+	// the next command.
+	let asked = Date.now();
+	api.recheck = async () => {
+		if (Date.now() - asked < checkEveryMs()) return;
+		asked = Date.now();
+		api.accessToken = same(await activeSession({ confirm: true })).accessToken;
 	};
 	return api;
 }

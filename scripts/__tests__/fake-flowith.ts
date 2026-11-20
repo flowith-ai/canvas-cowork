@@ -2,10 +2,10 @@
  * A stand-in Flowith (Supabase auth + PostgREST + worker) for running the real CLI end to end in tests: it serves a
  * small canvas and catalogue, records every request, and answers generation calls as each test says.
  */
-import { mkdtempSync, writeFileSync } from "fs";
+import { copyFileSync, mkdtempSync, writeFileSync } from "fs";
+import { isDeepStrictEqual } from "node:util";
 import { tmpdir } from "os";
 import { join } from "path";
-import { isDeepStrictEqual } from "node:util";
 
 export const USER = "11111111-1111-4111-8111-111111111111";
 export const CONV = "22222222-2222-4222-8222-222222222222";
@@ -101,12 +101,6 @@ export interface UsageRecord {
 }
 
 export interface FakeOptions {
-	/** Pause a snapshotted read, or a PATCH before it checks its condition, to exercise real CLI races. */
-	afterNodeRead?: () => Promise<void>;
-	nodeReadStatus?: number;
-	beforeNodePatch?: () => Promise<void>;
-	patchStatus?: number;
-	dropPatchReply?: boolean;
 	/**
 	 * How a generation submit is answered: ok; an HTTP refusal; the gateway giving up on the worker (504); or the
 	 * connection breaking off mid-answer (the CLI sees a network error).
@@ -122,6 +116,52 @@ export interface FakeOptions {
 	agentSession?: boolean;
 	/** A team canvas (its charges go to the team's payer, out of the user's sight). */
 	team?: boolean;
+	/** false: a submitted card stays generating (the worker hasn't written its result yet). */
+	finish?: boolean;
+	/**
+	 * A retry's claim (a PATCH conditioned on the retry mark) gets no answer (504): "drop" after it was made,
+	 * "drop-unmade" without it having been made.
+	 */
+	claimAnswer?: "drop" | "drop-unmade";
+	/** The user may read the canvas but not change it (row-level security): every PATCH changes nothing. */
+	readOnly?: boolean;
+	/** Only these cards may not be changed (row-level security on some rows). */
+	readOnlyIds?: string[];
+	/** Pause a read of cards after its answer is made (it answers with the cards as they were), or a PATCH before it applies. */
+	afterNodeRead?: () => Promise<void>;
+	beforeNodePatch?: () => Promise<void>;
+	/** Reads of cards fail with this status. */
+	nodeReadStatus?: number;
+	/** PATCHes of cards are refused with this status, changing nothing. */
+	patchStatus?: number;
+	/** A PATCH of cards is made, but its answer never comes back (504). */
+	dropPatchReply?: boolean;
+}
+
+/** A filter the stand-in doesn't know fails the test instead of passing every row. */
+function unsupported(key: string, cond: string): never {
+	throw new Error(`fake PostgREST: unsupported filter ${key}=${cond}`);
+}
+
+/** Whether a row passes PostgREST filters (`col=eq.v`, `is.null`, `in.(…)`, `not.is.true`; `data->>key` reads data). */
+function passes(row: Record<string, any>, params: URLSearchParams) {
+	for (const [key, cond] of params) {
+		if (["select", "order", "limit"].includes(key)) continue;
+		// The whole data compared as jsonb (key order doesn't matter).
+		if (key === "data") {
+			if (cond === "is.null" ? row.data !== null && row.data !== undefined : !cond.startsWith("eq.") ? unsupported(key, cond) : !isDeepStrictEqual(row.data, JSON.parse(cond.slice(3)))) return false;
+			continue;
+		}
+		const json = /^data->>(.+)$/.exec(key);
+		const raw = json ? row.data?.[json[1]!] : row[key];
+		const value = raw === undefined || raw === null ? null : typeof raw === "object" ? JSON.stringify(raw) : String(raw);
+		if (cond === "is.null" ? value !== null
+			: cond === "not.is.true" ? value === "true"
+			: cond.startsWith("eq.") ? value !== cond.slice(3)
+			: cond.startsWith("in.(") ? !cond.slice(4, -1).split(",").includes(value ?? "")
+			: unsupported(key, cond)) return false;
+	}
+	return true;
 }
 
 /** A precharge record as the worker writes it when it takes a request: now, under a fresh attempt id. */
@@ -134,12 +174,35 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 	const rows = canvasRows();
 	const usage = opts.usage ?? [];
 	const hangUp = Bun.listen({ hostname: "localhost", port: 0, socket: { open: (socket) => void socket.end(), data: () => {} } });
+	const holds: Array<{ match: (method: string, url: URL) => boolean; arrive: () => void; gate: Promise<void>; taken?: boolean }> = [];
+	/**
+	 * Holds back the answer to the next request that matches: it is made when the request arrives (so a read answers
+	 * with the canvas as it was then) and delivered on release — a slow network, as the CLI meets it.
+	 */
+	const hold = (match: (method: string, url: URL) => boolean) => {
+		let arrive!: () => void;
+		let release!: () => void;
+		const arrived = new Promise<void>((r) => (arrive = r));
+		holds.push({ match, arrive, gate: new Promise<void>((r) => (release = r)) });
+		return { arrived, release };
+	};
 	const server = Bun.serve({
 		port: 0,
 		async fetch(req) {
 			const url = new URL(req.url);
 			const body = req.method === "GET" ? undefined : await req.text().then((t) => { try { return JSON.parse(t); } catch { return t; } });
 			requests.push({ method: req.method, path: url.pathname + url.search, body });
+			const answer = await handle(req, url, body);
+			const held = holds.find((h) => !h.taken && h.match(req.method, url));
+			if (held) {
+				held.taken = true;
+				held.arrive();
+				await held.gate;
+			}
+			return answer;
+		},
+	});
+	async function handle(req: Request, url: URL, body: unknown): Promise<Response> {
 			const p = url.pathname;
 			if (p === "/auth/v1/user") return Response.json(opts.userStatus && opts.userStatus !== 200 ? { error_code: "session_not_found" } : { id: USER }, { status: opts.userStatus ?? 200 });
 			if (p === "/auth/v1/logout") return new Response(null, { status: 204 });
@@ -152,9 +215,7 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 			if (p.startsWith("/rest/v1/flow_node")) {
 				if (req.method === "GET") {
 					if (opts.nodeReadStatus) return new Response("read unavailable", { status: opts.nodeReadStatus });
-					const only = url.searchParams.get("id");
-					const want = only?.startsWith("in.(") ? only.slice(4, -1).split(",") : undefined;
-					const snapshot = Response.json((want ? rows.filter((r) => want.includes(r.id)) : rows).filter((r) => !(r as any).is_delete));
+					const snapshot = Response.json(structuredClone(rows.filter((r) => passes(r, url.searchParams))));
 					await opts.afterNodeRead?.();
 					return snapshot;
 				}
@@ -164,18 +225,14 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 					rows.push(...placed);
 					return Response.json(placed);
 				}
-				const id = url.searchParams.get("id")?.replace(/^eq\./, "");
+				// Only the rows every filter passes are changed, in one step (as PostgreSQL's UPDATE … WHERE).
 				await opts.beforeNodePatch?.();
 				if (opts.patchStatus) return Response.json({ message: "patch refused" }, { status: opts.patchStatus });
-				const previous = url.searchParams.get("data");
-				const hit = rows.filter((r) => r.id === id
-					&& (!url.searchParams.has("created_at") || url.searchParams.get("created_at") === `eq.${r.created_at}`)
-					&& (!url.searchParams.has("type") || url.searchParams.get("type") === `eq.${r.type}`)
-					&& (!url.searchParams.has("conv_id") || url.searchParams.get("conv_id") === `eq.${r.conv_id}`)
-					&& (!url.searchParams.has("is_delete") || !(r as any).is_delete)
-					&& (!previous || (previous === "is.null" ? r.data === null : isDeepStrictEqual(r.data, JSON.parse(previous.slice(3))))));
-				for (const r of hit) Object.assign(r, body);
-				if (opts.dropPatchReply) return new Response("reply lost after write", { status: 504 });
+				if (opts.readOnly) return Response.json([]);
+				if (opts.claimAnswer === "drop-unmade" && url.searchParams.has("data->>agentAttempt")) return new Response("upstream timed out", { status: 504 });
+				const hit = rows.filter((r) => passes(r, url.searchParams) && !opts.readOnlyIds?.includes(r.id));
+				for (const r of hit) Object.assign(r, structuredClone(body));
+				if ((opts.claimAnswer === "drop" && url.searchParams.has("data->>agentAttempt")) || opts.dropPatchReply) return new Response("upstream timed out", { status: 504 });
 				return Response.json(hit);
 			}
 			if (p === "/user/model-usage/group-records") return Response.json({ success: true, data: usage });
@@ -206,27 +263,30 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 				const pre = opts.precharge?.(String((body as any)?.model));
 				if (pre) usage.unshift(pre);
 				// The result lands on the card a moment later, as the worker's workflow writes it.
-				const card = rows.find((r) => r.id === (body as any)?.nodeId);
+				const card = opts.finish === false ? undefined : rows.find((r) => r.id === (body as any)?.nodeId);
 				if (card) setTimeout(() => Object.assign(card.data, p === "/video/async" ? { status: "finished", videoId: "https://cdn.test/new.mp4" } : { status: "finished", value: p === "/completion/async" ? "an answer" : "https://cdn.test/new.png" }), 100);
 				return Response.json({ nodeId: (body as any)?.nodeId, convId: CONV, status: "processing" });
 			}
 			return Response.json({});
-		},
-	});
+	}
 	const origin = `http://localhost:${server.port}`;
+	const home = mkdtempSync(join(tmpdir(), "cw-test-"));
+	writeFileSync(
+		join(home, "canvas-session.json"),
+		JSON.stringify({ site: origin, supabaseUrl: origin, supabaseKey: "k", accessToken: jwt(), refreshToken: "r1", workerURL: origin, canvas: CONV, savedAt: at }),
+		{ mode: 0o600 },
+	);
+	/** Another machine logged in to the same account: a home of its own (its own send records and retry locks). */
 	const newHome = () => {
-		const directory = mkdtempSync(join(tmpdir(), "cw-test-"));
-		writeFileSync(
-			join(directory, "canvas-session.json"),
-			JSON.stringify({ site: origin, supabaseUrl: origin, supabaseKey: "k", accessToken: jwt(), refreshToken: "r1", workerURL: origin, canvas: CONV, savedAt: at }),
-			{ mode: 0o600 },
-		);
-		return directory;
+		const other = mkdtempSync(join(tmpdir(), "cw-test-"));
+		copyFileSync(join(home, "canvas-session.json"), join(other, "canvas-session.json"));
+		return other;
 	};
-	const home = newHome();
 	/** Runs the real CLI against this fake; resolves with its JSON output (or error line) and exit code. */
-	const runFrom = async (directory: string, ...args: string[]) => {
-		const env = { ...process.env, FLOWITH_HOME: directory, FLOWITH_AGENT: "claude-code" } as Record<string, string | undefined>;
+	const run = (...args: string[]) => runWith({}, ...args);
+	const runFrom = (directory: string, ...args: string[]) => runWith({ home: directory }, ...args);
+	const runWith = async (at: { home?: string; env?: Record<string, string> }, ...args: string[]) => {
+		const env = { ...process.env, FLOWITH_HOME: at.home ?? home, FLOWITH_AGENT: "claude-code", ...at.env } as Record<string, string | undefined>;
 		delete env.FLOWITH_URL;
 		delete env.FLOWITH_CANVAS;
 		const proc = Bun.spawn(["bun", join(import.meta.dir, "..", "index.ts"), ...args, "--json", "--quiet"], { env, stdout: "pipe", stderr: "pipe" });
@@ -235,9 +295,8 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 		try { json = JSON.parse(stdout.trim().split("\n").at(-1) ?? ""); } catch { json = stdout; }
 		return { json, code };
 	};
-	const run = (...args: string[]) => runFrom(home, ...args);
 	const writes = () => requests.filter((r) => r.method !== "GET" && !r.path.startsWith("/auth/v1/"));
-	return { origin, home, newHome, rows, requests, writes, usage, opts, run, runFrom, stop: () => (server.stop(true), hangUp.stop(true)) };
+	return { origin, home, requests, writes, usage, opts, rows, run, runWith, runFrom, newHome, hold, stop: () => (server.stop(true), hangUp.stop(true)) };
 }
 
 /** A token the CLI accepts as unexpired (it only reads the claims). */

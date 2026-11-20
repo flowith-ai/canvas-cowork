@@ -6,7 +6,7 @@
  */
 
 import { type Catalog, type Model, imageSizing, videoParams } from "./catalog";
-import type { Card, FlowNodeRow } from "./desk";
+import type { Card } from "./desk";
 import { cardsFrom, fetchRowsById } from "./desk";
 import { type Api, CliError, sleep, worker } from "./http";
 import type { Uploaded } from "./media";
@@ -362,23 +362,23 @@ export async function waitFor(
 	let delay = 2500;
 	let latest = new Map<string, Result>();
 	for (;;) {
-		let rows: FlowNodeRow[] = [];
 		try {
-			rows = await fetchRowsById(api, ids);
+			const rows = await fetchRowsById(api, ids);
+			latest = new Map(cardsFrom(rows).map((c) => [c.id, resultOf(c)]));
+			for (const id of ids) {
+				if (!latest.has(id)) latest.set(id, { ref: id.slice(0, 8), id, kind: "?", status: "removed" });
+			}
 		} catch (e) {
 			if (e instanceof CliError && e.code === "NOT_LOGGED_IN") throw e;
 		}
-		if (rows.length) {
-			const cards = cardsFrom(rows);
-			latest = new Map(cards.map((c) => [c.id, resultOf(c)]));
-		}
 		const results = ids.map(
-			(id) => latest.get(id) ?? ({ ref: id.slice(0, 8), id, kind: "?", status: rows.length ? "removed" : "running" } as Result),
+			(id): Result => latest.get(id) ?? { ref: id.slice(0, 8), id, kind: "?", status: "running" },
 		);
 		const settled = results.filter((r) => r.status !== "running").length;
 		opts.onTick?.(settled, ids.length);
-		if (settled === ids.length || Date.now() >= deadline) return results;
-		await sleep(delay);
+		const timeLeft = deadline - Date.now();
+		if (settled === ids.length || timeLeft <= 0) return results;
+		await sleep(Math.min(delay, timeLeft));
 		delay = Math.min(delay + 500, 6000);
 	}
 }

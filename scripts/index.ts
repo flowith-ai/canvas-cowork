@@ -98,8 +98,8 @@ import { CANVAS_NODE_GAP, groupLayout, isClear, placeSingle } from "./lib/placem
 // ---------- args ----------
 
 const BOOLEAN_FLAGS = new Set([
-	"json", "quiet", "no-wait", "wait", "all", "full", "fresh", "dry-run", "no-audio", "audio", "draft",
-	"transparent", "no-open", "instrumental", "remove", "help",
+	"json", "quiet", "no-wait", "wait", "full", "fresh", "dry-run", "no-audio", "audio", "draft",
+	"transparent", "no-open", "open", "instrumental", "vocals", "layout", "add", "help",
 ]);
 
 interface Args {
@@ -122,8 +122,10 @@ function parseArgs(argv: string[]): Args {
 			const name = eq > 0 ? a.slice(2, eq) : a.slice(2);
 			let value: string;
 			if (eq > 0) value = a.slice(eq + 1);
-			else if (BOOLEAN_FLAGS.has(name) || i + 1 >= argv.length || argv[i + 1]!.startsWith("--")) value = "true";
-			else value = argv[++i]!;
+			else if (BOOLEAN_FLAGS.has(name)) value = "true";
+			else if (argv[i + 1] !== undefined && !argv[i + 1]!.startsWith("--")) value = argv[++i]!;
+			else if (name === "voice") value = "true"; // soundtrack also accepts --voice without a line.
+			else throw new CliError(`--${name} requires a value. See \`<command> --help\`.`, "INVALID_PARAM");
 			flags.set(name, [...(flags.get(name) ?? []), value]);
 		} else pos.push(a);
 	}
@@ -183,7 +185,7 @@ async function context(a: Args): Promise<Ctx> {
 async function canvasOf(ctx: Ctx, a: Args, opts: { create?: string } = {}): Promise<{ id: string; title: string | null; created?: boolean; team?: boolean }> {
 	const ref = flag(a, "canvas") ?? process.env.FLOWITH_CANVAS;
 	if (ref) {
-		const found = await resolveCanvas(ctx.api, ctx.userId, ref);
+		const found = await resolveCanvas(ctx.api, ctx.userId, ref, ctx.site);
 		const c = found.team_id === undefined ? await getCanvas(ctx.api, found.id) : found;
 		return { id: c.id, title: c.title, team: !!c.team_id };
 	}
@@ -301,6 +303,7 @@ async function chargedFor(ctx: Ctx, convId: string, cards: Result[], team = fals
 async function finish(ctx: Ctx, convId: string, results: Result[], extra: Record<string, unknown> = {}, opts: { charged?: boolean; team?: boolean } = {}) {
 	const failed = results.filter((r) => r.status === "failed");
 	const running = results.filter((r) => r.status === "running");
+	const removed = results.filter((r) => r.status === "removed");
 	const lost = running.filter((r) => r.code === "SENT_UNKNOWN");
 	const charged = opts.charged && !running.length ? await chargedFor(ctx, convId, results, opts.team) : {};
 	const stopped = failed.filter((r) => r.code === "NO_CREDITS" || r.code === "MODEL_LOCKED");
@@ -312,6 +315,7 @@ async function finish(ctx: Ctx, convId: string, results: Result[], extra: Record
 			? [`No answer came back for ${lost.map((r) => r.ref).join(" ")}: Flowith may have taken it. \`wait ${lost.map((r) => r.ref).join(" ")}\` (it finishes if it was taken); \`retry\` checks the canvas's charges and only sends it again once it is clear it never arrived.`]
 			: []),
 		...(running.length > lost.length ? [`Still generating: \`wait ${running.filter((r) => !lost.includes(r)).map((r) => r.ref).join(" ")}\` later.`] : []),
+		...(removed.length ? [`No longer on the canvas: ${removed.map((r) => r.ref).join(" ")}. Run \`look\` to see what is there now.`] : []),
 	];
 	out({
 		canvas: convId,
@@ -321,7 +325,7 @@ async function finish(ctx: Ctx, convId: string, results: Result[], extra: Record
 		cards: results,
 		...(next.length ? { next: next.join(" ") } : {}),
 	});
-	if (failed.length || lost.length) process.exitCode = 1;
+	if (failed.length || lost.length || removed.length) process.exitCode = 1;
 }
 
 /** Waits for the cards Flowith took and reports them all; a card whose send got no answer is reported, not waited on. */
@@ -346,7 +350,7 @@ async function waitAndReport(ctx: Ctx, a: Args, convId: string, ids: string[], f
 // ---------- commands: session ----------
 
 async function cmdLogin(a: Args) {
-	const s = await login(agentName(a), log, { open: !has(a, "no-open"), site: flag(a, "site") });
+	const s = await login(agentName(a), (message) => process.stderr.write(`${message}\n`), { open: !has(a, "no-open"), site: flag(a, "site") });
 	const claims = jwtClaims(s.accessToken);
 	// The previous canvas-cowork's login (a copy of the browser's sign-in) is no longer used.
 	const oldLogin = forgetOldLogin();
@@ -413,8 +417,7 @@ async function cmdUse(a: Args) {
 	const ctx = await context(a);
 	const ref = a.pos.join(" ").trim();
 	if (!ref) throw new CliError("use <canvas id, prefix, title or URL>", "INVALID_PARAM");
-	const id = ref.match(/\/conv\/([0-9a-f-]{36})/i)?.[1] ?? ref;
-	const c = await resolveCanvas(ctx.api, ctx.userId, id);
+	const c = await resolveCanvas(ctx.api, ctx.userId, ref, ctx.site);
 	ctx.session.canvas = c.id;
 	saveSession(ctx.session);
 	out({ canvas: c.id, title: c.title, url: canvasUrl(ctx.site, c.id), active: true });
@@ -444,7 +447,7 @@ function cardLine(c: Card, byId: Map<string, Card>, indent: string): string {
 	bits.push(`@${c.rect.x},${c.rect.y} ${c.rect.width}×${c.rect.height}`);
 	const from = [...(c.madeFrom ?? []), ...(c.references ?? []), ...(c.follows ? [c.follows] : [])];
 	if (from.length) bits.push(`← ${[...new Set(from)].map(short).join(",")}`);
-	if (c.placedBy === "flo") bits.push("(Flo)");
+	if (c.placedBy !== "you") bits.push(`(${c.placedBy === "flo" ? "Flo" : c.placedBy})`);
 	const gist = (c.kind === "image" || c.kind === "video" || c.kind === "audio" ? c.prompt : c.text)?.replace(/\s+/g, " ").trim();
 	return `${bits.join("  ")}${gist ? `\n${indent}       ${gist.length > 110 ? `${gist.slice(0, 109)}…` : gist}` : ""}${c.status === "failed" && c.error ? `\n${indent}       error: ${c.error.slice(0, 160)}` : ""}`;
 }
@@ -456,11 +459,17 @@ async function cmdLook(a: Args) {
 	// look [words] [--kind image]: only the matching cards (and the groups holding them).
 	const words = a.pos.join(" ").trim().toLowerCase();
 	const kind = flag(a, "kind");
+	const status = flag(a, "status");
+	const by = flag(a, "by")?.toLowerCase();
 	const matches = (c: Card) =>
 		(!kind || c.kind === kind) &&
+		(!status || (c.status === "init" ? "running" : c.status) === status) &&
+		(!by || c.placedBy.toLowerCase() === by) &&
 		(!words || [c.title, c.prompt, c.text, c.model, c.ref].some((v) => v?.toLowerCase().includes(words)));
-	const hits = all.filter((c) => c.kind !== "group" && matches(c));
-	const cards = words || kind ? all.filter((c) => hits.includes(c) || (c.kind === "group" && hits.some((h) => h.groupId === c.id))) : all;
+	const hits = all.filter(matches);
+	const hitIds = new Set(hits.map((c) => c.id));
+	const parentIds = new Set(hits.map((c) => c.groupId));
+	const cards = all.filter((c) => hitIds.has(c.id) || parentIds.has(c.id) || (!kind && !status && !by && c.groupId && hitIds.has(c.groupId)));
 	if (jsonOut) {
 		return out({
 			canvas: canvas.id,
@@ -469,7 +478,7 @@ async function cmdLook(a: Args) {
 			cards: cards.map(({ row: _r, data: _d, ...c }) => ({ ...c, prompt: c.prompt?.slice(0, 400), text: c.text?.slice(0, 400) })),
 		});
 	}
-	const byId = new Map(cards.map((c) => [c.id, c]));
+	const byId = new Map(all.map((c) => [c.id, c]));
 	const groups = cards.filter((c) => c.kind === "group");
 	const loose = cards.filter((c) => c.kind !== "group" && !c.groupId);
 	const counts = Object.entries(
@@ -639,7 +648,7 @@ async function cmdImage(a: Args, base?: { source: Card }) {
 		};
 	});
 	const groupName = flag(a, "group") ?? (items.length > 1 ? title ?? titleFrom(prompts[0]!, 20) : undefined);
-	const placed = await placeCards(ctx.api, canvas.id, cards, items, { anchor: base?.source ?? anchorOf(a, cards, refs), group: groupName, into: intoOf(a, cards) });
+	const placed = await placeCards(ctx.api, canvas.id, cards, items, { anchor: anchorOf(a, cards, refs), group: groupName, into: intoOf(a, cards) });
 	log(`Placed ${placed.ids.length} image card${placed.ids.length > 1 ? "s" : ""} (${modelId}, ~${credits} credits); generating…`);
 	const lost = await sendAll(ctx, placed, (id) => ({ kind: "image", body: imageRequest(jobs[placed.ids.indexOf(id)]!, id, canvas.id).body }));
 	await waitAndReport(ctx, a, canvas.id, placed.ids, 300, { model: modelId, estimatedCredits: credits, ...(placed.groupId ? { group: placed.groupId.slice(0, 8) } : {}) }, lost);
@@ -775,7 +784,7 @@ async function cmdSound(a: Args, tool: "gen_speech" | "gen_music") {
 			: {
 					prompt: words,
 					model: spec.id,
-					instrumental: !flag(a, "lyrics") && !has(a, "vocals"),
+					instrumental: has(a, "instrumental") || (!flag(a, "lyrics") && !has(a, "vocals")),
 					...(flag(a, "lyrics") ? { lyrics_prompt: flag(a, "lyrics") } : {}),
 					...(num(a, "duration") ? { duration: num(a, "duration") } : {}),
 				};
@@ -1212,40 +1221,61 @@ async function cmdWait(a: Args) {
 	const ctx = await context(a);
 	const canvas = await canvasOf(ctx, a);
 	const cards = await readCanvas(ctx.api, canvas.id);
-	const chosen = a.pos.length ? a.pos.map((r) => findCard(cards, r)) : cards.filter((c) => c.status === "running");
+	const chosen = a.pos.length ? a.pos.map((r) => findCard(cards, r)) : cards.filter((c) => c.status === "running" || c.status === "init");
 	if (!chosen.length) return out({ canvas: canvas.id, cards: [], note: "Nothing is generating." });
-	await waitAndReport(ctx, a, canvas.id, chosen.map((c) => c.id), 900);
+	await waitAndReport(ctx, a, canvas.id, [...new Set(chosen.map((c) => c.id))], 900);
 }
 
 // ---------- commands: run by the open canvas ----------
 
-/**
- * Hands an operation to the browser window that has this canvas open (see lib/live.ts): the canvas's own layout,
- * toolbar, storyboard, character and director tools, exactly as Flo runs them.
- */
+/** Hands an operation to the browser window that has this canvas open (see lib/live.ts). */
+async function browserOperation(ctx: Ctx, a: Args, convId: string, operation: string, input: Record<string, unknown>, fallbackSec: number) {
+	const url = canvasUrl(ctx.site, convId);
+	log(`Asking the open canvas to run ${operation}…`);
+	const result = await runOnCanvas(ctx.api, { sessionId: ctx.session.botSessionId, key: ctx.session.agentKey }, ctx.userId, convId, operation, input, {
+		timeoutMs: timeoutOf(a, fallbackSec),
+		canvasUrl: url,
+		onAccepted: () => log("The canvas took it on."),
+	});
+	if (!result.ok) throw new CliError(result.error || `${operation} failed on the canvas.`, "CANVAS_ERROR", { operation, operationId: result.operationId, canvasUrl: url });
+	return result;
+}
+
+async function cmdSelection(a: Args) {
+	const ctx = await context(a);
+	const canvas = await canvasOf(ctx, a);
+	const result = await browserOperation(ctx, a, canvas.id, "getCanvasLayout", {}, 20);
+	const layout = result.layout as { nodes?: Array<{ id: string; selected?: boolean; hidden?: boolean }> } | undefined;
+	if (!Array.isArray(layout?.nodes)) throw new CliError("The browser did not return the current canvas layout. Open the canvas and try again.", "CANVAS_ERROR");
+	const selected = layout.nodes.filter((node) => node.selected && !node.hidden && isUuid(node.id));
+	const saved = selected.length ? await readCanvas(ctx.api, canvas.id) : [];
+	const byId = new Map(saved.map((card) => [card.id, card]));
+	out({
+		canvas: canvas.id,
+		url: canvasUrl(ctx.site, canvas.id),
+		cards: selected.map(({ id }) => {
+			const card = byId.get(id);
+			return card ? { id, ref: card.ref, kind: card.kind, title: card.title, status: card.status } : { id, ref: id.slice(0, 8), status: "unsaved" };
+		}),
+	});
+}
+
 async function onCanvas(a: Args, operation: string, build: (cards: Card[]) => Record<string, unknown>, waitSec = 0) {
 	const ctx = await context(a);
 	const canvas = await canvasOf(ctx, a);
 	const cards = await readCanvas(ctx.api, canvas.id);
 	const input = build(cards);
-	if (has(a, "dry-run")) return out({ operation, input });
-	const url = canvasUrl(ctx.site, canvas.id);
-	log(`Asking the open canvas to run ${operation}…`);
-	const res = await runOnCanvas(ctx.api, { sessionId: ctx.session.botSessionId, key: ctx.session.agentKey }, ctx.userId, canvas.id, operation, input, {
-		timeoutMs: timeoutOf(a, 600),
-		canvasUrl: url,
-		onAccepted: () => log("The canvas took it on."),
-	});
-	if (!res.ok) throw new CliError(res.error || `${operation} failed on the canvas.`, "CANVAS_ERROR");
+	const res = await browserOperation(ctx, a, canvas.id, operation, input, Math.max(600, waitSec));
 	const ids = (res.nodeIds ?? []).filter((id) => isUuid(id));
-	const { kind: _k, operationId: _o, ok: _ok, nodeIds: _n, ...extra } = res;
+	const { kind: _k, ok: _ok, nodeIds: _n, ...extra } = res;
 	if (waitSec && ids.length && !has(a, "no-wait")) {
 		const rows = cardsFrom(await fetchRowsById(ctx.api, ids));
 		const generating = rows.filter((c) => c.status === "running" || c.status === "init").map((c) => c.id);
 		if (generating.length) return waitAndReport(ctx, a, canvas.id, ids, waitSec, { operation, ...extra }, [], false);
 	}
 	const rows = ids.length ? cardsFrom(await fetchRowsById(ctx.api, ids)) : [];
-	out({ canvas: canvas.id, url, operation, ...extra, cards: rows.length ? rows.map(resultOf) : ids.map((id) => id.slice(0, 8)) });
+	const results = new Map(rows.map((card) => [card.id, resultOf(card)]));
+	out({ canvas: canvas.id, url: canvasUrl(ctx.site, canvas.id), operation, ...extra, cards: ids.map((id) => results.get(id) ?? { id, ref: id.slice(0, 8) }) });
 }
 
 const idOf = (cards: Card[], ref: string | undefined, what = "card") => {
@@ -1254,7 +1284,11 @@ const idOf = (cards: Card[], ref: string | undefined, what = "card") => {
 };
 
 const ON_CANVAS: Record<string, (a: Args) => Promise<unknown>> = {
-	focus: (a) => onCanvas(a, "focusCanvasNodes", (cards) => ({ nodeIds: a.pos.map((r) => idOf(cards, r)) })),
+	selection: cmdSelection,
+	focus: (a) => onCanvas(a, "focusCanvasNodes", (cards) => {
+		if (!a.pos.length) throw new CliError("Name at least one card to focus.", "INVALID_PARAM");
+		return { nodeIds: a.pos.map((r) => idOf(cards, r)) };
+	}),
 	tidy: (a) =>
 		onCanvas(a, "arrangeCanvasNodes", (cards) => ({
 			...(a.pos.length ? { nodeIds: a.pos.map((r) => idOf(cards, r)) } : {}),
@@ -1318,14 +1352,15 @@ const ON_CANVAS: Record<string, (a: Args) => Promise<unknown>> = {
 		})),
 	do: (a) => {
 		const operation = a.pos[0];
-		if (!operation) throw new CliError("do <operation> --json '{…}'  (an operation the canvas runs for Flo; ids are full card ids)", "INVALID_PARAM");
+		if (!operation) throw new CliError("do <operation> --input '{…}'  (an operation the canvas runs for Flo; ids are full card ids)", "INVALID_PARAM");
 		const raw = flag(a, "input") ?? a.pos[1] ?? "{}";
 		let input: Record<string, unknown>;
 		try {
 			input = JSON.parse(raw);
 		} catch {
-			throw new CliError("--input must be JSON.", "INVALID_PARAM");
+			throw new CliError("--input must be a JSON object.", "INVALID_PARAM");
 		}
+		if (input === null || Array.isArray(input) || typeof input !== "object") throw new CliError("--input must be a JSON object.", "INVALID_PARAM");
 		return onCanvas(a, operation, () => input, 900);
 	},
 };
@@ -1358,9 +1393,9 @@ const HELP = `canvas-cowork — work on a Flowith 3.0 canvas. Every card you mak
 
   bun scripts/index.ts <command> [args] [--flags]
 
-SET UP      login [--site next-gen.flowith.io] · whoami · credits · spent [--since 30m] · logout
-CANVASES    canvases [search] · new "title" · use <canvas|url> · open · rename canvas "title"
-SEE         look [words] [--kind image]  every card: ref, kind, title, model, status, place, links
+SET UP      login [--site flowith.io] [--no-open] · whoami · credits · spent [--since 30m] · logout
+CANVASES    canvases [search] · new "title" [--open] · use <canvas|url> · open · rename canvas "title"
+SEE         look [words] [--kind image] [--status running] [--by codex]  card refs, placement and links
             read <card…> [--full]        full prompt / text / media of cards
             shots [card…] [--full]       download previews to look at (Read the files)
             save <card…> [--out dir]     download originals / text
@@ -1378,7 +1413,8 @@ ARRANGE     add <file|url…> · note "text" · write <card> "text" · move <car
             rename <card> "title" · link <from> <to> · unlink <from> <to> · copy <card> · delete <card…>
             wait [card…]
 ON CANVAS   (run by the user's open canvas window, as Flo's operations are)
-            focus <refs…> · tidy [refs…] [--as row|column|grid|left|top|hdistribute…] (no refs: Organize)
+            selection (get refs selected in the browser) · focus <refs…> (show cards in the browser)
+            tidy [refs…] [--as row|column|grid|left|top|hdistribute…] (no refs: Organize)
             split <ref> --rows 2 --cols 2 · angles <ref> [--angles low,closeUp,wide,side,back,high,overShoulder]
             relight <ref> --preset window|golden|blueHour|neon|rim|noir|studio|candle
             lipsync <clip> --with <sound> · motion <clip> --with <picture> · soundtrack <clip> [--voice "text"]
@@ -1391,7 +1427,7 @@ Placement   new cards sit beside --near <card> (or the first --ref card), else i
 Cards       a card is named by its ref (first 8 hex of its id, shown by look), a longer id prefix, or its title.
 References  in prompts, name references @image1 @image2 @video1 @audio1 in --ref order; the CLI rewrites
             them to each model's own naming (Seedance 图片1, Kling @image_1, image models 图1/image 1).
-Global      --canvas <ref>  --json  --quiet  --no-wait  --timeout <s>
+Global      --canvas <ref|url>  --json  --quiet  --no-wait  --timeout <s>
             --dry-run (making commands, add, note, delete: show the request and credits; send nothing)
             --agent <claude-code|codex|…> (auto-detected)  ·  env FLOWITH_URL, FLOWITH_CANVAS, FLOWITH_HOME
 `;
@@ -1448,6 +1484,34 @@ const COMMANDS: Record<string, (a: Args) => Promise<unknown>> = {
 	...ON_CANVAS,
 };
 
+const GLOBAL_FLAGS = new Set(["canvas", "agent", "bot", "json", "quiet", "help", "dry-run", "wait", "no-wait", "timeout"]);
+const PLACEMENT = "title near group into";
+const IMAGE_FLAGS = `model ratio size quality n ref transparent ${PLACEMENT}`;
+const COMMAND_FLAGS: Record<string, string> = {
+	login: "site no-open", canvases: "limit", list: "limit", new: "open", look: "kind status by", read: "full", shots: "last full out", save: "out",
+	image: IMAGE_FLAGS, edit: IMAGE_FLAGS, vary: `${IMAGE_FLAGS} system duration resolution audio no-audio draft first from last extend edit-video`,
+	video: `model ratio duration resolution ref first from last audio no-audio draft extend edit-video ${PLACEMENT}`,
+	text: `model ref system ${PLACEMENT}`, speech: "model voice language for", music: "model lyrics duration for instrumental vocals",
+	upscale: "to quality", expand: "ratio", add: `ratio ${PLACEMENT}`, note: "file title near into", write: "file",
+	move: "to gap right-of left-of below above", arrange: "as cols gap", group: "name", spent: "since", models: "fresh",
+	tidy: "as", split: "rows cols", angles: "angles", relight: "preset", lipsync: "with", motion: "with", soundtrack: "voice",
+	breakdown: "layout", character: "name subject style description", cut: "into start", stage: "add into title cast", shoot: "shots", do: "input",
+};
+
+function validateArgs(a: Args) {
+	const localFlags = (COMMAND_FLAGS[a.cmd] ?? "").split(" ");
+	for (const [name, values] of a.flags) {
+		if (!GLOBAL_FLAGS.has(name) && !localFlags.includes(name))
+			throw new CliError(`\`${a.cmd}\` does not accept --${name}. See \`${a.cmd} --help\`.`, "INVALID_PARAM");
+		if (BOOLEAN_FLAGS.has(name) && values.some((value) => value !== "true" && value !== "false"))
+			throw new CliError(`--${name} is a boolean flag.`, "INVALID_PARAM");
+	}
+	const seconds = num(a, "timeout");
+	if (seconds !== undefined && (seconds <= 0 || seconds * 1000 > 2_147_483_647))
+		throw new CliError("--timeout must be a positive number of seconds within the system timer limit.", "INVALID_PARAM");
+	if (a.cmd === "speech" && flag(a, "voice") === "true") throw new CliError("--voice requires a voice id for speech.", "INVALID_PARAM");
+}
+
 /** Commands of the previous canvas-cowork and what replaced them. */
 const RENAMED: Record<string, string> = {
 	"create-canvas": "new",
@@ -1489,6 +1553,7 @@ async function main() {
 		const moved = RENAMED[a.cmd];
 		throw new CliError(moved ? `\`${a.cmd}\` is now: ${moved}. See \`help\`.` : `Unknown command "${a.cmd}". See \`help\`.`, "INVALID_PARAM");
 	}
+	validateArgs(a);
 	await run(a);
 }
 

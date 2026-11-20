@@ -6,9 +6,11 @@ import { mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { isDeepStrictEqual } from "node:util";
+import { b64url, openWith, sealWith } from "../lib/realtime";
 
 export const USER = "11111111-1111-4111-8111-111111111111";
 export const CONV = "22222222-2222-4222-8222-222222222222";
+const agentKey = b64url(crypto.getRandomValues(new Uint8Array(32)));
 export const ids = {
 	group: "a0000000-0000-4000-8000-000000000001",
 	image: "a1000000-0000-4000-8000-000000000002",
@@ -101,6 +103,8 @@ export interface UsageRecord {
 }
 
 export interface FakeOptions {
+	/** The responding canvas window; omitted to leave the command unanswered. */
+	browser?: (command: Record<string, unknown>) => { ack?: boolean; result?: Record<string, unknown> };
 	/** Pause a snapshotted read, or a PATCH before it checks its condition, to exercise real CLI races. */
 	afterNodeRead?: () => Promise<void>;
 	nodeReadStatus?: number;
@@ -134,10 +138,13 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 	const rows = canvasRows();
 	const usage = opts.usage ?? [];
 	const hangUp = Bun.listen({ hostname: "localhost", port: 0, socket: { open: (socket) => void socket.end(), data: () => {} } });
-	const server = Bun.serve({
+	let title = "Test canvas";
+	const server = Bun.serve<undefined>({
+		hostname: "localhost",
 		port: 0,
-		async fetch(req) {
+		async fetch(req, server) {
 			const url = new URL(req.url);
+			if (url.pathname === "/realtime/v1/websocket" && server.upgrade(req)) return;
 			const body = req.method === "GET" ? undefined : await req.text().then((t) => { try { return JSON.parse(t); } catch { return t; } });
 			requests.push({ method: req.method, path: url.pathname + url.search, body });
 			const p = url.pathname;
@@ -146,15 +153,18 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 			if (p === "/auth/v1/token") return Response.json({ access_token: jwt(), refresh_token: "r2", expires_in: 3600 });
 			if (p === "/models") return Response.json(catalog);
 			if (p.startsWith("/rest/v1/conversation")) {
-				if (req.method !== "GET") return Response.json([{ id: CONV, title: "T", updated_at: at }]);
-				return Response.json([{ id: CONV, title: "Test canvas", updated_at: at, metadata: {}, team_id: opts.team ? "33333333-3333-4333-8333-333333333333" : null }]);
+				if (req.method !== "GET" && typeof body?.title === "string") title = body.title;
+				return Response.json([{ id: CONV, title, updated_at: at, metadata: {}, team_id: opts.team ? "33333333-3333-4333-8333-333333333333" : null }]);
 			}
 			if (p.startsWith("/rest/v1/flow_node")) {
 				if (req.method === "GET") {
 					if (opts.nodeReadStatus) return new Response("read unavailable", { status: opts.nodeReadStatus });
 					const only = url.searchParams.get("id");
 					const want = only?.startsWith("in.(") ? only.slice(4, -1).split(",") : undefined;
-					const snapshot = Response.json((want ? rows.filter((r) => want.includes(r.id)) : rows).filter((r) => !(r as any).is_delete));
+					const offset = Number(url.searchParams.get("offset") ?? 0);
+					const limit = Number(url.searchParams.get("limit") ?? rows.length);
+					const matches = rows.filter((r) => (!want || want.includes(r.id)) && !(r as any).is_delete && (url.searchParams.get("type") !== "neq.0" || r.type !== "0"));
+					const snapshot = Response.json(matches.slice(offset, offset + limit));
 					await opts.afterNodeRead?.();
 					return snapshot;
 				}
@@ -212,13 +222,32 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 			}
 			return Response.json({});
 		},
+		websocket: {
+			async message(ws, raw) {
+				const { topic, event, payload, ref } = JSON.parse(String(raw));
+				if (event === "phx_join") {
+					ws.send(JSON.stringify({ topic, ref, event: "phx_reply", payload: { status: "ok" } }));
+					return;
+				}
+				if (payload?.event !== "bot_action" || !opts.browser) return;
+				const { sessionId, actionId, sealed } = payload.payload;
+				const context = `${sessionId}:${actionId}`;
+				const opened = await openWith<{ command: Record<string, unknown> }>(agentKey, context, sealed);
+				if (!opened) return;
+				const { command } = opened;
+				const { ack, result } = opts.browser(command);
+				const respond = (response: Record<string, unknown>) => ws.send(JSON.stringify({ topic, event: "broadcast", payload: { event: "bot_response", payload: { actionId, ...response } } }));
+				if (ack) respond({ type: "ack" });
+				if (result) respond({ type: "result", sealed: await sealWith(agentKey, `${context}:result`, { operationId: command.operationId, ...result }) });
+			},
+		},
 	});
 	const origin = `http://localhost:${server.port}`;
 	const newHome = () => {
 		const directory = mkdtempSync(join(tmpdir(), "cw-test-"));
 		writeFileSync(
 			join(directory, "canvas-session.json"),
-			JSON.stringify({ site: origin, supabaseUrl: origin, supabaseKey: "k", accessToken: jwt(), refreshToken: "r1", workerURL: origin, canvas: CONV, savedAt: at }),
+			JSON.stringify({ site: origin, supabaseUrl: origin, supabaseKey: "k", accessToken: jwt(), refreshToken: "r1", workerURL: origin, canvas: CONV, savedAt: at, botSessionId: "bot-test", agentKey }),
 			{ mode: 0o600 },
 		);
 		return directory;

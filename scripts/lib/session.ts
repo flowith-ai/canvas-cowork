@@ -1,11 +1,9 @@
 /**
  * Logging in once and staying logged in.
  *
- * `login` opens Flowith with `?cli_port&cli_nonce&cli_bot`; the signed-in page asks the user to
- * allow the agent (/connect-agent) and sends its session to this process's one-shot WebSocket on
- * 127.0.0.1. With the refresh token in it the CLI renews itself, so the browser is needed once.
- * Supabase rotates refresh tokens on use and the browser tab holds the same chain, so the CLI
- * refreshes late (only near expiry) and asks for `login` again if a refresh is refused.
+ * `login` asks the user to approve a separate agent sign-in in the Flowith app. The page sends the
+ * session sealed to this process over Realtime, with a local socket for older pages when available.
+ * The CLI renews its own session and records the site and worker it was approved on.
  */
 
 import { execFileSync, spawn } from "child_process";
@@ -14,8 +12,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { type Api, CliError } from "./http";
 
-/** Where Flowith 3.0 lives. Becomes https://flowith.io once 3.0 is the main site. */
-export const DEFAULT_SITE = "https://beta.flowith.io";
+export const DEFAULT_SITE = "https://flowith.io";
 
 export interface Session {
 	site: string;
@@ -307,6 +304,7 @@ export async function login(agent: string, log: (m: string) => void, opts: { ope
 		await relay.join(topic);
 		relayReady = true;
 	} catch (e) {
+		relay.close();
 		log(`(Couldn't reach Flowith's realtime service: ${(e as Error).message}; using the local connection only.)`);
 	}
 
@@ -317,7 +315,7 @@ export async function login(agent: string, log: (m: string) => void, opts: { ope
 			done = true;
 			clearTimeout(timer);
 			setTimeout(() => {
-				server.stop(true);
+				server?.stop(true);
 				relay.close();
 			}, 300);
 			fn();
@@ -330,7 +328,7 @@ export async function login(agent: string, log: (m: string) => void, opts: { ope
 				supabaseKey: d.supabaseKey,
 				accessToken: d.accessToken,
 				...(d.refreshToken ? { refreshToken: d.refreshToken } : {}),
-				workerURL: (d.workerURL || "https://edge.flowith.io").replace(/\/$/, ""),
+				workerURL: (d.workerURL || workerFor(site)).replace(/\/$/, ""),
 				...(d.activeConvId ? { canvas: d.activeConvId } : {}),
 				...(d.sessionId && d.agentKey ? { botSessionId: d.sessionId, agentKey: d.agentKey } : {}),
 				savedAt: new Date().toISOString(),
@@ -363,7 +361,7 @@ export async function login(agent: string, log: (m: string) => void, opts: { ope
 			});
 		}
 
-		const server = Bun.serve({
+		const localServer = () => Bun.serve({
 			port: 0,
 			hostname: "127.0.0.1",
 			fetch(req, srv) {
@@ -388,8 +386,18 @@ export async function login(agent: string, log: (m: string) => void, opts: { ope
 				},
 			},
 		});
-		const params = new URLSearchParams({ cli_nonce: nonce, cli_bot: agent, cli_port: String(server.port), ...(relayReady ? { cli_code: code, cli_key: keys.publicKey } : {}) });
-		const url = `${site}/?${params}`;
+		let server: ReturnType<typeof localServer> | undefined;
+		try {
+			server = localServer();
+		} catch {
+			if (!relayReady) {
+				reject(new CliError("Login couldn't reach Flowith Realtime or start its local connection. Check the network and run `login` again.", "LOGIN_UNAVAILABLE"));
+				return;
+			}
+		}
+		const params = new URLSearchParams({ cli_nonce: nonce, cli_bot: agent, ...(server ? { cli_port: String(server.port) } : {}), ...(relayReady ? { cli_code: code, cli_key: keys.publicKey } : {}) });
+		// The production root serves the marketing site; /blank always enters the canvas app.
+		const url = `${site}/blank?${params}`;
 		const timer = setTimeout(
 			() =>
 				finish(() =>
@@ -402,7 +410,7 @@ export async function login(agent: string, log: (m: string) => void, opts: { ope
 			[
 				opened ? "Opened Flowith in your browser — sign in if asked, then click Allow." : "Open this link in a browser, sign in and click Allow:",
 				relayReady ? `When the page asks, type this code: ${verificationCode(code)}` : "",
-				"(If the browser asks whether the page may connect to apps on this device, allow it.)",
+				server ? "(If the browser asks whether the page may connect to apps on this device, allow it.)" : "",
 				opened ? `If nothing opened, visit: ${url}` : url,
 			]
 				.filter(Boolean)

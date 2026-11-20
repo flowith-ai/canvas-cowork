@@ -173,6 +173,7 @@ export async function placeCards(api: Api, convId: string, cards: Card[], items:
 		height: layout.height,
 		data: {
 			...stamps(),
+			madeBy: api.agent,
 			value: "",
 			name: where.group || "Group",
 			width: layout.width,
@@ -321,6 +322,7 @@ export async function groupCards(api: Api, convId: string, all: Card[], members:
 			height: layout.height,
 			data: {
 				...stamps(),
+				madeBy: api.agent,
 				value: "",
 				name,
 				width: layout.width,

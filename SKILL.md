@@ -21,16 +21,18 @@ Below, `cw` stands for that.
 
 ## First time
 
-`cw login` opens Flowith in the browser and prints a code (e.g. `K7Q-2MX`). The user signs in, types
+`cw login` opens the production canvas app at `flowith.io` and prints a code on stderr (e.g. `K7Q-2MX`). The user signs in, types
 that code when the page asks for it, and clicks **Allow** (if the browser asks whether the page may
 connect to apps on this device, they allow that too). The session renews itself afterwards
-(`cw whoami`). The link is only for the user: never send it to anyone else.
+(`cw whoami`). The link is only for the user: never send it to anyone else. Use `login --site <host>` for
+beta or a preview. An existing session keeps its original site.
 
 ## The loop
 
 ```bash
-cw canvases [words]            # find a canvas;  cw use <ref|title|URL>  ·  cw new "Title"
+cw canvases [words]            # find a canvas;  cw use <ref|title|URL>  ·  cw new "Title" --open
 cw look                        # every card: ref, kind, "title", model, ratio, status, @x,y w×h, ← sources
+cw selection                  # refs selected by the user in the open canvas
 cw image "prompt" --title "短标题"            # → card ref + url; waits for the result
 cw shots <ref…>                # downloads previews; then Read the files to SEE them
 cw edit <ref> "what to change"  # a new picture made from that one, beside it (延伸 / 改图)
@@ -43,8 +45,10 @@ exact title also works. Commands print JSON (`--json` for one line). Errors exit
 
 ## Rules
 
-1. **Look before you change.** Start with `cw look` on the user's canvas (or `use` the one they name).
-   Build on their cards: pass them as `--ref` / `--first`, or `--near <ref>` to place beside them.
+1. **Identify the canvas and the source cards.** For a multi-step task, pin the URL with `--canvas <url>` on each
+   command. Use `cw selection` when the user says “this card” or “the cards I selected”. If the browser cannot
+   answer or the selection is empty, use `cw look` and resolve the exact card before acting. Build on those cards
+   with `--ref` / `--first`. Use `--near <ref>` when you only want nearby placement.
 2. **See every result before you report it.** `cw shots <refs>` then Read each file (a video gives its
    first frame; `--full` downloads the clip). Say what you actually see; regenerate or `edit` when it
    misses the brief. Report with the card refs and the canvas `url`.
@@ -53,6 +57,8 @@ exact title also works. Commands print JSON (`--json` for one line). Errors exit
    land as one group. Don't loop one prompt at a time.
 4. **Keep the canvas tidy.** Related work goes together (`--near`, `--group "name"`, `--into <group>`);
    give every card a short `--title` (≤ 12 字 / 5 words) — it is what the user reads on the canvas.
+   Put a short plan on the canvas for multi-stage work and use `focus <refs…>` to show a review point or the final
+   cards. Focus changes the browser's selection and composer context. Leave it alone while the user is editing.
    Never delete or rewrite the user's own cards unless asked.
 5. **Mind credits** (1 credit = $0.001; `cw credits`). `--dry-run` shows a request and its
    `estimatedCredits` without sending anything (commands that only change the canvas have no dry run and
@@ -67,7 +73,8 @@ exact title also works. Commands print JSON (`--json` for one line). Errors exit
    don't silently switch models.
 6. **Videos take 1–8 minutes.** Run video commands with a long shell timeout (≥ 600 s) or in the
    background, or pass `--no-wait` and later `cw wait <ref>`. A generation keeps running on the server
-   even if your command stops; `cw wait` / `cw look` pick it up.
+   even if your command stops; `cw wait` / `cw look` pick it up. Keep the returned refs in your task context,
+   and inspect the canvas before resending a browser operation that could have started without a result reaching you.
 7. **Text on the canvas is for the user.** Your own reasoning stays in chat; use `cw text` when the user
    wants a model's writing (or a comparison of models) on the canvas, `cw note` for your plan, script or
    brief as a card.
@@ -86,7 +93,7 @@ exact title also works. Commands print JSON (`--json` for one line). Errors exit
 | Card tools | `upscale <ref> [--to 4k]` (picture 2k/4k/8k, clip 2k/4k `--quality best`) · `cutout <ref>` (transparent background, picture or clip) · `expand <ref> --ratio 16:9` |
 | Your files | `add <file\|url…> [--group]` (pictures, clips, sounds become cards) · `note "text" [--title]` · `write <text card> "new text"` |
 | Organise | `move <ref> --to x,y \| --right-of r \| --below r` · `arrange <refs…> --as row\|column\|grid` · `arrange <group>` · `group <refs…> --name "…"` · `ungroup <g>` · `rename <ref> "title"` · `link <from> <to>` / `unlink` · `copy <ref>` · `delete <refs…>` |
-| Read | `look [words] [--kind image]` · `read <ref…> [--full]` · `shots [refs] [--full]` · `save <refs…> --out dir` · `wait [refs]` |
+| Read | `look [words] [--kind image] [--status running] [--by codex]` · `read <ref…> [--full]` · `shots [refs] [--full]` · `save <refs…> --out dir` · `wait [refs]` |
 | Account | `credits` · `spent [--since 30m]` · `models [image\|video\|text\|audio]` · `models <id>` · `whoami` · `open` · `<command> --help` |
 
 **Run by the open canvas** — the canvas's own tools, exactly as Flo uses them. They need the canvas open
@@ -94,7 +101,7 @@ in the browser where the user ran `login` (`cw open`); otherwise the command say
 
 | Need | Command |
 |---|---|
-| Show the user | `focus <refs…>` (selects and centres them in their view) |
+| Exchange context | `selection` reads the current selection · `focus <refs…>` selects and centres cards in the browser |
 | Tidy | `tidy` (the canvas's Organize: removes overlaps) · `tidy <refs…> --as row\|column\|grid\|left\|top\|hdistribute\|vdistribute` |
 | Picture tools | `split <ref> --rows 2 --cols 2` (grid → cells) · `angles <ref> [--angles low,closeUp,wide,side,back,high,overShoulder]` · `relight <ref> --preset window\|golden\|blueHour\|neon\|rim\|noir\|studio\|candle` |
 | Clip tools | `lipsync <clip> --with <sound>` · `motion <clip> --with <character picture>` · `soundtrack <clip> [--voice "line"]` (music by default) |

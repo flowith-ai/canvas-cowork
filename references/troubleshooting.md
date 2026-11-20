@@ -32,8 +32,12 @@ Other things worth knowing:
   picture; `--full` always downloads originals.
 - **A cut-out looks like it still has a background**: transparent PNGs keep their colours under zero
   alpha and some viewers draw them; on the canvas it is transparent.
-- **The user doesn't see new cards**: they appear live in an open canvas tab of the same account; ask
-  the user to open `cw open` (or the `url` in any result). Cards placed far away are brought into view.
+- **The user doesn't see new cards**: they appear live in an open canvas tab of the same account. Reuse the tab
+  if it is already open. Otherwise use the `url` in a result or `cw open`. Cards placed far away are brought into view.
+- **Focus or selection is acknowledged and times out**: on older canvases a duplicate background tab can
+  take the command and block the canvas while its camera animation is paused. Bring the original tab forward
+  once to release it and keep only one copy of the canvas open. Check the visible selection before retrying.
+  Direct commands such as `look`, `image` and `wait` can continue during this.
 - **Several machines / accounts**: `FLOWITH_HOME=/path` keeps a separate session. `login --site <host>`
   (e.g. `next-gen.flowith.io`) signs in to another Flowith site and every later command follows that
   session (default https://flowith.io; `FLOWITH_URL` can select the site per shell).

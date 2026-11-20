@@ -74,7 +74,7 @@ import {
 } from "./lib/session";
 import { cutout, expand, makeSound, upscaleImage, upscaleVideo } from "./lib/tools";
 import { videoPrice } from "./lib/video-cost";
-import { runOnCanvas } from "./lib/live";
+import { runOnCanvas, usesLiveViewport } from "./lib/live";
 import {
 	type Layout,
 	type NewCard,
@@ -469,7 +469,18 @@ async function cmdLook(a: Args) {
 	const hits = all.filter(matches);
 	const hitIds = new Set(hits.map((c) => c.id));
 	const parentIds = new Set(hits.map((c) => c.groupId));
-	const cards = all.filter((c) => hitIds.has(c.id) || parentIds.has(c.id) || (!kind && !status && !by && c.groupId && hitIds.has(c.groupId)));
+	const included = all.filter((c) => hitIds.has(c.id) || parentIds.has(c.id) || (!kind && !status && !by && c.groupId && hitIds.has(c.groupId)));
+	const byPosition = (a: Card, b: Card) => a.rect.y - b.rect.y || a.rect.x - b.rect.x || a.id.localeCompare(b.id);
+	const groupIds = new Set(included.filter((card) => card.kind === "group").map((card) => card.id));
+	const membersByGroup = new Map<string, Card[]>();
+	const top = included.filter((card) => {
+		if (card.kind === "group" || !card.groupId || !groupIds.has(card.groupId)) return true;
+		const members = membersByGroup.get(card.groupId) ?? [];
+		members.push(card);
+		membersByGroup.set(card.groupId, members);
+		return false;
+	}).sort(byPosition);
+	const cards = top.flatMap((card) => [card, ...(membersByGroup.get(card.id) ?? []).sort(byPosition)]);
 	if (jsonOut) {
 		return out({
 			canvas: canvas.id,
@@ -480,14 +491,12 @@ async function cmdLook(a: Args) {
 	}
 	const byId = new Map(all.map((c) => [c.id, c]));
 	const groups = cards.filter((c) => c.kind === "group");
-	const loose = cards.filter((c) => c.kind !== "group" && !c.groupId);
 	const counts = Object.entries(
 		cards.filter((c) => c.kind !== "group").reduce<Record<string, number>>((m, c) => ((m[c.kind] = (m[c.kind] ?? 0) + 1), m), {}),
 	)
 		.map(([k, n]) => `${n} ${k}`)
 		.join(", ");
 	console.log(`Canvas "${canvas.title ?? "(untitled)"}" ${canvas.id}\n${canvasUrl(ctx.site, canvas.id)}\n${counts || "empty"}${groups.length ? `, ${groups.length} group${groups.length > 1 ? "s" : ""}` : ""}  (@x,y = top-left; ← = made from / uses)\n`);
-	const top = [...groups, ...loose].sort((p, q) => p.rect.y - q.rect.y || p.rect.x - q.rect.x);
 	// What a tidy-up should fix: top-level boxes that cover each other.
 	const overlaps: string[] = [];
 	for (let i = 0; i < top.length; i++)
@@ -498,7 +507,7 @@ async function cmdLook(a: Args) {
 	if (overlaps.length) console.log(`Overlapping: ${overlaps.slice(0, 12).join(", ")}${overlaps.length > 12 ? " …" : ""}  (tidy, arrange or move fixes it)\n`);
 	for (const c of top) {
 		if (c.kind === "group") {
-			const members = cards.filter((m) => m.groupId === c.id).sort((p, q) => p.rect.y - q.rect.y || p.rect.x - q.rect.x);
+		const members = membersByGroup.get(c.id) ?? [];
 			const total = all.filter((m) => m.groupId === c.id).length;
 			console.log(`group  ${c.ref}  "${c.title ?? ""}"  ${total} cards  @${c.rect.x},${c.rect.y} ${c.rect.width}×${c.rect.height}`);
 			for (const m of members) console.log(cardLine(m, byId, "  "));
@@ -530,13 +539,11 @@ async function cmdShots(a: Args) {
 		: cards.filter((c) => (c.kind === "image" || c.kind === "video") && c.url).slice(-(num(a, "last") ?? 12));
 	const dir = flag(a, "out") ?? join(tmpdir(), "flowith-shots", canvas.id.slice(0, 8));
 	mkdirSync(dir, { recursive: true });
-	const files: Array<Record<string, unknown>> = [];
-	await Promise.all(
+	const files = await Promise.all(
 		chosen.map(async (c) => {
 			const src = has(a, "full") ? c.url : (c.preview ?? (c.kind === "image" ? c.url : undefined));
 			if (!src) {
-				files.push({ ref: c.ref, kind: c.kind, skipped: c.kind === "video" ? "no preview frame yet; use --full for the clip" : "no media" });
-				return;
+				return { ref: c.ref, kind: c.kind, skipped: c.kind === "video" ? "no preview frame yet; use --full for the clip" : "no media" };
 			}
 			const path = fileFor(dir, c.ref, c.title, src, c.kind === "video" && !has(a, "full") ? "jpg" : c.kind === "video" ? "mp4" : "png");
 			try {
@@ -544,9 +551,9 @@ async function cmdShots(a: Args) {
 				// A cut-out keeps its background colours under full transparency; most viewers draw them anyway.
 				const head = readFileSync(path).subarray(0, 26);
 				const alpha = head.length > 25 && head.readUInt32BE(0) === 0x89504e47 && (head[25] === 6 || head[25] === 4);
-				files.push({ ref: c.ref, kind: c.kind, title: c.title, file: path, ...(alpha ? { note: "PNG with transparency: transparent areas may still show colour in a viewer" } : {}) });
+				return { ref: c.ref, kind: c.kind, title: c.title, file: path, ...(alpha ? { note: "PNG with transparency: transparent areas may still show colour in a viewer" } : {}) };
 			} catch (e) {
-				files.push({ ref: c.ref, kind: c.kind, error: (e as Error).message });
+				return { ref: c.ref, kind: c.kind, error: (e as Error).message };
 			}
 		}),
 	);
@@ -622,14 +629,19 @@ async function cmdImage(a: Args, base?: { source: Card }) {
 		}))),
 	);
 	const built = jobs.map((j) => imageRequest(j, "00000000-0000-0000-0000-000000000000", canvas.id));
-	const credits = Math.round(
-		jobs.reduce((sum, j, i) => {
-			const body = built[i]!.body as { quality?: string; aspect_ratio?: string; image_size?: string };
-			const pixels = /^\d+x\d+$/.test(body.aspect_ratio ?? "") ? body.aspect_ratio : undefined;
-			return sum + (estimateCredits(j.model, { quality: body.quality, pixels, size: body.image_size, refs: j.refs.length }) ?? 0);
-		}, 0),
-	);
-	if (has(a, "dry-run")) return out({ model: modelId, jobs: jobs.length, estimatedCredits: credits, requests: built.map((b) => b.body) });
+	const estimates = jobs.map((j, i) => {
+		const body = built[i]!.body as { quality?: string; aspect_ratio?: string; image_size?: string };
+		const pixels = /^\d+x\d+$/.test(body.aspect_ratio ?? "") ? body.aspect_ratio : undefined;
+		return estimateCredits(j.model, { quality: body.quality, pixels, size: body.image_size, refs: j.refs.length });
+	});
+	const credits = estimates.some((estimate) => estimate === undefined)
+		? null
+		: Math.round(estimates.reduce<number>((sum, estimate) => sum + (estimate ?? 0), 0));
+	const pricing = {
+		estimatedCredits: credits,
+		...(credits === null ? { estimateNote: "The catalogue has no price for at least one image request. Ask the user before running this batch." } : {}),
+	};
+	if (has(a, "dry-run")) return out({ model: modelId, jobs: jobs.length, ...pricing, requests: built.map((b) => b.body) });
 	const title = flag(a, "title");
 	const items: NewCard[] = jobs.map((j, i) => {
 		const ratio = built[i]!.ratio;
@@ -649,9 +661,9 @@ async function cmdImage(a: Args, base?: { source: Card }) {
 	});
 	const groupName = flag(a, "group") ?? (items.length > 1 ? title ?? titleFrom(prompts[0]!, 20) : undefined);
 	const placed = await placeCards(ctx.api, canvas.id, cards, items, { anchor: anchorOf(a, cards, refs), group: groupName, into: intoOf(a, cards) });
-	log(`Placed ${placed.ids.length} image card${placed.ids.length > 1 ? "s" : ""} (${modelId}, ~${credits} credits); generating…`);
+	log(`Placed ${placed.ids.length} image card${placed.ids.length > 1 ? "s" : ""} (${modelId}, ${credits === null ? "no price estimate" : `~${credits} credits`}); generating…`);
 	const lost = await sendAll(ctx, placed, (id) => ({ kind: "image", body: imageRequest(jobs[placed.ids.indexOf(id)]!, id, canvas.id).body }));
-	await waitAndReport(ctx, a, canvas.id, placed.ids, 300, { model: modelId, estimatedCredits: credits, ...(placed.groupId ? { group: placed.groupId.slice(0, 8) } : {}) }, lost);
+	await waitAndReport(ctx, a, canvas.id, placed.ids, 300, { model: modelId, ...pricing, ...(placed.groupId ? { group: placed.groupId.slice(0, 8) } : {}) }, lost);
 }
 
 /** Said where a clip's price can't be known before it is made. */
@@ -1244,16 +1256,21 @@ async function browserOperation(ctx: Ctx, a: Args, convId: string, operation: st
 async function cmdSelection(a: Args) {
 	const ctx = await context(a);
 	const canvas = await canvasOf(ctx, a);
-	const result = await browserOperation(ctx, a, canvas.id, "getCanvasLayout", {}, 20);
+	const result = await browserOperation(ctx, a, canvas.id, "getCanvasLayout", { selectionOnly: true }, 20);
 	const layout = result.layout as { nodes?: Array<{ id: string; selected?: boolean; hidden?: boolean }> } | undefined;
-	if (!Array.isArray(layout?.nodes)) throw new CliError("The browser did not return the current canvas layout. Open the canvas and try again.", "CANVAS_ERROR");
-	const selected = layout.nodes.filter((node) => node.selected && !node.hidden && isUuid(node.id));
-	const saved = selected.length ? await readCanvas(ctx.api, canvas.id) : [];
-	const byId = new Map(saved.map((card) => [card.id, card]));
+	// Older canvas versions ignore selectionOnly and still return the full layout.
+	const nodeIds = result.nodeIds ?? layout?.nodes?.filter((node) => node.selected && !node.hidden).map((node) => node.id);
+	if (!Array.isArray(nodeIds)) throw new CliError("The browser did not return the current selection. Bring the canvas forward and try again.", "CANVAS_ERROR");
+	const selected = [...new Set(nodeIds.filter(isUuid))];
+	const byId = new Map<string, Card>();
+	for (let i = 0; i < selected.length; i += 100) {
+		const rows = await fetchRowsById(ctx.api, selected.slice(i, i + 100));
+		for (const card of cardsFrom(rows.filter((row) => row.conv_id === canvas.id))) byId.set(card.id, card);
+	}
 	out({
 		canvas: canvas.id,
 		url: canvasUrl(ctx.site, canvas.id),
-		cards: selected.map(({ id }) => {
+		cards: selected.map((id) => {
 			const card = byId.get(id);
 			return card ? { id, ref: card.ref, kind: card.kind, title: card.title, status: card.status } : { id, ref: id.slice(0, 8), status: "unsaved" };
 		}),
@@ -1265,7 +1282,8 @@ async function onCanvas(a: Args, operation: string, build: (cards: Card[]) => Re
 	const canvas = await canvasOf(ctx, a);
 	const cards = await readCanvas(ctx.api, canvas.id);
 	const input = build(cards);
-	const res = await browserOperation(ctx, a, canvas.id, operation, input, Math.max(600, waitSec));
+	const timeout = usesLiveViewport(operation) ? 20 : Math.max(600, waitSec);
+	const res = await browserOperation(ctx, a, canvas.id, operation, input, timeout);
 	const ids = (res.nodeIds ?? []).filter((id) => isUuid(id));
 	const { kind: _k, ok: _ok, nodeIds: _n, ...extra } = res;
 	if (waitSec && ids.length && !has(a, "no-wait")) {

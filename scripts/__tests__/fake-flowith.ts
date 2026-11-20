@@ -41,6 +41,7 @@ export function canvasRows() {
 
 export const catalog = {
 	"z-image-turbo": { media: "image", title: "Z Image Turbo", consume_num: 5, price: { completion: 5000, prompt: 0 }, supportedAspectRatios: ["1:1", "16:9"], supportsImageInput: true },
+	"unpriced-image": { media: "image", title: "Unpriced Image", supportedAspectRatios: ["1:1"] },
 	"seedance-2.5-flash": {
 		media: "video", title: "Seedance 2.5 Flash", supportedDurations: ["-1", "4", "5", "10"], supportedResolutions: ["480p", "720p"],
 		supportedAspectRatios: ["adaptive", "16:9", "9:16", "1:1"], pricePerSecond: { audioOff: 80704, audioOn: 80704 }, price: { completion: 403520, prompt: 0 },

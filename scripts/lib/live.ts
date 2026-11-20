@@ -19,6 +19,8 @@ export interface CanvasResult {
 	[k: string]: unknown;
 }
 
+export const usesLiveViewport = (operation: string) => operation === "focusCanvasNodes" || operation === "getCanvasLayout";
+
 export async function runOnCanvas(
 	api: Api,
 	agent: { sessionId?: string; key?: string },
@@ -49,6 +51,8 @@ export async function runOnCanvas(
 		});
 		return await new Promise<CanvasResult>((resolve, reject) => {
 			let acknowledged = false;
+			const viewport = usesLiveViewport(operation);
+			const showCanvas = `Bring ${opts.canvasUrl} to the foreground in the browser that approved the CLI. If the canvas is open in multiple tabs, keep just one copy open until you finish working together.`;
 			const details = () => ({ operation, operationId, canvasUrl: opts.canvasUrl, acknowledged });
 			const until = Date.now() + opts.timeoutMs;
 			const finish = () => {
@@ -60,7 +64,9 @@ export async function runOnCanvas(
 				reject(new CliError(message, code, details()));
 			};
 			let timer = setTimeout(() => fail(
-				`No browser acknowledged the operation. Open ${opts.canvasUrl} in the browser that approved the CLI. Check the canvas before resending an operation that can create cards or use credits.`,
+				viewport
+					? `No browser acknowledged the operation. ${showCanvas}`
+					: `No browser acknowledged the operation. Open ${opts.canvasUrl} in the browser that approved the CLI. Check the canvas before resending an operation that can create cards or use credits.`,
 				"CANVAS_NOT_OPEN",
 			), Math.min(opts.timeoutMs, 20_000));
 			const off = rt.on(topic, "bot_response", async (r: { type: string; actionId: string; code?: string; sealed?: { iv: string; ct: string } }) => {
@@ -74,7 +80,9 @@ export async function runOnCanvas(
 					acknowledged = true;
 					clearTimeout(timer);
 					timer = setTimeout(() => fail(
-						`The browser acknowledged "${operation}" but no result arrived. It may still be running. Inspect the canvas before retrying.`,
+						viewport
+							? `The browser acknowledged "${operation}" but no result arrived. ${showCanvas} Check the visible selection before trying again.`
+							: `The browser acknowledged "${operation}" but no result arrived. It may still be running. Inspect the canvas before retrying.`,
 						"TIMEOUT",
 					), Math.max(0, until - Date.now()));
 					opts.onAccepted?.();

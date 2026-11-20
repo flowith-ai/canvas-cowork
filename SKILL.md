@@ -59,6 +59,8 @@ exact title also works. Commands print JSON (`--json` for one line). Errors exit
    give every card a short `--title` (≤ 12 字 / 5 words) — it is what the user reads on the canvas.
    Put a short plan on the canvas for multi-stage work and use `focus <refs…>` to show a review point or the final
    cards. Focus changes the browser's selection and composer context. Leave it alone while the user is editing.
+   For live collaboration, have the user keep the canvas in the foreground. Reuse the open tab; `cw open` can
+   create a second copy. Use `look "group name"` to recover a batch and its member refs without opening another tab.
    Never delete or rewrite the user's own cards unless asked.
 5. **Mind credits** (1 credit = $0.001; `cw credits`). `--dry-run` shows a request and its
    `estimatedCredits` without sending anything (commands that only change the canvas have no dry run and

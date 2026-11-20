@@ -39,6 +39,7 @@ describe("a multi-stage canvas workflow", () => {
 		expect(byId.get(frames.cards[0].id)?.references).toEqual([hero.id]);
 		expect(byId.get(edit.id)?.madeFrom).toEqual([frames.cards[1].id]);
 		expect(byId.get(video.id)?.madeFrom).toEqual([edit.id]);
+		f.rows.reverse();
 		expect((await f.run("look", "Storyboard")).json.cards.map((card: { ref: string }) => card.ref)).toEqual([frames.group, ...frames.cards.map((card: { ref: string }) => card.ref)]);
 		expect((await f.run("look", "--kind", "group")).json.cards.map((card: { ref: string }) => card.ref)).toEqual([frames.group]);
 		expect((await f.run("look", "--kind", "group", "--by", "claude-code")).json.cards.map((card: { ref: string }) => card.ref)).toEqual([frames.group]);
@@ -120,11 +121,23 @@ describe("working with the open canvas", () => {
 		expect(f.writes()).toEqual([]);
 	});
 
+	test("requests the compact selection and keeps the user's selection order", async () => {
+		const unsaved = crypto.randomUUID();
+		const f = fake({ browser: (command) => {
+			expect(command).toMatchObject({ operation: "getCanvasLayout", selectionOnly: true });
+			return { result: { ok: true, nodeIds: [ids.text, ids.image, unsaved] } };
+		} });
+		const result = await f.run("selection");
+		expect(result.json.cards.map((card: { id: string }) => card.id)).toEqual([ids.text, ids.image, unsaved]);
+		expect(result.json.cards[2]).toMatchObject({ status: "unsaved" });
+	});
+
 	test("distinguishes an unanswered operation from one the browser acknowledged", async () => {
 		const closed = await fake().run("focus", ref(ids.image), "--timeout", "0.2");
 		const open = await fake({ browser: () => ({ ack: true }) }).run("focus", ref(ids.image), "--timeout", "0.2");
 		expect(closed.json).toMatchObject({ error: "CANVAS_NOT_OPEN", data: { acknowledged: false } });
 		expect(open.json).toMatchObject({ error: "TIMEOUT", data: { acknowledged: true, operation: "focusCanvasNodes" } });
+		expect(open.json.message).toContain("foreground");
 	});
 
 	test("preserves the command scope when passing a raw operation payload", async () => {
@@ -177,6 +190,11 @@ describe("--dry-run sends nothing that changes the canvas", () => {
 	test("a price only making it can tell is unknown, with a reason to ask", async () => {
 		const r = await f.run("video", "same shot, rainy", "--model", "kling-video/v4", "--ref", ref(ids.video), "--dry-run");
 		expect(r.json.estimatedCredits).toBeNull();
+		expect(r.json.estimateNote).toContain("Ask the user");
+	});
+	test("the total for a mixed image batch stays unknown when a model has no catalogue price", async () => {
+		const r = await f.run("image", "rainy window", "--model", "z-image-turbo,unpriced-image", "--dry-run");
+		expect(r.json).toMatchObject({ jobs: 2, estimatedCredits: null });
 		expect(r.json.estimateNote).toContain("Ask the user");
 	});
 	test("text takes a text card as its reference", async () => {

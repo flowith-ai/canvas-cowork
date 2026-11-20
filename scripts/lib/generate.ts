@@ -440,7 +440,8 @@ export async function failCard(
 			},
 		};
 	}
-	await patch(api, card, fields).catch(() => {});
+	// Only while the card is as this send left it: a retry elsewhere that claimed it since is never undone.
+	await patch(api, card, fields, { asRead: data }).catch(() => {});
 }
 
 export type { Catalog };

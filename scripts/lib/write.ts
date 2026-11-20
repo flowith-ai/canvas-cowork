@@ -83,51 +83,93 @@ async function insert(api: Api, rows: Array<Record<string, unknown>>): Promise<F
 	});
 }
 
+/** A card's status and retry mark (`agentAttempt`, renewed by each retry) as read, or null. */
+const markOf = (data: Record<string, unknown> | undefined, key: string) => {
+	const v = data?.[key];
+	return v === undefined || v === null ? null : String(v);
+};
+
+/** done; or not, because the card changed, is gone, isn't the user's to edit, or couldn't be read back to tell. */
+/** Longest whole-data condition sent (URL-encoded). */
+const WHOLE_LIMIT = 12_000;
+
+/** A PostgREST condition that the column holds exactly this data, or undefined when it would be too long. */
+function wholeData(raw: unknown): string | undefined {
+	const cond = raw === null || raw === undefined ? "is.null" : `eq.${JSON.stringify(raw)}`;
+	return encodeURIComponent(cond).length <= WHOLE_LIMIT ? cond : undefined;
+}
+
+/** Data with object keys in order, to compare what jsonb holds. */
+const sorted = (v: unknown): unknown =>
+	Array.isArray(v) ? v.map(sorted) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sorted((v as Record<string, unknown>)[k])])) : v;
+
+export type PatchOutcome = "done" | "changed" | "gone" | "forbidden" | "unchecked";
+
 /**
- * Patches rows. flow_node is partitioned by created_at, so rows are addressed by id + created_at.
- * `data` replaces the whole object: pass the merged data.
+ * Patches a card. flow_node is partitioned by created_at, so rows are addressed by id + created_at. `data` replaces the
+ * whole object, so a write of data applies only while the card's status and retry mark are as read (`asRead`, by
+ * default the card's own data): one UPDATE … WHERE, so a result, a retry or another command that came in meanwhile is
+ * never undone. With `type`, the card's type must be as read too. Says what happened: done, or why not.
  */
-export async function patch(api: Api, card: Pick<Card, "id" | "createdAt">, fields: Record<string, unknown>) {
-	const rows = await rest<Array<{ id: string }>>(api, `flow_node?id=eq.${card.id}&created_at=eq.${encodeURIComponent(card.createdAt)}&select=id`, {
-		method: "PATCH",
-		json: fields,
-		prefer: "return=representation",
-	});
-	if (!rows?.length) throw new CliError(`Card ${card.id.slice(0, 8)} couldn't be changed (gone, or not yours to edit).`, "FORBIDDEN");
+export async function tryPatch(
+	api: Api,
+	card: Pick<Card, "id" | "createdAt"> & { type?: string; data?: Record<string, unknown>; row?: { data?: unknown; conv_id?: string } },
+	fields: Record<string, unknown>,
+	opts: { asRead?: Record<string, unknown>; type?: boolean; whole?: boolean } = {},
+): Promise<PatchOutcome> {
+	const q = new URLSearchParams({ id: `eq.${card.id}`, created_at: `eq.${card.createdAt}`, is_delete: "not.is.true", select: "id" });
+	const read = opts.asRead ?? ("data" in fields ? card.data : undefined);
+	// Data stored as a JSON string (old rows) has no keys in SQL (->> reads null): it must still be that string, so a
+	// write that turned it into an object (another claim) is seen.
+	const stringRow = typeof card.row?.data === "string";
+	for (const key of read ? ["status", "agentAttempt"] : []) {
+		const v = stringRow ? null : markOf(read, key);
+		q.append(`data->>${key}`, v === null ? "is.null" : `eq.${v}`);
+	}
+	if (opts.type && card.type) q.set("type", `eq.${card.type}`);
+	// With `whole`, all of the card's data must be as read (jsonb equality, key order aside): an edit made meanwhile is
+	// never written over. Only while the condition stays short enough for a URL (Supabase refuses ~20 KB); past that,
+	// status and retry mark alone.
+	const whole = opts.whole && card.row ? wholeData(card.row.data) : undefined;
+	if (whole) q.set("data", whole);
+	if (opts.whole && card.row?.conv_id) q.set("conv_id", `eq.${card.row.conv_id}`);
+	const rows = await rest<Array<{ id: string }>>(api, `flow_node?${q}`, { method: "PATCH", json: fields, prefer: "return=representation" });
+	if (rows?.length) return "done";
+	// Nothing was changed: why, from the card as it is now.
+	let now: Card | undefined;
+	try {
+		now = cardsFrom(await fetchRowsById(api, [card.id]))[0];
+	} catch {
+		return "unchecked";
+	}
+	if (!now) return "gone";
+	if (whole && JSON.stringify(sorted(now.row.data)) !== JSON.stringify(sorted(card.row!.data))) return "changed";
+	if (read && stringRow && typeof now.row.data !== "string") return "changed";
+	if (read && (markOf(now.data, "status") !== markOf(read, "status") || markOf(now.data, "agentAttempt") !== markOf(read, "agentAttempt"))) return "changed";
+	if (opts.type && card.type && now.type !== card.type) return "changed";
+	return "forbidden";
+}
+
+export async function patch(
+	api: Api,
+	card: Pick<Card, "id" | "createdAt"> & { type?: string; data?: Record<string, unknown>; row?: { data?: unknown } },
+	fields: Record<string, unknown>,
+	opts: { asRead?: Record<string, unknown> } = {},
+) {
+	const outcome = await tryPatch(api, card, fields, opts);
+	const ref = card.id.slice(0, 8);
+	if (outcome === "gone") throw new CliError(`Card ${ref} is no longer on the canvas.`, "NOT_FOUND");
+	if (outcome === "changed") throw new CliError(`Card ${ref} changed while this ran (its result came in, or another command changed it): \`look\` and try again.`, "BUSY");
+	if (outcome === "forbidden") throw new CliError(`Card ${ref} couldn't be changed (not yours to edit).`, "FORBIDDEN");
+	if (outcome === "unchecked") throw new CliError(`Card ${ref} wasn't changed, and reading it back to tell why failed: try again.`, "SERVER_ERROR");
 }
 
 /**
- * Atomically claims exactly the version of a card we checked. Unlike a local lock, this also excludes other
- * machines. Compare the entire data object: a concurrent edit must not be overwritten by our stale snapshot.
- * The unique claim is also recoverable if the PATCH succeeds but its response is lost. No generation has been
- * sent yet; an unconfirmed claim is left alone, never followed by a blind submit.
+ * Claims a card for a retry: changed only if it is still as read, its type and all of its data (the claim writes a new
+ * retry mark). When two clients (other machines) claim the same card at once, the database lets only one change it,
+ * and an edit made meanwhile (in the page, say) is never written over.
  */
-export async function claimCardForRetry(api: Api, card: Card, type: string, data: Record<string, unknown>): Promise<Card> {
-	const claim = crypto.randomUUID();
-	const next = { ...data, agentRetryClaim: claim };
-	const query = [
-		`flow_node?id=eq.${card.id}`,
-		`created_at=eq.${encodeURIComponent(card.createdAt)}`,
-		`conv_id=eq.${card.row.conv_id}`,
-		`type=eq.${encodeURIComponent(card.type)}`,
-		`data=${card.row.data === null ? "is.null" : `eq.${encodeURIComponent(JSON.stringify(card.row.data))}`}`,
-		"is_delete=not.is.true",
-		"select=id,conv_id,type,p_id,position,width,height,data,created_at",
-	].join("&");
-	let rows: FlowNodeRow[];
-	try {
-		rows = await rest<FlowNodeRow[]>(api, query, { method: "PATCH", json: { type, data: next }, prefer: "return=representation" });
-	} catch (error) {
-		if (error instanceof CliError && (error.status === undefined || error.status < 500)) throw error;
-		rows = await fetchRowsById(api, [card.id]).catch(() => []);
-		// A network error does not prove that the claim failed. Only our unique claim proves we may submit.
-		rows = rows.filter((r) => r.created_at === card.createdAt && r.data && typeof r.data === "object"
-			&& r.data.agentRetryClaim === claim && r.data.status === "running");
-		if (!rows.length) throw new CliError(`Couldn't confirm the retry claim for ${card.ref}; nothing was submitted. Use \`look\`, then \`retry\` again.`, "SENT_UNKNOWN");
-	}
-	if (!rows?.length) throw new CliError(`${card.ref} changed, was removed, or couldn't be claimed for editing; nothing was submitted. Read it again before retrying.`, "BUSY");
-	return cardsFrom(rows)[0]!;
-}
+export const claim = (api: Api, card: Card, fields: Record<string, unknown>) => tryPatch(api, card, fields, { type: true, whole: true });
 
 /** A card still generating gets its result written by the worker; changing its data now could undo that. */
 export function settled(card: Card, what: string) {
@@ -347,6 +389,8 @@ export async function groupCards(api: Api, convId: string, all: Card[], members:
 export async function ungroup(api: Api, convId: string, all: Card[], group: Card) {
 	if (group.kind !== "group") throw new CliError(`${group.ref} is not a group.`, "INVALID_PARAM");
 	const members = all.filter((c) => c.groupId === group.id);
+	// Its members' data is rewritten: one still generating would have its result undone, so none may be.
+	for (const c of members) settled(c, "ungroup");
 	await Promise.all(
 		members.map((c) => {
 			const { group_id: _g, ...data } = c.data;

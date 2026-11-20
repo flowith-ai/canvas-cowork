@@ -19,7 +19,8 @@ Use `cw new "Working title" --open` for a fresh canvas, or take the user's canva
    use `cw focus <group-ref>` to show the storyboard, then `cw selection` to read the user's picks.
 5. One clip per frame, beside its frame (background / long timeout):
    `cw video "镜头1 的动作和声音…" --first <frame1> --duration 5 --title "镜头1"` …
-   Test on `--model muse-video` or `--draft` (Seedance 2.5, 480p) first when the user is price-sensitive.
+   For a short preview, price `--model muse-video --resolution 720p` or `--model seedance-2.5-flash --resolution 480p` with
+   `--dry-run`. Use `--model seedance-2.5 --draft` to test Seedance's draft mode.
 6. Continue a shot: `cw video "接着…" --extend <clip>`. Voice-over / music for the cut:
    `cw speech "旁白…" --for <clip>` · `cw music "warm acoustic, 90 bpm" --for <clip> --duration 30`.
 7. Put the clips in order: `cw group <clip refs…> --name "成片"` then `cw arrange <group>`; with the canvas

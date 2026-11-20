@@ -70,8 +70,8 @@ exact title also works. Commands print JSON (`--json` for one line). Errors exit
    very request (what it holds, at the user's member rate); a picture's comes from the catalogue. Once done, picture and clip results report `chargedCredits`: the canvas's own charge for
    that request, refunds included; `null` with a `chargedNote` when it can't be tied to the request (text
    is billed when its answer finishes; something else ran the same model on the canvas at that moment).
-   `cw spent` totals everything charged on a canvas. Test video ideas cheaply first (Muse Video, 480p,
-   4–5 s). `NO_CREDITS` / `MODEL_LOCKED`: stop and tell the user (top up at https://flowith.io/pricing);
+   `cw spent` totals everything charged on a canvas. For short video tests, check `cw models <id>` and
+   price the actual request with `--dry-run`. `NO_CREDITS` / `MODEL_LOCKED`: stop and tell the user (top up at https://flowith.io/pricing);
    don't silently switch models.
 6. **Videos take 1–8 minutes.** Run video commands with a long shell timeout (≥ 600 s) or in the
    background, or pass `--no-wait` and later `cw wait <ref>`. A generation keeps running on the server

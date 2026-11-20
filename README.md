@@ -1,6 +1,6 @@
 # Canvas Cowork
 
-Let Claude Code, Codex, Cursor or any agent with a shell **work directly on your
+Let Claude Code, Codex, Cursor, DeepSeek Harness or any agent with a shell **work directly on your
 [Flowith](https://flowith.io) 3.0 canvas** — generate and edit pictures, clips, text, voice and music,
 extend and vary them, upscale / cut out / expand, and organise the canvas — the way Flowith's own
 in-app agent, Flo, does. Every result is a card on your canvas, priced and billed exactly like the

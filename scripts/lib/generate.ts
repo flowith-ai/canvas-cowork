@@ -315,7 +315,7 @@ export interface Result {
 
 export function resultOf(card: Card): Result {
 	const d = card.data;
-	let status: Result["status"] = card.status === "finished" ? "finished" : card.status === "failed" ? "failed" : "running";
+	let status: Result["status"] = card.kind === "group" || card.status === "finished" ? "finished" : card.status === "failed" ? "failed" : "running";
 	let code: string | undefined;
 	let error = card.error;
 	if (card.type === "22") {

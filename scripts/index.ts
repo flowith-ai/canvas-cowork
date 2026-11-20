@@ -1272,7 +1272,9 @@ async function cmdSelection(a: Args) {
 		url: canvasUrl(ctx.site, canvas.id),
 		cards: selected.map((id) => {
 			const card = byId.get(id);
-			return card ? { id, ref: card.ref, kind: card.kind, title: card.title, status: card.status } : { id, ref: id.slice(0, 8), status: "unsaved" };
+			if (!card) return { id, ref: id.slice(0, 8), status: "unsaved" };
+			const { ref, kind, title, status } = resultOf(card);
+			return { id, ref, kind, title, status };
 		}),
 	});
 }

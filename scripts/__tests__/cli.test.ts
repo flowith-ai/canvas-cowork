@@ -118,6 +118,8 @@ describe("working with the open canvas", () => {
 		const focused = (await f.run("focus", selected[0].ref)).json;
 		expect(focused.cards[0]).toMatchObject({ ref: ref(ids.image), status: "finished" });
 		expect(received[1]).toMatchObject({ operation: "focusCanvasNodes", conversationId: CONV, nodeIds: [ids.image] });
+		const group = (await f.run("focus", ref(ids.group))).json.cards[0];
+		expect(group).toMatchObject({ ref: ref(ids.group), kind: "group", status: "finished" });
 		expect(f.writes()).toEqual([]);
 	});
 

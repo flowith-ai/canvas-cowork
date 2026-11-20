@@ -16,6 +16,156 @@ const fake = (...args: Parameters<typeof fakeFlowith>) => {
 };
 afterAll(() => fakes.forEach((f) => f.stop()));
 
+describe("a multi-stage canvas workflow", () => {
+	test("starts on an empty canvas and preserves references through notes, frames, edits and clips", async () => {
+		const f = fake({ team: true });
+		f.rows.length = 0;
+		const created = await f.run("new", "Rainy Café");
+		const url = created.json.url;
+		expect(created.json.title).toBe("Rainy Café");
+		expect(created.json.browserHandoff).toEqual({ url, preferredMode: "codex-internal-browser" });
+		expect((await f.run("look", "--canvas", url)).json.cards).toEqual([]);
+		const note = (await f.run("note", "A yellow cup. Blue-hour rain. Three shots.", "--title", "Creative brief", "--canvas", url)).json.cards[0];
+		const plan = (await f.run("text", "Write a shot list", "--ref", note.ref, "--title", "Shot list", "--timeout", "1")).json.cards[0];
+		expect(plan.text).toBe("an answer");
+		const hero = (await f.run("image", "Yellow cup on a rainy window ledge", "--title", "Hero", "--timeout", "1")).json.cards[0];
+		const frames = (await f.run("image", "Wide shot of @image1", "Close-up of @image1", "--ref", hero.ref, "--group", "Storyboard", "--timeout", "1")).json;
+		expect(frames.cards.map((card: { status: string }) => card.status)).toEqual(["finished", "finished"]);
+		const edit = (await f.run("edit", frames.cards[1].ref, "Keep the cup; soften the reflections", "--timeout", "1")).json.cards[0];
+		const video = (await f.run("video", "Slow push-in", "--first", edit.ref, "--timeout", "1")).json.cards[0];
+		expect(video.status).toBe("finished");
+		const all = (await f.run("look")).json.cards;
+		const byId = new Map<string, { references?: string[]; madeFrom?: string[]; title?: string }>(all.map((card: { id: string }) => [card.id, card]));
+		expect(byId.get(plan.id)?.references).toEqual([note.id]);
+		expect(byId.get(frames.cards[0].id)?.references).toEqual([hero.id]);
+		expect(byId.get(edit.id)?.madeFrom).toEqual([frames.cards[1].id]);
+		expect(byId.get(video.id)?.madeFrom).toEqual([edit.id]);
+		f.rows.reverse();
+		expect((await f.run("look", "Storyboard")).json.cards.map((card: { ref: string }) => card.ref)).toEqual([frames.group, ...frames.cards.map((card: { ref: string }) => card.ref)]);
+		expect((await f.run("look", "--kind", "group")).json.cards.map((card: { ref: string }) => card.ref)).toEqual([frames.group]);
+		expect((await f.run("look", "--kind", "group", "--by", "claude-code")).json.cards.map((card: { ref: string }) => card.ref)).toEqual([frames.group]);
+	}, 10_000);
+
+	test("finds cards beyond the first page", async () => {
+		const f = fake();
+		const sample = f.rows[0]!;
+		for (let i = 0; i < 510; i++) f.rows.push({ ...sample, id: crypto.randomUUID(), data: { name: `Board ${i}` } });
+		const result = await f.run("look", "Board 509", "--kind", "group");
+		expect(result.json.cards.map((card: { title: string }) => card.title)).toEqual(["Board 509"]);
+	});
+
+	test("rejects a link to a different environment and unsupported flags before writes", async () => {
+		const f = fake();
+		const wrongSite = `https://beta.flowith.io/conv/${CONV}`;
+		expect((await f.run("note", "planned note", "--canvas", wrongSite)).json.error).toBe("CANVAS_SITE_MISMATCH");
+		expect((await f.run("image", "cup", "--ration", "16:9")).json.message).toContain("does not accept --ration");
+		expect((await f.run("video", "cup", "--duration")).json.message).toContain("--duration requires a value");
+		expect(f.writes()).toEqual([]);
+	});
+
+	test("reports a deleted card while waiting, including when no cards remain", async () => {
+		const f = fake({ afterNodeRead: async () => { Object.assign(f.rows.find((row) => row.id === ids.running)!, { is_delete: true }); } });
+		const result = await f.run("wait", ref(ids.running), "--timeout", "1");
+		expect(result.code).toBe(1);
+		expect(result.json.cards[0]).toMatchObject({ id: ids.running, status: "removed" });
+	});
+});
+
+describe("working with the open canvas", () => {
+	test("hands off the exact canvas URL without changing the active canvas", async () => {
+		const f = fake();
+		const sessionPath = join(f.home, "canvas-session.json");
+		const session = JSON.parse(readFileSync(sessionPath, "utf8"));
+		delete session.canvas;
+		writeFileSync(sessionPath, JSON.stringify(session));
+		const url = `${f.origin}/conv/${CONV}`;
+		const result = await f.run("open", "--handoff", "--canvas", `${url}?panel=chat#frame`);
+		expect(result.code).toBe(0);
+		expect(result.json).toMatchObject({ canvas: CONV, url, browserHandoff: { url, preferredMode: "codex-internal-browser" } });
+		expect((await f.run("whoami")).json.canvas).toBeNull();
+		expect((await f.run("open", "--handoff", "--canvas", `https://beta.flowith.io/conv/${CONV}`)).json.error).toBe("CANVAS_SITE_MISMATCH");
+		expect(f.writes()).toEqual([]);
+	});
+
+	test("login opens the canvas app and keeps consent instructions visible in JSON mode", async () => {
+		const f = fake();
+		const proc = Bun.spawn(["bun", join(import.meta.dir, "..", "index.ts"), "login", "--site", f.origin, "--no-open", "--json", "--quiet"], {
+			env: { ...process.env, FLOWITH_HOME: f.home, FLOWITH_SUPABASE_URL: f.origin, FLOWITH_SUPABASE_KEY: "k" },
+			stdout: "pipe", stderr: "pipe",
+		});
+		try {
+			const reader = proc.stderr.pipeThrough(new TextDecoderStream()).getReader();
+			let instructions = "";
+			let link: string | undefined;
+			while (!link) {
+				const next = await reader.read();
+				if (next.done) throw new Error("Login exited before showing consent instructions.");
+				instructions += next.value;
+				link = instructions.split("\n").slice(0, -1).find((line) => line.startsWith(`${f.origin}/`));
+			}
+			const url = new URL(link);
+			expect(url.pathname).toBe("/blank");
+			expect(instructions).toContain("type this code");
+			// Exercise the login receipt without creating a live account session.
+			const socket = new WebSocket(`ws://127.0.0.1:${url.searchParams.get("cli_port")}`);
+			const session = JSON.parse(readFileSync(join(f.home, "canvas-session.json"), "utf8"));
+			await new Promise<void>((resolve, reject) => {
+				socket.onerror = () => reject(new Error("The local test login socket failed."));
+				socket.onopen = () => socket.send(JSON.stringify({ type: "session", data: { ...session, nonce: url.searchParams.get("cli_nonce") } }));
+				socket.onmessage = () => { socket.close(); resolve(); };
+			});
+			expect(JSON.parse(await new Response(proc.stdout).text())).toMatchObject({ loggedIn: true, site: f.origin });
+			expect(await proc.exited).toBe(0);
+		} finally {
+			if (proc.exitCode === null) proc.kill();
+		}
+	});
+
+	test("reads the user's selection and focuses the same cards by ref", async () => {
+		const received: Record<string, unknown>[] = [];
+		const f = fake({ browser: (command) => {
+			received.push(command);
+			return { ack: true, result: command.operation === "getCanvasLayout"
+				? { ok: true, layout: { nodes: [{ id: ids.image, selected: true }, { id: ids.text, selected: false }, { id: ids.video, selected: true, hidden: true }] } }
+				: { ok: true, nodeIds: command.nodeIds } };
+		} });
+		const selected = (await f.run("selection")).json.cards;
+		expect(selected).toEqual([{ id: ids.image, ref: ref(ids.image), title: "Cat", kind: "image", status: "finished" }]);
+		const focused = (await f.run("focus", selected[0].ref)).json;
+		expect(focused.cards[0]).toMatchObject({ ref: ref(ids.image), status: "finished" });
+		expect(received[1]).toMatchObject({ operation: "focusCanvasNodes", conversationId: CONV, nodeIds: [ids.image] });
+		const group = (await f.run("focus", ref(ids.group))).json.cards[0];
+		expect(group).toMatchObject({ ref: ref(ids.group), kind: "group", status: "finished" });
+		expect(f.writes()).toEqual([]);
+	});
+
+	test("requests the compact selection and keeps the user's selection order", async () => {
+		const unsaved = crypto.randomUUID();
+		const f = fake({ browser: (command) => {
+			expect(command).toMatchObject({ operation: "getCanvasLayout", selectionOnly: true });
+			return { result: { ok: true, nodeIds: [ids.text, ids.image, unsaved] } };
+		} });
+		const result = await f.run("selection");
+		expect(result.json.cards.map((card: { id: string }) => card.id)).toEqual([ids.text, ids.image, unsaved]);
+		expect(result.json.cards[2]).toMatchObject({ status: "unsaved" });
+	});
+
+	test("distinguishes an unanswered operation from one the browser acknowledged", async () => {
+		const closed = await fake().run("focus", ref(ids.image), "--timeout", "0.2");
+		const open = await fake({ browser: () => ({ ack: true }) }).run("focus", ref(ids.image), "--timeout", "0.2");
+		expect(closed.json).toMatchObject({ error: "CANVAS_NOT_OPEN", data: { acknowledged: false } });
+		expect(open.json).toMatchObject({ error: "TIMEOUT", data: { acknowledged: true, operation: "focusCanvasNodes" } });
+		expect(open.json.message).toContain("foreground");
+	});
+
+	test("preserves the command scope when passing a raw operation payload", async () => {
+		const f = fake({ browser: (command) => ({ result: { ok: true, observed: command.conversationId } }) });
+		const result = await f.run("do", "getCanvasLayout", "--input", '{"conversationId":"another-canvas","operationId":"another-operation"}');
+		expect(result.json.observed).toBe(CONV);
+		expect(result.json.operationId).not.toBe("another-operation");
+	});
+});
+
 describe("--dry-run sends nothing that changes the canvas", () => {
 	const f = fake();
 	const file = join(f.home, "pic.png");
@@ -58,6 +208,11 @@ describe("--dry-run sends nothing that changes the canvas", () => {
 	test("a price only making it can tell is unknown, with a reason to ask", async () => {
 		const r = await f.run("video", "same shot, rainy", "--model", "kling-video/v4", "--ref", ref(ids.video), "--dry-run");
 		expect(r.json.estimatedCredits).toBeNull();
+		expect(r.json.estimateNote).toContain("Ask the user");
+	});
+	test("the total for a mixed image batch stays unknown when a model has no catalogue price", async () => {
+		const r = await f.run("image", "rainy window", "--model", "z-image-turbo,unpriced-image", "--dry-run");
+		expect(r.json).toMatchObject({ jobs: 2, estimatedCredits: null });
 		expect(r.json.estimateNote).toContain("Ask the user");
 	});
 	test("text takes a text card as its reference", async () => {

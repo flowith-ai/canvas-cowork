@@ -221,10 +221,16 @@ export function cardsFrom(rows: FlowNodeRow[]): Card[] {
 }
 
 export async function fetchRows(api: Api, convId: string): Promise<FlowNodeRow[]> {
-	return rest<FlowNodeRow[]>(
-		api,
-		`flow_node?select=${NODE_COLUMNS}&conv_id=eq.${convId}&is_delete=not.is.true&order=created_at.asc`,
-	);
+	const rows: FlowNodeRow[] = [];
+	const pageSize = 500;
+	for (;;) {
+		const page = await rest<FlowNodeRow[]>(
+			api,
+			`flow_node?select=${NODE_COLUMNS}&conv_id=eq.${convId}&type=neq.0&is_delete=not.is.true&order=created_at.asc,id.asc&limit=${pageSize}&offset=${rows.length}`,
+		);
+		rows.push(...page);
+		if (page.length < pageSize) return rows;
+	}
 }
 
 export async function readCanvas(api: Api, convId: string): Promise<Card[]> {
@@ -281,14 +287,24 @@ export async function getCanvas(api: Api, convId: string): Promise<CanvasInfo> {
 }
 
 /** A canvas by id, id prefix or title (newest first). */
-export async function resolveCanvas(api: Api, userId: string, ref: string): Promise<CanvasInfo> {
+export async function resolveCanvas(api: Api, userId: string, ref: string, site: string): Promise<CanvasInfo> {
+	if (/^https?:\/\//i.test(ref)) {
+		let url: URL;
+		try { url = new URL(ref); }
+		catch { throw new CliError("Invalid canvas URL.", "INVALID_PARAM"); }
+		const id = url.pathname.match(/^\/conv\/([^/]+)\/?$/)?.[1];
+		if (!id || !isUuid(id)) throw new CliError("Use a Flowith canvas URL ending in /conv/<id>.", "INVALID_PARAM");
+		if (url.origin !== new URL(site).origin)
+			throw new CliError(`That link is on ${url.origin}, but you connected to ${site}. Use the matching Flowith connection.`, "CANVAS_SITE_MISMATCH");
+		return getCanvas(api, id.toLowerCase());
+	}
 	if (isUuid(ref)) return getCanvas(api, ref.toLowerCase());
 	const recent = await listCanvases(api, userId, undefined, 200);
 	const byPrefix = /^[0-9a-f-]{4,}$/i.test(ref) ? recent.filter((c) => c.id.startsWith(ref.toLowerCase())) : [];
 	if (byPrefix.length === 1) return byPrefix[0]!;
 	const byTitle = await listCanvases(api, userId, ref, 10);
 	const exact = byTitle.filter((c) => c.title?.toLowerCase() === ref.toLowerCase());
-	const pick = exact[0] ?? (byTitle.length === 1 ? byTitle[0] : undefined);
+	const pick = exact.length === 1 ? exact[0] : byTitle.length === 1 ? byTitle[0] : undefined;
 	if (pick) return pick;
 	if (!byTitle.length && !byPrefix.length) throw new CliError(`No canvas matches "${ref}". Try \`canvases\`.`, "NOT_FOUND");
 	const options = [...byPrefix, ...byTitle].slice(0, 8).map((c) => `${c.id.slice(0, 8)} "${c.title ?? ""}"`);

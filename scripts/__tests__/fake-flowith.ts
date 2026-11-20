@@ -6,9 +6,11 @@ import { copyFileSync, mkdtempSync, writeFileSync } from "fs";
 import { isDeepStrictEqual } from "node:util";
 import { tmpdir } from "os";
 import { join } from "path";
+import { b64url, openWith, sealWith } from "../lib/realtime";
 
 export const USER = "11111111-1111-4111-8111-111111111111";
 export const CONV = "22222222-2222-4222-8222-222222222222";
+const agentKey = b64url(crypto.getRandomValues(new Uint8Array(32)));
 export const ids = {
 	group: "a0000000-0000-4000-8000-000000000001",
 	image: "a1000000-0000-4000-8000-000000000002",
@@ -39,6 +41,7 @@ export function canvasRows() {
 
 export const catalog = {
 	"z-image-turbo": { media: "image", title: "Z Image Turbo", consume_num: 5, price: { completion: 5000, prompt: 0 }, supportedAspectRatios: ["1:1", "16:9"], supportsImageInput: true },
+	"unpriced-image": { media: "image", title: "Unpriced Image", supportedAspectRatios: ["1:1"] },
 	"seedance-2.5-flash": {
 		media: "video", title: "Seedance 2.5 Flash", supportedDurations: ["-1", "4", "5", "10"], supportedResolutions: ["480p", "720p"],
 		supportedAspectRatios: ["adaptive", "16:9", "9:16", "1:1"], pricePerSecond: { audioOff: 80704, audioOn: 80704 }, price: { completion: 403520, prompt: 0 },
@@ -101,6 +104,8 @@ export interface UsageRecord {
 }
 
 export interface FakeOptions {
+	/** The responding canvas window; omitted to leave the command unanswered. */
+	browser?: (command: Record<string, unknown>) => { ack?: boolean; result?: Record<string, unknown> };
 	/**
 	 * How a generation submit is answered: ok; an HTTP refusal; the gateway giving up on the worker (504); or the
 	 * connection breaking off mid-answer (the CLI sees a network error).
@@ -146,7 +151,7 @@ function unsupported(key: string, cond: string): never {
 /** Whether a row passes PostgREST filters (`col=eq.v`, `is.null`, `in.(…)`, `not.is.true`; `data->>key` reads data). */
 function passes(row: Record<string, any>, params: URLSearchParams) {
 	for (const [key, cond] of params) {
-		if (["select", "order", "limit"].includes(key)) continue;
+		if (["select", "order", "limit", "offset"].includes(key)) continue;
 		// The whole data compared as jsonb (key order doesn't matter).
 		if (key === "data") {
 			if (cond === "is.null" ? row.data !== null && row.data !== undefined : !cond.startsWith("eq.") ? unsupported(key, cond) : !isDeepStrictEqual(row.data, JSON.parse(cond.slice(3)))) return false;
@@ -158,6 +163,7 @@ function passes(row: Record<string, any>, params: URLSearchParams) {
 		if (cond === "is.null" ? value !== null
 			: cond === "not.is.true" ? value === "true"
 			: cond.startsWith("eq.") ? value !== cond.slice(3)
+			: cond.startsWith("neq.") ? value === null || value === cond.slice(4)
 			: cond.startsWith("in.(") ? !cond.slice(4, -1).split(",").includes(value ?? "")
 			: unsupported(key, cond)) return false;
 	}
@@ -186,10 +192,13 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 		holds.push({ match, arrive, gate: new Promise<void>((r) => (release = r)) });
 		return { arrived, release };
 	};
-	const server = Bun.serve({
+	let title = "Test canvas";
+	const server = Bun.serve<undefined>({
+		hostname: "localhost",
 		port: 0,
-		async fetch(req) {
+		async fetch(req, server) {
 			const url = new URL(req.url);
+			if (url.pathname === "/realtime/v1/websocket" && server.upgrade(req)) return;
 			const body = req.method === "GET" ? undefined : await req.text().then((t) => { try { return JSON.parse(t); } catch { return t; } });
 			requests.push({ method: req.method, path: url.pathname + url.search, body });
 			const answer = await handle(req, url, body);
@@ -201,6 +210,25 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 			}
 			return answer;
 		},
+		websocket: {
+			async message(ws, raw) {
+				const { topic, event, payload, ref } = JSON.parse(String(raw));
+				if (event === "phx_join") {
+					ws.send(JSON.stringify({ topic, ref, event: "phx_reply", payload: { status: "ok" } }));
+					return;
+				}
+				if (payload?.event !== "bot_action" || !opts.browser) return;
+				const { sessionId, actionId, sealed } = payload.payload;
+				const context = `${sessionId}:${actionId}`;
+				const opened = await openWith<{ command: Record<string, unknown> }>(agentKey, context, sealed);
+				if (!opened) return;
+				const { command } = opened;
+				const { ack, result } = opts.browser(command);
+				const respond = (response: Record<string, unknown>) => ws.send(JSON.stringify({ topic, event: "broadcast", payload: { event: "bot_response", payload: { actionId, ...response } } }));
+				if (ack) respond({ type: "ack" });
+				if (result) respond({ type: "result", sealed: await sealWith(agentKey, `${context}:result`, { operationId: command.operationId, ...result }) });
+			},
+		},
 	});
 	async function handle(req: Request, url: URL, body: unknown): Promise<Response> {
 			const p = url.pathname;
@@ -209,13 +237,16 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 			if (p === "/auth/v1/token") return Response.json({ access_token: jwt(), refresh_token: "r2", expires_in: 3600 });
 			if (p === "/models") return Response.json(catalog);
 			if (p.startsWith("/rest/v1/conversation")) {
-				if (req.method !== "GET") return Response.json([{ id: CONV, title: "T", updated_at: at }]);
-				return Response.json([{ id: CONV, title: "Test canvas", updated_at: at, metadata: {}, team_id: opts.team ? "33333333-3333-4333-8333-333333333333" : null }]);
+				if (req.method !== "GET" && body && typeof body === "object" && "title" in body && typeof body.title === "string") title = body.title;
+				return Response.json([{ id: CONV, title, updated_at: at, metadata: {}, team_id: opts.team ? "33333333-3333-4333-8333-333333333333" : null }]);
 			}
 			if (p.startsWith("/rest/v1/flow_node")) {
 				if (req.method === "GET") {
 					if (opts.nodeReadStatus) return new Response("read unavailable", { status: opts.nodeReadStatus });
-					const snapshot = Response.json(structuredClone(rows.filter((r) => passes(r, url.searchParams))));
+					const offset = Number(url.searchParams.get("offset") ?? 0);
+					const limit = Number(url.searchParams.get("limit") ?? rows.length);
+					const matches = rows.filter((r) => passes(r, url.searchParams));
+					const snapshot = Response.json(matches.slice(offset, offset + limit));
 					await opts.afterNodeRead?.();
 					return snapshot;
 				}
@@ -273,7 +304,7 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 	const home = mkdtempSync(join(tmpdir(), "cw-test-"));
 	writeFileSync(
 		join(home, "canvas-session.json"),
-		JSON.stringify({ site: origin, supabaseUrl: origin, supabaseKey: "k", accessToken: jwt(), refreshToken: "r1", workerURL: origin, canvas: CONV, savedAt: at }),
+		JSON.stringify({ site: origin, supabaseUrl: origin, supabaseKey: "k", accessToken: jwt(), refreshToken: "r1", workerURL: origin, canvas: CONV, savedAt: at, botSessionId: "bot-test", agentKey }),
 		{ mode: 0o600 },
 	);
 	/** Another machine logged in to the same account: a home of its own (its own send records and retry locks). */

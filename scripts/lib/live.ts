@@ -19,6 +19,8 @@ export interface CanvasResult {
 	[k: string]: unknown;
 }
 
+export const usesLiveViewport = (operation: string) => operation === "focusCanvasNodes" || operation === "getCanvasLayout";
+
 export async function runOnCanvas(
 	api: Api,
 	agent: { sessionId?: string; key?: string },
@@ -32,58 +34,69 @@ export async function runOnCanvas(
 	if (!agent.sessionId || !agent.key)
 		throw new CliError("This login predates canvas operations. Run `login` again (once) to let the open canvas take them.", "NOT_LOGGED_IN");
 	const rt = new Realtime(api.supabaseUrl, api.supabaseKey, api.accessToken);
-	await rt.connect();
 	const topic = `bot_ctrl:${userId}`;
 	try {
-		await rt.join(topic);
+		try {
+			await rt.connect();
+			await rt.join(topic);
+		} catch (error) {
+			throw new CliError(`Couldn't connect to Flowith Realtime: ${(error as Error).message}`, "REALTIME_UNAVAILABLE", { operation, canvasUrl: opts.canvasUrl });
+		}
 		const actionId = crypto.randomUUID();
-		const result = new Promise<CanvasResult>((resolve, reject) => {
-			let accepted = false;
-			const notOpen = setTimeout(() => {
-				if (!accepted)
-					reject(
-						new CliError(
-							`No open Flowith window took it. Open this canvas (\`open\`, or ${opts.canvasUrl}) in the browser where you ran \`login\`, then run the command again.`,
-							"CANVAS_NOT_OPEN",
-						),
-					);
-			}, 20_000);
-			const deadline = setTimeout(
-				() => reject(new CliError(`The canvas took on "${operation}" but hasn't finished after ${Math.round(opts.timeoutMs / 1000)} s; check the canvas.`, "TIMEOUT")),
-				opts.timeoutMs,
-			);
-			const context = `${agent.sessionId}:${actionId}`;
-			rt.on(topic, "bot_response", async (r: { type: string; actionId: string; code?: string; sealed?: { iv: string; ct: string } }) => {
-				if (r.actionId !== actionId) return;
+		const operationId = crypto.randomUUID();
+		const context = `${agent.sessionId}:${actionId}`;
+		const sealed = await sealWith(agent.key, context, {
+			at: Date.now(),
+			command: { ...input, operation, operationId, conversationId: convId },
+		});
+		return await new Promise<CanvasResult>((resolve, reject) => {
+			let acknowledged = false;
+			const viewport = usesLiveViewport(operation);
+			const showCanvas = `Bring ${opts.canvasUrl} to the foreground in the browser that approved the CLI. If the canvas is open in multiple tabs, keep just one copy open until you finish working together.`;
+			const details = () => ({ operation, operationId, canvasUrl: opts.canvasUrl, acknowledged });
+			const until = Date.now() + opts.timeoutMs;
+			const finish = () => {
+				clearTimeout(timer);
+				off();
+			};
+			const fail = (message: string, code: string) => {
+				finish();
+				reject(new CliError(message, code, details()));
+			};
+			let timer = setTimeout(() => fail(
+				viewport
+					? `No browser acknowledged the operation. ${showCanvas}`
+					: `No browser acknowledged the operation. Open ${opts.canvasUrl} in the browser that approved the CLI. Check the canvas before resending an operation that can create cards or use credits.`,
+				"CANVAS_NOT_OPEN",
+			), Math.min(opts.timeoutMs, 20_000));
+			const off = rt.on(topic, "bot_response", async (r: { type: string; actionId: string; code?: string; sealed?: { iv: string; ct: string } }) => {
+				if (r?.actionId !== actionId) return;
 				// The page's rate limit answers in the clear (it can't know the key yet).
-				if (r.type === "error" && r.code === "LOCKED" && !accepted) {
-					clearTimeout(notOpen);
-					clearTimeout(deadline);
-					reject(new CliError("The canvas is busy (too many requests). Wait a few seconds and run it again.", "RATE_LIMITED"));
+				if (r.type === "error" && r.code === "LOCKED" && !acknowledged) {
+					fail("The canvas is busy (too many requests).", "RATE_LIMITED");
 					return;
 				}
-				if (r.type === "ack") {
-					accepted = true;
-					clearTimeout(notOpen);
+				if (r.type === "ack" && !acknowledged) {
+					acknowledged = true;
+					clearTimeout(timer);
+					timer = setTimeout(() => fail(
+						viewport
+							? `The browser acknowledged "${operation}" but no result arrived. ${showCanvas} Check the visible selection before trying again.`
+							: `The browser acknowledged "${operation}" but no result arrived. It may still be running. Inspect the canvas before retrying.`,
+						"TIMEOUT",
+					), Math.max(0, until - Date.now()));
 					opts.onAccepted?.();
 					return;
 				}
 				if (r.type !== "result") return;
 				// Only a result sealed with our key counts: the topic is public.
 				const data = await openWith<CanvasResult>(agent.key!, `${context}:result`, r.sealed);
-				if (!data) return;
-				clearTimeout(notOpen);
-				clearTimeout(deadline);
+				if (!data || data.operationId !== operationId || typeof data.ok !== "boolean") return;
+				finish();
 				resolve(data);
 			});
-			void sealWith(agent.key!, context, {
-				at: Date.now(),
-				command: { operation, operationId: crypto.randomUUID(), conversationId: convId, ...input },
-			}).then((sealed) =>
-				rt.broadcast(topic, "bot_action", { actionId, sessionId: agent.sessionId, timestamp: new Date().toISOString(), type: "canvas_command", sealed }),
-			);
+			rt.broadcast(topic, "bot_action", { actionId, sessionId: agent.sessionId, timestamp: new Date().toISOString(), type: "canvas_command", sealed });
 		});
-		return await result;
 	} finally {
 		rt.close();
 	}

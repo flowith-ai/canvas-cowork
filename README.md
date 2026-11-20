@@ -20,6 +20,9 @@ Requires [Bun](https://bun.sh) ≥ 1.1. No other dependencies.
 bun scripts/index.ts login     # opens Flowith and prints a code: type it on the page, click Allow — once
 ```
 
+In Codex, the skill opens the working canvas in the app's browser beside the chat. Sign in to Flowith
+there to watch cards appear and follow reviews. See [Live browser](./references/live-browser.md).
+
 ## What it can do
 
 ```bash
@@ -35,7 +38,8 @@ cw video "pull back to reveal the whole bar" --extend <clip>
 cw text "a 10-word slogan for this café" --model claude-opus-5-5,gemini-3.8-flash --ref <ref>
 cw speech "Welcome to the Orange Cat Café." --for <clip>
 cw upscale <ref> --to 4k · cw cutout <ref> · cw expand <ref> --ratio 9:16
-cw look                                                   # every card with its ref, model, status, place
+    cw look --canvas <canvas-url>                             # inspect this canvas even if the active one changes
+    cw selection                                              # see what the user selected in the open canvas
 cw shots <ref…>                                           # previews to look at
 cw group <refs…> --name "Finals" · cw arrange <group> · cw move <ref> --right-of <ref>
 cw models video · cw credits
@@ -70,7 +74,8 @@ This is a new skill, not a drop-in update: commands, output and login changed.
 - **Log in again** (`login`): the new login is a sign-in of its own, separate from your browser's. The
   previous version's `~/.flowith/bot-session.json` (a copy of your browser's session) is no longer read;
   `login` and `logout` delete it. It is not signed out, since that would sign your browser out too.
-- **Default site** is https://beta.flowith.io while 3.0 is in beta (`login --site …` for another).
+- **Default site** is https://flowith.io. Use `login --site beta.flowith.io` or name a preview to use a
+  different environment. Existing sign-ins stay on the site that approved them.
 - **Commands**: `gen` / `submit` → `image` · `video` · `text`; `submit-batch` → one `image "a" "b" …`;
   `create-canvas` → `new`; `read-db` → `look` / `read`; `list-models` → `models`; `upload` → `add`, or
   `--ref <file>`; `delete-many` / `clean-failed` → `delete <refs…>`; `recall` → `canvases <words>` +
@@ -118,15 +123,12 @@ The login link and code are for you alone: never forward them.
 - A send whose answer was lost (`SENT_UNKNOWN`) is sent again only once the canvas's charges show it
   never arrived.
 
-## Going live on flowith.io
+## Environments
 
-The 3.0 login needs, on production: the frontend's relay login and Disconnect (`cli-handshake.ts`,
-`agent-sign-ins.ts`) and the worker's `POST /user/agent-session`, `/user/agent-session/end` and
-`/video/price` (clip prices; without it a clip's price shows as unknown). Once they are on flowith.io and
-edge.flowith.io, change `DEFAULT_SITE` and
-`workerFor` in `scripts/lib/session.ts` and the site named in these docs. A session keeps the site and
-worker it was made on, so existing beta logins stay on beta: ask users to `login` again. A different
-Supabase project also needs the relay's Supabase URL and key (`session.ts`).
+The login opens `/blank` on the chosen site, where the canvas app handles the connection request.
+The browser supplies the worker URL and the CLI keeps both the site and worker with its session.
+Use a separate `FLOWITH_HOME` for each account or environment you use in parallel. A preview on a different
+Supabase project also needs that project's relay URL and publishable key (`scripts/lib/session.ts`).
 
 ## Development
 

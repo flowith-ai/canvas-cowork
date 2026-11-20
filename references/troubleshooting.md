@@ -6,8 +6,11 @@ Errors print one JSON line `{"error": CODE, "message": …}` and exit 1.
 |---|---|---|
 | `NOT_LOGGED_IN` | No session, it expired and couldn't renew, or it was ended (Disconnect in Flowith, `logout`) | `cw login` (the user types the code and clicks Allow in the browser) |
 | `LOGIN_TIMEOUT` | Nobody allowed the connection within 2.5 minutes | Run `login` again; the user opens the link, types the printed code and clicks Allow |
-| `CANVAS_NOT_OPEN` | A "run by the open canvas" command found no window with that canvas | `cw open`, in the browser where `login` was allowed (each browser that allowed the agent holds its key); then run it again |
+| `LOGIN_UNAVAILABLE` | Neither the Realtime relay nor the local connection is available | Check network access to Flowith Realtime, then run `login` again |
+| `CANVAS_NOT_OPEN` | No browser acknowledged the operation | Open the reported canvas in the browser that approved `login`. Inspect the canvas before resending an operation that could create cards or spend credits |
+| `REALTIME_UNAVAILABLE` | The CLI could not connect to the browser's relay | Check network access to Flowith Realtime. `cw look` and other direct commands can still work |
 | `CANVAS_ERROR` | The canvas refused the operation (wrong card kind, still generating…) | Read the message; `cw look` |
+| `CANVAS_SITE_MISMATCH` | A canvas URL belongs to a different site than the active sign-in | Use the session for that site, for example with its own `FLOWITH_HOME` |
 | `LOGIN_DENIED` | The user clicked Deny | Ask before trying again |
 | `NO_CANVAS` | No canvas chosen | `cw use <ref|title|url>` or `cw new "title"` (generation commands create one when none is active) |
 | `NOT_FOUND` / `AMBIGUOUS` | A card or canvas ref didn't match exactly one | `cw look` / `cw canvases` and use the 8-hex ref |
@@ -17,7 +20,7 @@ Errors print one JSON line `{"error": CODE, "message": …}` and exit 1.
 | `MODEL_LOCKED` | The model needs a higher plan | Tell the user; offer a standard model |
 | `RATE_LIMITED` | Too many requests | Wait a minute; batch prompts in one call |
 | `GENERATION_FAILED` / `CONTENT_POLICY` / `INVALID_INPUT` | The provider refused or failed (credits are refunded) | The card's `error` says why (`cw read <ref>`). Transient ("Workflow delivery failed", timeouts): `cw retry <ref>`. Refusals: rephrase, another reference, or another model |
-| `TIMEOUT` | The command stopped waiting | The work continues on the server: `cw wait <ref>` |
+| `TIMEOUT` | The browser acknowledged the command and the result did not arrive in time | Inspect the reported canvas and use `cw wait <ref>` for any result cards it created before considering a retry |
 | `SENT_UNKNOWN` (a card's `code`) | The request went out but no answer came back (network, gateway timeout): Flowith may have taken it | `cw wait <ref>`: it finishes if it was taken. `cw retry <ref>` sends it again only once the canvas's charges show it never arrived (it says when) |
 | `NOT_SENT` (a card's `code`) | A `retry` claimed the card but its request never went (the claim's answer was lost) | `cw retry <ref>` sends it; don't wait on it |
 | `BUSY` | The card is still generating (or its last send may still be on its way), or another `retry` (on another machine) ran it first, or it changed while the command ran | `cw wait <ref>` or `cw look`; don't send it again |
@@ -30,11 +33,15 @@ Other things worth knowing:
   picture; `--full` always downloads originals.
 - **A cut-out looks like it still has a background**: transparent PNGs keep their colours under zero
   alpha and some viewers draw them; on the canvas it is transparent.
-- **The user doesn't see new cards**: they appear live in an open canvas tab of the same account; ask
-  the user to open `cw open` (or the `url` in any result). Cards placed far away are brought into view.
+- **The user doesn't see new cards**: they appear live in an open canvas tab of the same account. Reuse the tab
+  if it is already open. See [Live browser](live-browser.md) for opening the result in the host and checking access.
+- **Focus or selection is acknowledged and times out**: on older canvases a duplicate background tab can
+  take the command and block the canvas while its camera animation is paused. Bring the original tab forward
+  once to release it and keep only one copy of the canvas open. Check the visible selection before retrying.
+  Direct commands such as `look`, `image` and `wait` can continue during this.
 - **Several machines / accounts**: `FLOWITH_HOME=/path` keeps a separate session. `login --site <host>`
   (e.g. `next-gen.flowith.io`) signs in to another Flowith site and every later command follows that
-  session (default https://beta.flowith.io while 3.0 is in beta; `FLOWITH_URL` does the same per shell).
+  session (default https://flowith.io; `FLOWITH_URL` can select the site per shell).
 - **Retry says a card changed**: another `retry` (another machine), an edit or its result came in after it
   was read. Run `look` again. Retries from this CLI are claimed in Flowith; a retry clicked on the page
   or from an older canvas-cowork isn't, so don't retry one card from both at once.

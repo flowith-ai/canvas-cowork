@@ -5,16 +5,23 @@ what misses, then tell the user what is on the canvas (refs + url).
 
 ## A short film: idea → shots → frames → clips
 
+Use `cw new "Working title" --json` for a fresh canvas, or take the user's canvas URL. Set up the
+[live browser](live-browser.md) when the user can follow along. Pin the URL with
+`--canvas <url>` on each step. If the brief refers to the user's current selection, start with
+`cw selection --canvas <url>` in the browser that approved your sign-in.
+
 1. Write the plan as a card so the user can follow and edit it:
    `cw note "$(cat plan.md)" --title "分镜"` (one line per shot: what we see, camera, sound, seconds).
 2. Fix the look once: make the hero frame or character sheet first and judge it.
    `cw image "…hero frame…" --ratio 16:9 --title "主角定妆"`
 3. All frames in one call, each naming the hero as a reference, as one group:
    `cw image "镜头1：…" "镜头2：…" "镜头3：…" --ref <hero> --ratio 16:9 --group "分镜画面"`
-4. Review the frames (`cw shots`), redo the weak ones with `cw edit <ref> "…"`.
+4. Review the frames (`cw shots`), redo the weak ones with `cw edit <ref> "…"`. For a review together,
+   use `cw focus <group-ref>` to show the storyboard, then `cw selection` to read the user's picks.
 5. One clip per frame, beside its frame (background / long timeout):
    `cw video "镜头1 的动作和声音…" --first <frame1> --duration 5 --title "镜头1"` …
-   Test on `--model muse-video` or `--draft` (Seedance 2.5, 480p) first when the user is price-sensitive.
+   For a short preview, price `--model muse-video --resolution 720p` or `--model seedance-2.5-flash --resolution 480p` with
+   `--dry-run`. Use `--model seedance-2.5 --draft` to test Seedance's draft mode.
 6. Continue a shot: `cw video "接着…" --extend <clip>`. Voice-over / music for the cut:
    `cw speech "旁白…" --for <clip>` · `cw music "warm acoustic, 90 bpm" --for <clip> --duration 30`.
 7. Put the clips in order: `cw group <clip refs…> --name "成片"` then `cw arrange <group>`; with the canvas
@@ -60,7 +67,8 @@ what misses, then tell the user what is on the canvas (refs + url).
 
 ## Work with what the user already has
 
-- "Make this into a video" with a card selected on screen: ask for or `look` up the ref, then
-  `cw video "…" --first <ref>`.
+- "Make this into a video" with a card selected on screen: run `cw selection`, then run
+  `cw video "…" --first <ref>` with the selected image. If selection is unavailable, use `cw look` to
+  find a unique match, or ask which card the user means.
 - "Use the logo from my desktop": `cw add ~/Desktop/logo.png` then pass its ref, or `--ref ~/Desktop/logo.png`.
 - "Download everything": `cw save <refs…> --out ./export/`.

@@ -23,6 +23,7 @@ describe("a multi-stage canvas workflow", () => {
 		const created = await f.run("new", "Rainy Café");
 		const url = created.json.url;
 		expect(created.json.title).toBe("Rainy Café");
+		expect(created.json.browserHandoff).toEqual({ url, preferredMode: "codex-internal-browser" });
 		expect((await f.run("look", "--canvas", url)).json.cards).toEqual([]);
 		const note = (await f.run("note", "A yellow cup. Blue-hour rain. Three shots.", "--title", "Creative brief", "--canvas", url)).json.cards[0];
 		const plan = (await f.run("text", "Write a shot list", "--ref", note.ref, "--title", "Shot list", "--timeout", "1")).json.cards[0];
@@ -71,6 +72,21 @@ describe("a multi-stage canvas workflow", () => {
 });
 
 describe("working with the open canvas", () => {
+	test("hands off the exact canvas URL without changing the active canvas", async () => {
+		const f = fake();
+		const sessionPath = join(f.home, "canvas-session.json");
+		const session = JSON.parse(readFileSync(sessionPath, "utf8"));
+		delete session.canvas;
+		writeFileSync(sessionPath, JSON.stringify(session));
+		const url = `${f.origin}/conv/${CONV}`;
+		const result = await f.run("open", "--handoff", "--canvas", `${url}?panel=chat#frame`);
+		expect(result.code).toBe(0);
+		expect(result.json).toMatchObject({ canvas: CONV, url, browserHandoff: { url, preferredMode: "codex-internal-browser" } });
+		expect((await f.run("whoami")).json.canvas).toBeNull();
+		expect((await f.run("open", "--handoff", "--canvas", `https://beta.flowith.io/conv/${CONV}`)).json.error).toBe("CANVAS_SITE_MISMATCH");
+		expect(f.writes()).toEqual([]);
+	});
+
 	test("login opens the canvas app and keeps consent instructions visible in JSON mode", async () => {
 		const f = fake();
 		const proc = Bun.spawn(["bun", join(import.meta.dir, "..", "index.ts"), "login", "--site", f.origin, "--no-open", "--json", "--quiet"], {

@@ -21,16 +21,28 @@ Below, `cw` stands for that.
 
 ## First time
 
-`cw login` opens the production canvas app at `flowith.io` and prints a code on stderr (e.g. `K7Q-2MX`). The user signs in, types
-that code when the page asks for it, and clicks **Allow** (if the browser asks whether the page may
-connect to apps on this device, they allow that too). The session renews itself afterwards
-(`cw whoami`). The link is only for the user: never send it to anyone else. Use `login --site <host>` for
-beta or a preview. An existing session keeps its original site.
+For live work in Codex, follow [browser sign-in](references/live-browser.md#sign-in-and-canvas-controls).
+In a shell, `cw login` opens Flowith and prints a code on stderr. The user signs in, types the code and
+clicks **Allow**. The session renews itself afterwards (`cw whoami`). Use `login --site <host>` for beta
+or a preview. An existing session keeps its original site.
+
+## Show the canvas while you work
+
+When the user asks to see a canvas, or when creating, editing or reviewing cards in a desktop agent,
+open the exact canvas in the agent's visible browser beside the chat before making changes. Skip this
+for list, account, model or price lookups, or when the user asks for headless work.
+
+- Existing canvas: `cw open --handoff --canvas <ref|url> --json`.
+- New canvas: `cw new "Title" --json` creates the empty canvas and returns its handoff.
+
+Use `browserHandoff.url` with the host's browser controls. In Codex, use the in-app browser (`iab`)
+and show it. Reuse the same tab, verify the target canvas has loaded and keep it open at the end.
+Handle a sign-in prompt or unavailable browser as described in [Live browser](references/live-browser.md).
 
 ## The loop
 
 ```bash
-cw canvases [words]            # find a canvas;  cw use <ref|title|URL>  ·  cw new "Title" --open
+cw canvases [words]            # find a canvas;  cw use <ref|title|URL>  ·  cw new "Title"
 cw look                        # every card: ref, kind, "title", model, ratio, status, @x,y w×h, ← sources
 cw selection                  # refs selected by the user in the open canvas
 cw image "prompt" --title "短标题"            # → card ref + url; waits for the result
@@ -59,8 +71,7 @@ exact title also works. Commands print JSON (`--json` for one line). Errors exit
    give every card a short `--title` (≤ 12 字 / 5 words) — it is what the user reads on the canvas.
    Put a short plan on the canvas for multi-stage work and use `focus <refs…>` to show a review point or the final
    cards. Focus changes the browser's selection and composer context. Leave it alone while the user is editing.
-   For live collaboration, have the user keep the canvas in the foreground. Reuse the open tab; `cw open` can
-   create a second copy. Use `look "group name"` to recover a batch and its member refs without opening another tab.
+   Keep the collaboration tab visible. Use `look "group name"` to recover a batch and its member refs in place.
    Never delete or rewrite the user's own cards unless asked.
 5. **Mind credits** (1 credit = $0.001; `cw credits`). `--dry-run` shows a request and its
    `estimatedCredits` without sending anything (commands that only change the canvas have no dry run and
@@ -98,8 +109,8 @@ exact title also works. Commands print JSON (`--json` for one line). Errors exit
 | Read | `look [words] [--kind image] [--status running] [--by codex]` · `read <ref…> [--full]` · `shots [refs] [--full]` · `save <refs…> --out dir` · `wait [refs]` |
 | Account | `credits` · `spent [--since 30m]` · `models [image\|video\|text\|audio]` · `models <id>` · `whoami` · `open` · `<command> --help` |
 
-**Run by the open canvas** — the canvas's own tools, exactly as Flo uses them. They need the canvas open
-in the browser where the user ran `login` (`cw open`); otherwise the command says so (`CANVAS_NOT_OPEN`).
+**Run by the open canvas** — the canvas's own tools, exactly as Flo uses them. They need the target canvas
+open in the browser profile that approved `login`. See [canvas controls](references/live-browser.md#sign-in-and-canvas-controls).
 
 | Need | Command |
 |---|---|

@@ -99,7 +99,7 @@ import { CANVAS_NODE_GAP, groupLayout, isClear, placeSingle } from "./lib/placem
 
 const BOOLEAN_FLAGS = new Set([
 	"json", "quiet", "no-wait", "wait", "full", "fresh", "dry-run", "no-audio", "audio", "draft",
-	"transparent", "no-open", "open", "instrumental", "vocals", "layout", "add", "help",
+	"transparent", "no-open", "open", "handoff", "instrumental", "vocals", "layout", "add", "help",
 ]);
 
 interface Args {
@@ -402,6 +402,10 @@ async function cmdCanvases(a: Args) {
 	if (!list.length) console.log("No canvases.");
 }
 
+function browserHandoff(url: string) {
+	return { url, preferredMode: "codex-internal-browser" };
+}
+
 async function cmdNew(a: Args) {
 	const ctx = await context(a);
 	const title = a.pos.join(" ").trim() || "Untitled";
@@ -409,8 +413,12 @@ async function cmdNew(a: Args) {
 	ctx.session.canvas = c.id;
 	saveSession(ctx.session);
 	const url = canvasUrl(ctx.site, c.id);
-	if (has(a, "open")) openUrl(url);
-	out({ canvas: c.id, title: c.title, url, active: true });
+	const result = { canvas: c.id, title: c.title, url, active: true };
+	if (has(a, "open")) {
+		openUrl(url);
+		return out(result);
+	}
+	out({ ...result, browserHandoff: browserHandoff(url) });
 }
 
 async function cmdUse(a: Args) {
@@ -427,6 +435,7 @@ async function cmdOpen(a: Args) {
 	const ctx = await context(a);
 	const c = await canvasOf(ctx, a);
 	const url = canvasUrl(ctx.site, c.id);
+	if (has(a, "handoff")) return out({ canvas: c.id, title: c.title, url, browserHandoff: browserHandoff(url) });
 	openUrl(url);
 	out({ opened: url });
 }
@@ -1414,7 +1423,8 @@ const HELP = `canvas-cowork — work on a Flowith 3.0 canvas. Every card you mak
   bun scripts/index.ts <command> [args] [--flags]
 
 SET UP      login [--site flowith.io] [--no-open] · whoami · credits · spent [--since 30m] · logout
-CANVASES    canvases [search] · new "title" [--open] · use <canvas|url> · open · rename canvas "title"
+CANVASES    canvases [search] · new "title" [--open] · use <canvas|url> · rename canvas "title"
+            open [--handoff]              open in the default browser, or return the URL for the agent's browser
 SEE         look [words] [--kind image] [--status running] [--by codex]  card refs, placement and links
             read <card…> [--full]        full prompt / text / media of cards
             shots [card…] [--full]       download previews to look at (Read the files)
@@ -1508,7 +1518,7 @@ const GLOBAL_FLAGS = new Set(["canvas", "agent", "bot", "json", "quiet", "help",
 const PLACEMENT = "title near group into";
 const IMAGE_FLAGS = `model ratio size quality n ref transparent ${PLACEMENT}`;
 const COMMAND_FLAGS: Record<string, string> = {
-	login: "site no-open", canvases: "limit", list: "limit", new: "open", look: "kind status by", read: "full", shots: "last full out", save: "out",
+	login: "site no-open", canvases: "limit", list: "limit", new: "open", open: "handoff", look: "kind status by", read: "full", shots: "last full out", save: "out",
 	image: IMAGE_FLAGS, edit: IMAGE_FLAGS, vary: `${IMAGE_FLAGS} system duration resolution audio no-audio draft first from last extend edit-video`,
 	video: `model ratio duration resolution ref first from last audio no-audio draft extend edit-video ${PLACEMENT}`,
 	text: `model ref system ${PLACEMENT}`, speech: "model voice language for", music: "model lyrics duration for instrumental vocals",

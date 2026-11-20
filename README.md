@@ -20,6 +20,9 @@ Requires [Bun](https://bun.sh) ≥ 1.1. No other dependencies.
 bun scripts/index.ts login     # opens Flowith and prints a code: type it on the page, click Allow — once
 ```
 
+In Codex, the skill opens the working canvas in the app's browser beside the chat. Sign in to Flowith
+there to watch cards appear and follow reviews. See [Live browser](./references/live-browser.md).
+
 ## What it can do
 
 ```bash

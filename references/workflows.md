@@ -5,7 +5,8 @@ what misses, then tell the user what is on the canvas (refs + url).
 
 ## A short film: idea → shots → frames → clips
 
-Use `cw new "Working title" --open` for a fresh canvas, or take the user's canvas URL. Pin the URL with
+Use `cw new "Working title" --json` for a fresh canvas, or take the user's canvas URL. Set up the
+[live browser](live-browser.md) when the user can follow along. Pin the URL with
 `--canvas <url>` on each step. If the brief refers to the user's current selection, start with
 `cw selection --canvas <url>` in the browser that approved your sign-in.
 

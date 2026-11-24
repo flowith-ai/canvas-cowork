@@ -74,7 +74,7 @@ import {
 } from "./lib/session";
 import { cutout, expand, makeSound, upscaleImage, upscaleVideo } from "./lib/tools";
 import { videoPrice } from "./lib/video-cost";
-import { runOnCanvas, usesLiveViewport } from "./lib/live";
+import { type CanvasResult, operationWaitSec, printedIds, runOnCanvas, SELECTION_SCRIPT, tidyScript } from "./lib/live";
 import {
 	type Layout,
 	type NewCard,
@@ -1371,10 +1371,20 @@ async function browserOperation(ctx: Ctx, a: Args, convId: string, operation: st
 async function cmdSelection(a: Args) {
 	const ctx = await context(a);
 	const canvas = await canvasOf(ctx, a);
-	const result = await browserOperation(ctx, a, canvas.id, "getCanvasLayout", { selectionOnly: true }, 20);
+	// layoutCanvas is no viewport operation on the page: queued behind another canvas operation, it is answered "busy"
+	// within 8 minutes, so the read waits as long as the other layout commands do.
+	let result: CanvasResult;
+	try {
+		result = await browserOperation(ctx, a, canvas.id, "layoutCanvas", { script: SELECTION_SCRIPT }, operationWaitSec("layoutCanvas"));
+	} catch (error) {
+		// A canvas from before layoutCanvas (a release not yet on that site) still answers the old read. A busy canvas
+		// was answered already: asking it again the old way would only wait behind the same operation.
+		if (!(error instanceof CliError) || error.code !== "CANVAS_ERROR" || /\bis busy\b/.test(error.message)) throw error;
+		result = await browserOperation(ctx, a, canvas.id, "getCanvasLayout", { selectionOnly: true }, operationWaitSec("getCanvasLayout")).catch(() => { throw error; });
+	}
 	const layout = result.layout as { nodes?: Array<{ id: string; selected?: boolean; hidden?: boolean }> } | undefined;
 	// Older canvas versions ignore selectionOnly and still return the full layout.
-	const nodeIds = result.nodeIds ?? layout?.nodes?.filter((node) => node.selected && !node.hidden).map((node) => node.id);
+	const nodeIds = printedIds(result.data) ?? result.nodeIds ?? layout?.nodes?.filter((node) => node.selected && !node.hidden).map((node) => node.id);
 	if (!Array.isArray(nodeIds)) throw new CliError("The browser did not return the current selection. Bring the canvas forward and try again.", "CANVAS_ERROR");
 	const selected = [...new Set(nodeIds.filter(isUuid))];
 	const byId = new Map<string, Card>();
@@ -1399,9 +1409,9 @@ async function onCanvas(a: Args, operation: string, build: (cards: Card[]) => Re
 	const canvas = await canvasOf(ctx, a);
 	const cards = await readCanvas(ctx.api, canvas.id);
 	const input = build(cards);
-	const timeout = usesLiveViewport(operation) ? 20 : Math.max(600, waitSec);
-	const res = await browserOperation(ctx, a, canvas.id, operation, input, timeout);
-	const ids = (res.nodeIds ?? []).filter((id) => isUuid(id));
+	const res = await browserOperation(ctx, a, canvas.id, operation, input, operationWaitSec(operation, waitSec));
+	// A layout names the cards it moved.
+	const ids = (res.nodeIds ?? (res.changedNodeIds as string[] | undefined) ?? []).filter((id) => isUuid(id));
 	const { kind: _k, ok: _ok, nodeIds: _n, ...extra } = res;
 	if (waitSec && ids.length && !has(a, "no-wait")) {
 		const rows = cardsFrom(await fetchRowsById(ctx.api, ids));
@@ -1424,11 +1434,7 @@ const ON_CANVAS: Record<string, (a: Args) => Promise<unknown>> = {
 		if (!a.pos.length) throw new CliError("Name at least one card to focus.", "INVALID_PARAM");
 		return { nodeIds: a.pos.map((r) => idOf(cards, r)) };
 	}),
-	tidy: (a) =>
-		onCanvas(a, "arrangeCanvasNodes", (cards) => ({
-			...(a.pos.length ? { nodeIds: a.pos.map((r) => idOf(cards, r)) } : {}),
-			...(flag(a, "as") ? { layout: flag(a, "as") } : {}),
-		})),
+	tidy: (a) => onCanvas(a, "layoutCanvas", (cards) => ({ script: tidyScript(a.pos.map((r) => idOf(cards, r)), flag(a, "as")) })),
 	split: (a) =>
 		onCanvas(a, "cardTool", (cards) => ({ nodeId: idOf(cards, a.pos[0]), tool: "split", rows: num(a, "rows") ?? 2, cols: num(a, "cols") ?? 2 }), 300),
 	angles: (a) =>

@@ -200,6 +200,35 @@ describe("working with the open canvas", () => {
 		expect(sent).toHaveLength(2);
 	});
 
+	test("tidy on a canvas that predates layoutCanvas asks it with the old arrange, Organize or the named cards", async () => {
+		const sent: Record<string, unknown>[] = [];
+		const f = fake({ browser: (command) => {
+			sent.push(command);
+			return command.operation === "layoutCanvas"
+				? { ack: true, result: { ok: false, error: "Invalid input" } }
+				: { ack: true, result: { ok: true, changedNodeIds: [ids.image] } };
+		} });
+		const organized = await f.run("tidy");
+		expect(sent.map((command) => command.operation)).toEqual(["layoutCanvas", "arrangeCanvasNodes"]);
+		expect(sent[1]).not.toHaveProperty("nodeIds");
+		expect(sent[1]).not.toHaveProperty("layout");
+		expect(organized.json.cards.map((card: { id: string }) => card.id)).toEqual([ids.image]);
+		await f.run("tidy", ref(ids.image), ref(ids.video), "--as", "left");
+		expect(sent[3]).toMatchObject({ operation: "arrangeCanvasNodes", nodeIds: [ids.image, ids.video], layout: "left" });
+	});
+
+	test("tidy on a busy canvas reports the busy answer and asks nothing else", async () => {
+		const sent: string[] = [];
+		const busy = "The canvas is busy with breakdownVideo (for codex) since 2026-11-24T10:00:00.000Z; this command waited 480 s and was not run. Try it again once that operation has finished.";
+		const f = fake({ browser: (command) => {
+			sent.push(String(command.operation));
+			return { ack: true, result: { ok: false, error: busy } };
+		} });
+		const result = await f.run("tidy");
+		expect(sent).toEqual(["layoutCanvas"]);
+		expect(result.json).toMatchObject({ error: "CANVAS_ERROR", message: busy });
+	});
+
 	test("distinguishes an unanswered operation from one the browser acknowledged", async () => {
 		const closed = await fake().run("focus", ref(ids.image), "--timeout", "0.2");
 		const open = await fake({ browser: () => ({ ack: true }) }).run("focus", ref(ids.image), "--timeout", "0.2");

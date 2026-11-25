@@ -1355,6 +1355,13 @@ async function cmdWait(a: Args) {
 
 // ---------- commands: run by the open canvas ----------
 
+/**
+ * A canvas from before layoutCanvas (a release not yet on that site: flowith.io until it takes the 2026-11-24 page)
+ * refuses it as an unknown operation, and still answers the old getCanvasLayout and arrangeCanvasNodes. A busy canvas
+ * was answered already: asking it again the old way would only wait behind the same operation.
+ */
+const askOlderPage = (error: unknown) => error instanceof CliError && error.code === "CANVAS_ERROR" && !/\bis busy\b/.test(error.message);
+
 /** Hands an operation to the browser window that has this canvas open (see lib/live.ts). */
 async function browserOperation(ctx: Ctx, a: Args, convId: string, operation: string, input: Record<string, unknown>, fallbackSec: number) {
 	const url = canvasUrl(ctx.site, convId);
@@ -1377,9 +1384,8 @@ async function cmdSelection(a: Args) {
 	try {
 		result = await browserOperation(ctx, a, canvas.id, "layoutCanvas", { script: SELECTION_SCRIPT }, operationWaitSec("layoutCanvas"));
 	} catch (error) {
-		// A canvas from before layoutCanvas (a release not yet on that site) still answers the old read. A busy canvas
-		// was answered already: asking it again the old way would only wait behind the same operation.
-		if (!(error instanceof CliError) || error.code !== "CANVAS_ERROR" || /\bis busy\b/.test(error.message)) throw error;
+		// The old read, on a canvas that predates layoutCanvas (see askOlderPage).
+		if (!askOlderPage(error)) throw error;
 		result = await browserOperation(ctx, a, canvas.id, "getCanvasLayout", { selectionOnly: true }, operationWaitSec("getCanvasLayout")).catch(() => { throw error; });
 	}
 	const layout = result.layout as { nodes?: Array<{ id: string; selected?: boolean; hidden?: boolean }> } | undefined;
@@ -1404,12 +1410,25 @@ async function cmdSelection(a: Args) {
 	});
 }
 
-async function onCanvas(a: Args, operation: string, build: (cards: Card[]) => Record<string, unknown>, waitSec = 0) {
+async function onCanvas(
+	a: Args,
+	operation: string,
+	build: (cards: Card[]) => Record<string, unknown>,
+	waitSec = 0,
+	older?: { operation: string; build: (cards: Card[]) => Record<string, unknown> },
+) {
 	const ctx = await context(a);
 	const canvas = await canvasOf(ctx, a);
 	const cards = await readCanvas(ctx.api, canvas.id);
 	const input = build(cards);
-	const res = await browserOperation(ctx, a, canvas.id, operation, input, operationWaitSec(operation, waitSec));
+	let res: CanvasResult;
+	try {
+		res = await browserOperation(ctx, a, canvas.id, operation, input, operationWaitSec(operation, waitSec));
+	} catch (error) {
+		// The same request in the operation an older page still has (see askOlderPage).
+		if (!older || !askOlderPage(error)) throw error;
+		res = await browserOperation(ctx, a, canvas.id, older.operation, older.build(cards), operationWaitSec(older.operation, waitSec)).catch(() => { throw error; });
+	}
 	// A layout names the cards it moved.
 	const ids = (res.nodeIds ?? (res.changedNodeIds as string[] | undefined) ?? []).filter((id) => isUuid(id));
 	const { kind: _k, ok: _ok, nodeIds: _n, ...extra } = res;
@@ -1434,7 +1453,14 @@ const ON_CANVAS: Record<string, (a: Args) => Promise<unknown>> = {
 		if (!a.pos.length) throw new CliError("Name at least one card to focus.", "INVALID_PARAM");
 		return { nodeIds: a.pos.map((r) => idOf(cards, r)) };
 	}),
-	tidy: (a) => onCanvas(a, "layoutCanvas", (cards) => ({ script: tidyScript(a.pos.map((r) => idOf(cards, r)), flag(a, "as")) })),
+	tidy: (a) =>
+		onCanvas(a, "layoutCanvas", (cards) => ({ script: tidyScript(a.pos.map((r) => idOf(cards, r)), flag(a, "as")) }), 0, {
+			operation: "arrangeCanvasNodes",
+			build: (cards) => ({
+				...(a.pos.length ? { nodeIds: a.pos.map((r) => idOf(cards, r)) } : {}),
+				...(flag(a, "as") ? { layout: flag(a, "as") } : {}),
+			}),
+		}),
 	split: (a) =>
 		onCanvas(a, "cardTool", (cards) => ({ nodeId: idOf(cards, a.pos[0]), tool: "split", rows: num(a, "rows") ?? 2, cols: num(a, "cols") ?? 2 }), 300),
 	angles: (a) =>

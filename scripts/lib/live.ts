@@ -7,6 +7,7 @@
  * when the user allowed it at `login`, so nothing on the public topic can be read or forged.
  */
 
+import { isUuid } from "./desk";
 import { type Api, CliError, guardWrite } from "./http";
 import { Realtime, openWith, sealWith } from "./realtime";
 
@@ -19,7 +20,18 @@ export interface CanvasResult {
 	[k: string]: unknown;
 }
 
+/**
+ * Operations on what the user sees (focus, and the old selection read): answered or given up fast. The page keeps the
+ * same list (hypergpt-frontend use-bot-control-channel.ts isViewportOperation): a command of these queued behind
+ * another canvas operation is answered "busy … not run" within 15 s, anything else (layoutCanvas included) within
+ * 8 minutes.
+ */
 export const usesLiveViewport = (operation: string) => operation === "focusCanvasNodes" || operation === "getCanvasLayout";
+/**
+ * Seconds to wait for an operation's answer once the canvas took it on (unacknowledged, it fails at 20 s): past the
+ * page's "busy" answer, 20 s for a viewport operation and at least ten minutes for anything else.
+ */
+export const operationWaitSec = (operation: string, atLeastSec = 0) => (usesLiveViewport(operation) ? 20 : Math.max(600, atLeastSec));
 
 export async function runOnCanvas(
 	api: Api,
@@ -101,3 +113,34 @@ export async function runOnCanvas(
 		rt.close();
 	}
 }
+
+/**
+ * The selection, read by a layoutCanvas script that only prints it (the page took out getCanvasLayout on 2026-11-24
+ * and reads a canvas through layoutCanvas since): one id per line, packed by print() into what comes back, so a
+ * couple of hundred selected cards fit in one answer. Nothing moves, so nothing is saved.
+ */
+export const SELECTION_SCRIPT = "print(selected().map((card) => card.id))";
+/** The selected ids a selection read printed, in the order printed. */
+export const printedIds = (data: unknown) => {
+	const printed = (data as { printed?: unknown } | undefined)?.printed;
+	return Array.isArray(printed) ? printed.flatMap((text) => String(text).split(/\s+/)).filter(isUuid) : undefined;
+};
+/**
+ * A layoutCanvas script for `tidy`: no cards is the canvas's Organize (clears overlaps), cards alone are tidied, and
+ * `--as` lays them out (the page's arrangeCanvasNodes is gone; these are the same moves in the layout API).
+ */
+export const TIDY_LAYOUTS: Record<string, string> = {
+	row: "row(cards)",
+	column: "column(cards)",
+	grid: "grid(cards)",
+	left: 'align(cards, "left")',
+	top: 'align(cards, "top")',
+	hdistribute: 'distribute(cards, "h")',
+	vdistribute: 'distribute(cards, "v")',
+};
+export const tidyScript = (nodeIds: string[], layout?: string) => {
+	if (layout && !TIDY_LAYOUTS[layout]) throw new CliError(`--as takes ${Object.keys(TIDY_LAYOUTS).join(", ")}.`, "INVALID_PARAM");
+	if (layout && !nodeIds.length) throw new CliError("Name the cards to lay out with --as.", "INVALID_PARAM");
+	if (!nodeIds.length) return "tidy()";
+	return `const cards = ${JSON.stringify(nodeIds)}.map((id) => node({ ids: id }))\n${layout ? TIDY_LAYOUTS[layout] : "tidy(cards)"}`;
+};

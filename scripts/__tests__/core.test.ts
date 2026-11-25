@@ -4,6 +4,7 @@ import { cardsFrom, findCard, readableError, type FlowNodeRow } from "../lib/des
 import { imageRequest, nameReferences, resultOf, titleFrom, videoRequest, type Ref } from "../lib/generate";
 import { imageSize } from "../lib/media";
 import { klingReferenceName, seedanceReferenceName } from "../lib/reference-names";
+import { operationWaitSec, printedIds, tidyScript } from "../lib/live";
 import { expandFrame } from "../lib/tools";
 import { arrangePoints, cardSize, nearestFree } from "../lib/write";
 
@@ -204,5 +205,28 @@ describe("charges of cards only claimed for a retry", () => {
 		const { fingerprint } = await import("../lib/ledger");
 		expect(fingerprint({ b: 1, a: { d: [1, { y: 2, x: 1 }], c: null } })).toBe(fingerprint({ a: { c: null, d: [1, { x: 1, y: 2 }] }, b: 1 }));
 		expect(fingerprint({ a: 1 })).not.toBe(fingerprint({ a: 2 }));
+	});
+});
+
+describe("canvas reads and layouts through layoutCanvas scripts", () => {
+	const a = "11111111-1111-4111-8111-111111111111";
+	const b = "22222222-2222-4222-8222-222222222222";
+	test("printed selection ids come back in order, whatever print() packed together", () => {
+		expect(printedIds({ printed: [`${a}\n${b}`, a] })).toEqual([a, b, a]);
+		expect(printedIds({ printed: ["Nothing moved", ""] })).toEqual([]);
+		expect(printedIds({})).toBeUndefined();
+	});
+	test("tidy without cards is Organize; with --as each layout is one of the API's moves", () => {
+		expect(tidyScript([])).toBe("tidy()");
+		expect(tidyScript([a, b])).toBe(`const cards = ${JSON.stringify([a, b])}.map((id) => node({ ids: id }))\ntidy(cards)`);
+		expect(tidyScript([a, b], "hdistribute")).toContain('distribute(cards, "h")');
+		expect(() => tidyScript([a, b], "spiral")).toThrow("--as takes");
+		expect(() => tidyScript([], "row")).toThrow("Name the cards");
+	});
+	test("every wait outlasts the page's busy answer: 15 s for focus, 8 minutes for anything else, layoutCanvas included", () => {
+		expect(operationWaitSec("focusCanvasNodes") * 1000).toBeGreaterThan(15_000);
+		expect(operationWaitSec("getCanvasLayout") * 1000).toBeGreaterThan(15_000);
+		expect(operationWaitSec("layoutCanvas") * 1000).toBeGreaterThan(8 * 60_000);
+		expect(operationWaitSec("cardTool", 1200)).toBe(1200);
 	});
 });

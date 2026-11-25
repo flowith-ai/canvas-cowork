@@ -5,6 +5,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "fs";
 import { join } from "path";
+import { SELECTION_SCRIPT, tidyScript } from "../lib/live";
 import { CONV, fakeFlowith, ids, precharge } from "./fake-flowith";
 
 const ref = (id: string) => id.slice(0, 8);
@@ -125,8 +126,8 @@ describe("working with the open canvas", () => {
 		const received: Record<string, unknown>[] = [];
 		const f = fake({ browser: (command) => {
 			received.push(command);
-			return { ack: true, result: command.operation === "getCanvasLayout"
-				? { ok: true, layout: { nodes: [{ id: ids.image, selected: true }, { id: ids.text, selected: false }, { id: ids.video, selected: true, hidden: true }] } }
+			return { ack: true, result: command.operation === "layoutCanvas"
+				? { ok: true, changedNodeIds: [], data: { moved: 0, printed: [ids.image] } }
 				: { ok: true, nodeIds: command.nodeIds } };
 		} });
 		const selected = (await f.run("selection")).json.cards;
@@ -139,15 +140,64 @@ describe("working with the open canvas", () => {
 		expect(f.writes()).toEqual([]);
 	});
 
-	test("requests the compact selection and keeps the user's selection order", async () => {
+	test("reads the selection with a layout script that only prints it, in the order printed", async () => {
 		const unsaved = crypto.randomUUID();
+		const sent: Record<string, unknown>[] = [];
 		const f = fake({ browser: (command) => {
-			expect(command).toMatchObject({ operation: "getCanvasLayout", selectionOnly: true });
-			return { result: { ok: true, nodeIds: [ids.text, ids.image, unsaved] } };
+			sent.push(command);
+			// print() packs one id per line into strings of up to 500 characters.
+			return { result: { ok: true, changedNodeIds: [], data: { moved: 0, printed: [`${ids.text}\n${ids.image}`, unsaved] } } };
 		} });
 		const result = await f.run("selection");
+		expect(sent).toHaveLength(1);
+		expect(sent[0]).toMatchObject({ operation: "layoutCanvas", script: SELECTION_SCRIPT });
+		expect(sent[0]).not.toHaveProperty("selectionOnly");
 		expect(result.json.cards.map((card: { id: string }) => card.id)).toEqual([ids.text, ids.image, unsaved]);
 		expect(result.json.cards[2]).toMatchObject({ status: "unsaved" });
+		expect(f.writes()).toEqual([]);
+	});
+
+	test("reads the selection the old way from a canvas that predates layoutCanvas", async () => {
+		const sent: string[] = [];
+		const f = fake({ browser: (command) => {
+			sent.push(String(command.operation));
+			return command.operation === "layoutCanvas"
+				? { ack: true, result: { ok: false, error: "Invalid input" } }
+				: { ack: true, result: { ok: true, nodeIds: [ids.image] } };
+		} });
+		const result = await f.run("selection");
+		expect(sent).toEqual(["layoutCanvas", "getCanvasLayout"]);
+		expect(result.json.cards.map((card: { id: string }) => card.id)).toEqual([ids.image]);
+	});
+
+	test("a busy canvas's answer to the selection read is reported, not asked again the old way", async () => {
+		const sent: string[] = [];
+		const busy = "The canvas is busy with breakdownVideo (for codex) since 2026-11-24T10:00:00.000Z; this command waited 480 s and was not run. Try it again once that operation has finished.";
+		const f = fake({ browser: (command) => {
+			sent.push(String(command.operation));
+			return { ack: true, result: { ok: false, error: busy } };
+		} });
+		const result = await f.run("selection");
+		expect(sent).toEqual(["layoutCanvas"]);
+		expect(result.json).toMatchObject({ error: "CANVAS_ERROR", message: busy });
+	});
+
+	test("tidy runs the canvas's Organize, or lays out the named cards, as layout scripts", async () => {
+		const sent: Record<string, unknown>[] = [];
+		const f = fake({ browser: (command) => {
+			sent.push(command);
+			return { ack: true, result: { ok: true, changedNodeIds: [ids.image], data: { moved: 1, printed: [] } } };
+		} });
+		const organized = await f.run("tidy");
+		expect(sent[0]).toMatchObject({ operation: "layoutCanvas", script: "tidy()" });
+		expect(organized.json.cards.map((card: { id: string }) => card.id)).toEqual([ids.image]);
+		await f.run("tidy", ref(ids.image), ref(ids.video), "--as", "row");
+		expect(sent[1]).toMatchObject({ operation: "layoutCanvas", script: tidyScript([ids.image, ids.video], "row") });
+		expect(String(sent[1]?.script)).toContain("row(cards)");
+		expect(sent.map((command) => command.operation)).not.toContain("arrangeCanvasNodes");
+		const wrong = await f.run("tidy", ref(ids.image), ref(ids.video), "--as", "spiral");
+		expect(wrong.json.error).toBe("INVALID_PARAM");
+		expect(sent).toHaveLength(2);
 	});
 
 	test("distinguishes an unanswered operation from one the browser acknowledged", async () => {
@@ -160,7 +210,7 @@ describe("working with the open canvas", () => {
 
 	test("preserves the command scope when passing a raw operation payload", async () => {
 		const f = fake({ browser: (command) => ({ result: { ok: true, observed: command.conversationId } }) });
-		const result = await f.run("do", "getCanvasLayout", "--input", '{"conversationId":"another-canvas","operationId":"another-operation"}');
+		const result = await f.run("do", "layoutCanvas", "--input", '{"conversationId":"another-canvas","operationId":"another-operation"}');
 		expect(result.json.observed).toBe(CONV);
 		expect(result.json.operationId).not.toBe("another-operation");
 	});

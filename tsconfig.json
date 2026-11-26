@@ -14,5 +14,5 @@
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true
   },
-  "include": ["scripts/**/*.ts", "hosts/**/*.ts"]
+  "include": ["scripts/**/*.ts", "hosts/**/*.ts", "canary/**/*.ts"]
 }

@@ -21,8 +21,9 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "test": "bun test scripts/__tests__ hosts/__tests__",
+    "test": "bun test scripts/__tests__ hosts/__tests__ canary/__tests__",
     "test:node": "CW_TEST_RUNTIME=node bun test scripts/__tests__",
-    "generate": "node hosts/generate.ts"
+    "generate": "node hosts/generate.ts",
+    "canary": "node canary/agent-connect.ts"
   }
 }

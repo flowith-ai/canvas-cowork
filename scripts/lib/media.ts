@@ -5,7 +5,7 @@
 
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { basename, dirname, extname, join, resolve } from "path";
-import { type Api, CliError, worker } from "./http";
+import { type Api, CliError, worker } from "./http.ts";
 
 export type Media = "image" | "video" | "audio" | "file";
 

@@ -10,7 +10,7 @@ import { execFileSync, spawn } from "child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
-import { type Api, CliError } from "./http";
+import { type Api, CliError } from "./http.ts";
 
 export const DEFAULT_SITE = "https://flowith.io";
 
@@ -307,25 +307,24 @@ const SUPABASE_KEY = process.env.FLOWITH_SUPABASE_KEY || "sb_publishable_qPCinc8
  * Opens Flowith, waits for the user to allow the agent, saves the session.
  *
  * The page hands the session back sealed to this process's one-time key over the Realtime topic
- * `cli-login:<code>` (works in every browser: nothing touches the computer's own network). Pages
- * from before that also find a WebSocket on 127.0.0.1 here.
+ * `cli-login:<code>` (works in every browser: nothing touches the computer's own network). Login needs
+ * Flowith's realtime service; the old local WebSocket on 127.0.0.1 is gone (the page uses the relay
+ * whenever a login link carries `cli_code`, which every link from this CLI does).
  */
 export async function login(agent: string, log: (m: string) => void, opts: { open?: boolean; site?: string } = {}): Promise<Session> {
-	const { Realtime, loginKeys, openSealed, ackProof, loginCode, verificationCode } = await import("./realtime");
+	const { Realtime, loginKeys, openSealed, ackProof, loginCode, verificationCode } = await import("./realtime.ts");
 	const site = siteUrl(opts.site);
 	const nonce = crypto.randomUUID();
 	const code = loginCode();
 	const keys = await loginKeys();
 	const topic = `cli-login:${code}`;
 	const relay = new Realtime(SUPABASE_URL, SUPABASE_KEY);
-	let relayReady = false;
 	try {
 		await relay.connect();
 		await relay.join(topic);
-		relayReady = true;
 	} catch (e) {
 		relay.close();
-		log(`(Couldn't reach Flowith's realtime service: ${(e as Error).message}; using the local connection only.)`);
+		throw new CliError(`Login couldn't reach Flowith's realtime service (${(e as Error).message}). Check the network and run \`login\` again.`, "LOGIN_UNAVAILABLE");
 	}
 
 	return new Promise<Session>((resolve, reject) => {
@@ -334,10 +333,7 @@ export async function login(agent: string, log: (m: string) => void, opts: { ope
 			if (done) return;
 			done = true;
 			clearTimeout(timer);
-			setTimeout(() => {
-				server?.stop(true);
-				relay.close();
-			}, 300);
+			setTimeout(() => relay.close(), 300);
 			fn();
 		};
 		const accept = (d: HandshakeSession) => {
@@ -363,59 +359,23 @@ export async function login(agent: string, log: (m: string) => void, opts: { ope
 				finish(() => reject(new CliError("Not signed in to Flowith in that browser. Sign in, then run `login` again.", "NOT_LOGGED_IN")));
 		};
 
-		if (relayReady) {
-			relay.on(topic, "cli_login", async (payload: { type?: string; epk?: string; iv?: string; ct?: string }) => {
-				if (payload?.type === "sealed" && payload.epk && payload.iv && payload.ct) {
-					try {
-						const opened = await openSealed(keys.privateKey, code, payload as { epk: string; iv: string; ct: string });
-						const message = opened.message as { type?: string; data?: HandshakeSession };
-						if (message.type === "session" && message.data && accept(message.data))
-							relay.broadcast(topic, "cli_login_ack", await ackProof(opened.key, code, nonce));
-					} catch {
-						// Not sealed to our key: ignore.
-					}
-				} else if (payload?.type === "denied" || payload?.type === "not_logged_in") {
-					relay.broadcast(topic, "cli_login_ack", { ok: true });
-					refuse(payload.type);
+		relay.on(topic, "cli_login", async (payload: { type?: string; epk?: string; iv?: string; ct?: string }) => {
+			if (payload?.type === "sealed" && payload.epk && payload.iv && payload.ct) {
+				try {
+					const opened = await openSealed(keys.privateKey, code, payload as { epk: string; iv: string; ct: string });
+					const message = opened.message as { type?: string; data?: HandshakeSession };
+					if (message.type === "session" && message.data && accept(message.data))
+						relay.broadcast(topic, "cli_login_ack", await ackProof(opened.key, code, nonce));
+				} catch {
+					// Not sealed to our key: ignore.
 				}
-			});
-		}
-
-		const localServer = () => Bun.serve({
-			port: 0,
-			hostname: "127.0.0.1",
-			fetch(req, srv) {
-				if (srv.upgrade(req)) return undefined;
-				return new Response("canvas-cowork login", { status: 200 });
-			},
-			websocket: {
-				message(ws, raw) {
-					let msg: { type?: string; data?: HandshakeSession };
-					try {
-						msg = JSON.parse(String(raw));
-					} catch {
-						return;
-					}
-					if (msg.type === "denied" || msg.type === "not_logged_in") {
-						ws.send(JSON.stringify({ ok: true }));
-						refuse(msg.type);
-						return;
-					}
-					if (msg.type === "session" && msg.data && accept(msg.data)) ws.send(JSON.stringify({ ok: true }));
-					else ws.send(JSON.stringify({ error: "bad request" }));
-				},
-			},
-		});
-		let server: ReturnType<typeof localServer> | undefined;
-		try {
-			server = localServer();
-		} catch {
-			if (!relayReady) {
-				reject(new CliError("Login couldn't reach Flowith Realtime or start its local connection. Check the network and run `login` again.", "LOGIN_UNAVAILABLE"));
-				return;
+			} else if (payload?.type === "denied" || payload?.type === "not_logged_in") {
+				relay.broadcast(topic, "cli_login_ack", { ok: true });
+				refuse(payload.type);
 			}
-		}
-		const params = new URLSearchParams({ cli_nonce: nonce, cli_bot: agent, ...(server ? { cli_port: String(server.port) } : {}), ...(relayReady ? { cli_code: code, cli_key: keys.publicKey } : {}) });
+		});
+
+		const params = new URLSearchParams({ cli_nonce: nonce, cli_bot: agent, cli_code: code, cli_key: keys.publicKey });
 		// The production root serves the marketing site; /blank always enters the canvas app.
 		const url = `${site}/blank?${params}`;
 		const timer = setTimeout(
@@ -429,12 +389,9 @@ export async function login(agent: string, log: (m: string) => void, opts: { ope
 		log(
 			[
 				opened ? "Opened Flowith in your browser — sign in if asked, then click Allow." : "Open this link in a browser, sign in and click Allow:",
-				relayReady ? `When the page asks, type this code: ${verificationCode(code)}` : "",
-				server ? "(If the browser asks whether the page may connect to apps on this device, allow it.)" : "",
+				`When the page asks, type this code: ${verificationCode(code)}`,
 				opened ? `If nothing opened, visit: ${url}` : url,
-			]
-				.filter(Boolean)
-				.join("\n"),
+			].join("\n"),
 		);
 	});
 }

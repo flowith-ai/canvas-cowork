@@ -7,8 +7,8 @@
  * a group member's position is relative to its group's top-left. `rect` here is absolute top-left.
  */
 
-import { type Api, CliError, ilikePattern, rest } from "./http";
-import type { CanvasRect } from "./placement";
+import { type Api, CliError, ilikePattern, rest } from "./http.ts";
+import type { CanvasRect } from "./placement.ts";
 
 export type CardKind = "image" | "video" | "audio" | "text" | "prompt" | "note" | "group" | "web" | "character" | "other";
 

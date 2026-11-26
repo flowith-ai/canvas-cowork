@@ -8,10 +8,11 @@
  * in that span. Anything else (none, or several: the user made the same model on the same canvas at that moment) is
  * unknown, never guessed. Text is charged when its answer finishes, so it is never tied here.
  */
+import { createHash } from "crypto";
 import { mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { join } from "path";
-import { type Api, worker } from "./http";
-import { home } from "./session";
+import { type Api, worker } from "./http.ts";
+import { home } from "./session.ts";
 
 export interface Sent {
 	card: string;
@@ -36,7 +37,7 @@ export interface Sent {
 export function fingerprint(data: unknown): string {
 	const canon = (v: unknown): unknown =>
 		Array.isArray(v) ? v.map(canon) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canon((v as Record<string, unknown>)[k])])) : v;
-	return Bun.hash(JSON.stringify(canon(data))).toString(36);
+	return createHash("sha256").update(JSON.stringify(canon(data))).digest("base64url").slice(0, 22);
 }
 
 export interface UsageRecord {

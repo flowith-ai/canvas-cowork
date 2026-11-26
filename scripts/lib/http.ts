@@ -25,14 +25,16 @@ export interface Api {
 }
 
 export class CliError extends Error {
-	constructor(
-		message: string,
-		public code = "ERROR",
-		public data?: unknown,
-		public status?: number,
-	) {
+	code: string;
+	data?: unknown;
+	status?: number;
+
+	constructor(message: string, code = "ERROR", data?: unknown, status?: number) {
 		super(message);
 		this.name = "CliError";
+		this.code = code;
+		this.data = data;
+		this.status = status;
 	}
 }
 

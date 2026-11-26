@@ -5,13 +5,13 @@
  * makes it (hypergpt-frontend use-image-background-removal.ts, multi-size-expand.ts, audio-generation.ts).
  */
 
-import type { Card } from "./desk";
-import { type Api, CliError, sleep, worker } from "./http";
-import { failCard } from "./generate";
-import { remoteImageSize } from "./media";
-import { type Placed, cardSize, placeCards } from "./write";
-import { placeSingle } from "./placement";
-import { anchorRect, obstaclesOf } from "./write";
+import type { Card } from "./desk.ts";
+import { type Api, CliError, sleep, worker } from "./http.ts";
+import { failCard } from "./generate.ts";
+import { remoteImageSize } from "./media.ts";
+import { type Placed, cardSize, placeCards } from "./write.ts";
+import { placeSingle } from "./placement.ts";
+import { anchorRect, obstaclesOf } from "./write.ts";
 
 const finishedMedia = (card: Card, kind: "image" | "video") => {
 	if (card.kind !== kind || !card.url || card.status === "running")

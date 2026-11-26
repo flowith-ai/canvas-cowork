@@ -5,12 +5,12 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
-import { CliError } from "./http";
-import { home } from "./session";
+import { CliError } from "./http.ts";
+import { home } from "./session.ts";
 
 export type Kind = "text" | "image" | "video" | "audio";
 
-import { listPrice } from "./video-cost";
+import { listPrice } from "./video-cost.ts";
 
 export interface Model {
 	media?: string;

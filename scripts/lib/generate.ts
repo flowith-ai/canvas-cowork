@@ -5,11 +5,11 @@
  * the worker fill the card. Waiting reads the cards until they settle.
  */
 
-import { type Catalog, type Model, imageSizing, videoParams } from "./catalog";
-import type { Card } from "./desk";
-import { cardsFrom, fetchRowsById } from "./desk";
-import { type Api, CliError, sleep, worker } from "./http";
-import type { Uploaded } from "./media";
+import { type Catalog, type Model, imageSizing, videoParams } from "./catalog.ts";
+import type { Card } from "./desk.ts";
+import { cardsFrom, fetchRowsById } from "./desk.ts";
+import { type Api, CliError, sleep, worker } from "./http.ts";
+import type { Uploaded } from "./media.ts";
 import {
 	type MediaKind,
 	type MediaNamer,
@@ -19,7 +19,7 @@ import {
 	minimaxH3ReferenceName,
 	nameMediaReferences,
 	seedanceReferenceName,
-} from "./reference-names";
+} from "./reference-names.ts";
 
 export const hasHan = (s: string) => /\p{Script=Han}/u.test(s);
 
@@ -403,7 +403,7 @@ export async function failCard(
 	data: Record<string, unknown>,
 	failure: unknown,
 ) {
-	const { patch } = await import("./write");
+	const { patch } = await import("./write.ts");
 	const error = failure instanceof Error ? failure.message : String(failure);
 	const code = failure instanceof CliError ? failure.code : undefined;
 	const body = (failure instanceof CliError && failure.data && typeof failure.data === "object" ? failure.data : {}) as Record<string, unknown>;

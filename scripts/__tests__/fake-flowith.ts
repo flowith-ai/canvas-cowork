@@ -6,7 +6,14 @@ import { copyFileSync, mkdtempSync, writeFileSync } from "fs";
 import { isDeepStrictEqual } from "node:util";
 import { tmpdir } from "os";
 import { join } from "path";
-import { b64url, openWith, sealWith } from "../lib/realtime";
+import { b64url, openWith, sealWith } from "../lib/realtime.ts";
+
+/**
+ * The runtime the real CLI runs under in these tests: Bun by default, `CW_TEST_RUNTIME=node` for Node
+ * (`node scripts/index.ts`, type stripping), so the suite proves both.
+ */
+export const RUNTIME = process.env.CW_TEST_RUNTIME || "bun";
+export const cliCommand = (...args: string[]) => [RUNTIME, join(import.meta.dir, "..", "index.ts"), ...args];
 
 export const USER = "11111111-1111-4111-8111-111111111111";
 export const CONV = "22222222-2222-4222-8222-222222222222";
@@ -214,7 +221,13 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 			async message(ws, raw) {
 				const { topic, event, payload, ref } = JSON.parse(String(raw));
 				if (event === "phx_join") {
+					ws.subscribe(topic);
 					ws.send(JSON.stringify({ topic, ref, event: "phx_reply", payload: { status: "ok" } }));
+					return;
+				}
+				// Broadcasts reach every other socket on the topic (as Realtime's `self: false`): the login relay.
+				if (event === "broadcast" && payload?.event !== "bot_action") {
+					ws.publish(topic, String(raw));
 					return;
 				}
 				if (payload?.event !== "bot_action" || !opts.browser) return;
@@ -320,7 +333,7 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 		const env = { ...process.env, FLOWITH_HOME: at.home ?? home, FLOWITH_AGENT: "claude-code", ...at.env } as Record<string, string | undefined>;
 		delete env.FLOWITH_URL;
 		delete env.FLOWITH_CANVAS;
-		const proc = Bun.spawn(["bun", join(import.meta.dir, "..", "index.ts"), ...args, "--json", "--quiet"], { env, stdout: "pipe", stderr: "pipe" });
+		const proc = Bun.spawn(cliCommand(...args, "--json", "--quiet"), { env, stdout: "pipe", stderr: "pipe" });
 		const [stdout, code] = [await new Response(proc.stdout).text(), await proc.exited];
 		let json: any;
 		try { json = JSON.parse(stdout.trim().split("\n").at(-1) ?? ""); } catch { json = stdout; }
@@ -334,4 +347,60 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 function jwt() {
 	const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
 	return `${b64({ alg: "HS256" })}.${b64({ sub: USER, exp: Math.floor(Date.now() / 1000) + 3600, session_id: "s-1", email: "t@test" })}.sig`;
+}
+
+/**
+ * What the connect page does on Allow (hypergpt-frontend canvas-bot/cli-handshake.ts): seals the session to the
+ * CLI's one-time key, broadcasts it on `cli-login:<code>` and waits for the CLI's proof that it opened it.
+ */
+export async function approveLogin(origin: string, link: string, session: Record<string, unknown>): Promise<boolean> {
+	const url = new URL(link);
+	const code = url.searchParams.get("cli_code")!;
+	const cliKey = url.searchParams.get("cli_key")!;
+	const nonce = url.searchParams.get("cli_nonce")!;
+	const text = new TextEncoder();
+	const fromB64 = (v: string) => new Uint8Array(Buffer.from(v, "base64url"));
+	const recipient = await crypto.subtle.importKey("raw", fromB64(cliKey), { name: "ECDH", namedCurve: "P-256" }, false, []);
+	const ephemeral = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+	const secret = await crypto.subtle.deriveBits({ name: "ECDH", public: recipient }, ephemeral.privateKey, 256);
+	const material = await crypto.subtle.importKey("raw", secret, "HKDF", false, ["deriveKey"]);
+	const key = await crypto.subtle.deriveKey(
+		{ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: text.encode(`flowith-cli-login:${code}`) },
+		material,
+		{ name: "AES-GCM", length: 256 },
+		false,
+		["encrypt", "decrypt"],
+	);
+	const iv = crypto.getRandomValues(new Uint8Array(12));
+	const message = { type: "session", data: { ...session, nonce } };
+	const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: text.encode(code) }, key, text.encode(JSON.stringify(message)));
+	const sealed = { type: "sealed", epk: b64url(await crypto.subtle.exportKey("raw", ephemeral.publicKey)), iv: b64url(iv), ct: b64url(ct) };
+
+	const topic = `realtime:cli-login:${code}`;
+	const socket = new WebSocket(`${origin.replace(/^http/, "ws")}/realtime/v1/websocket?apikey=k&vsn=1.0.0`);
+	try {
+		return await new Promise<boolean>((resolve, reject) => {
+			const timer = setTimeout(() => reject(new Error("The CLI never acknowledged the sealed login.")), 10_000);
+			socket.onerror = () => reject(new Error("The test login socket failed."));
+			socket.onopen = () => socket.send(JSON.stringify({ topic, event: "phx_join", payload: {}, ref: "1", join_ref: "1" }));
+			socket.onmessage = async (e) => {
+				const m = JSON.parse(String(e.data));
+				if (m.event === "phx_reply" && m.ref === "1")
+					socket.send(JSON.stringify({ topic, event: "broadcast", payload: { type: "broadcast", event: "cli_login", payload: sealed }, ref: "2", join_ref: "1" }));
+				if (m.event === "broadcast" && m.payload?.event === "cli_login_ack") {
+					const proof = m.payload.payload as { iv: string; ct: string };
+					try {
+						const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: fromB64(proof.iv), additionalData: text.encode(`${code}:ack`) }, key, fromB64(proof.ct));
+						clearTimeout(timer);
+						resolve(new TextDecoder().decode(plain) === `ack:${nonce}`);
+					} catch {
+						clearTimeout(timer);
+						resolve(false);
+					}
+				}
+			};
+		});
+	} finally {
+		socket.close();
+	}
 }

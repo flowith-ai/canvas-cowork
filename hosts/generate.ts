@@ -364,12 +364,16 @@ function mcpSection(m: Manifest, channel: Channel): string {
 			parts.push(
 				fence(install.commands),
 				"",
-				"Then sign in and work in this same session. Don't run `claude mcp login`: from your shell it stops at once (it needs a terminal). A plugin's server loads only after `/reload-plugins`, which only the user can type:",
+				"Then sign in and work in this same session, in exactly this order. Don't run `claude mcp login`: from your shell it stops at once (it needs a terminal). A plugin's server loads only after `/reload-plugins`, which only the user can type, and your background wait is what wakes you up after each thing the user does:",
 				"",
-				`1. Start a background wait (\`sleep 20\`, run in the background) and tell the user in one line: "Type /reload-plugins and I'll open the sign-in page." When the wait ends, look for the tool \`${tool("authenticate")}\` (ToolSearch \`select:${tool("authenticate")}\`). Not there yet: wait again, for up to 5 minutes.`,
-				`2. Call it. It answers with a sign-in link: open it for the user (\`open '<link>'\` on macOS, \`xdg-open\` on Linux, \`start\` on Windows) and tell them in one line to click **Allow** on the page that opened (a new user signs up there first and comes back to it). Start a background wait again; when it ends, look for \`list_canvases\`. Not there yet: wait again, for up to 10 minutes. The tools arrive by themselves after **Allow**.`,
-				`3. If the page after **Allow** couldn't reach Claude Code, ask the user for that page's address and pass it to \`${tool("complete_authentication")}\`.`,
-				"4. Verify with `list_canvases`, then do the user's task right here: no new session is needed.",
+				"```text",
+				`1. Run \`sleep 20\` in the background, then tell the user in one line: "Type /reload-plugins and I'll open the sign-in page."`,
+				`2. When the wait ends, look for ${tool("authenticate")} (ToolSearch "select:${tool("authenticate")}"). Not there yet: sleep 20 in the background again (up to 5 minutes).`,
+				`3. Call it. Open the link it answers for the user (open '<link>' on macOS, xdg-open on Linux, start on Windows) and tell them in one line to click Allow on that page (a new user signs up there first). Run \`sleep 20\` in the background again.`,
+				"4. When the wait ends, look for list_canvases. Not there yet: sleep 20 in the background again (up to 10 minutes). The tools arrive by themselves after Allow.",
+				"5. Call list_canvases, then do the user's task right here: no new session is needed.",
+				`If the page after Allow couldn't reach Claude Code: ask the user for that page's address and pass it to ${tool("complete_authentication")}.`,
+				"```",
 			);
 		} else if (host.id === "codex")
 			parts.push(
@@ -377,7 +381,13 @@ function mcpSection(m: Manifest, channel: Channel): string {
 				"",
 				`Codex's sandbox has no network and can't write to Codex's own folder, and these commands need both: run each with escalated permissions (\`sandbox_permissions: "require_escalated"\` and a short reason such as "Install ${channel.displayName}") so the user approves it. If Codex rejects escalation without asking the user, tell them in one line: "Type /permissions, choose Ask for approval, then say go on." \`mcp login\` opens ${site}; the user clicks **Allow** (run it in the background and wait for it).`,
 				"",
-				`The tools load only in a new thread, which you start yourself: call \`create_thread\` (Codex's \`codex_tui\` tools) with the user's request, word for word, plus "${channel.displayName} is installed and signed in; check with list_canvases, then do this." Then tell the user in one line that it is running in a new thread (\`codex://threads/<threadId>\`), where Codex may ask them to allow Flowith's tools. In the Codex app, once the marketplace is added, \`${install.oneClick}\` opens the install page.`,
+				"The tools load only in a new thread, which you start yourself:",
+				"",
+				"```text",
+				`After mcp login: call create_thread (Codex's codex_tui tools) with the user's request, word for word, plus "${channel.displayName} is installed and signed in; check with list_canvases, then do this." Then tell the user in one line that it is running in a new thread (codex://threads/<threadId>), where Codex may ask them to allow Flowith's tools.`,
+				"```",
+				"",
+				`In the Codex app, once the marketplace is added, \`${install.oneClick}\` opens the install page.`,
 			);
 		else if (host.id === "cursor")
 			parts.push(

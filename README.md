@@ -1,32 +1,76 @@
-# Canvas Cowork
+# Flowith in your agent
 
-Let Claude Code, Codex, Cursor or any agent with a shell **work directly on your
-[Flowith](https://flowith.io) 3.0 canvas** — generate and edit pictures, clips, text, voice and music,
-extend and vary them, upscale / cut out / expand, and organise the canvas — the way Flowith's own
-in-app agent, Flo, does. Every result is a card on your canvas, priced and billed exactly like the
-cards you make by hand, and an open canvas shows the agent's cards arrive live.
+Let Claude Code, Codex, Cursor, Antigravity or any agent **work directly on your
+[Flowith](https://flowith.io) canvas**: generate and edit pictures, clips, text, voice and music, extend
+and vary them, upscale / cut out / expand, and organise the canvas, the way Flowith's own in-app agent,
+Flo, does. Every result is a card on your canvas, signed with your agent's name, priced and billed
+exactly like the cards you make by hand, and an open canvas shows the cards arrive live. Your agent can
+open the canvas beside the chat, look at what came out and fix what misses.
 
-## Install
+This repository is Flowith's distribution for every agent host: the per-host plugins for Flowith's
+hosted MCP server, the `canvas-cowork` skill, and the CLI it falls back to.
 
-```bash
-npx skills add flowith-ai/canvas-cowork
+## Install: paste one line into your agent
+
+<!-- generated:prompts -->
+Paste one line into your agent, with your task at the end:
+
+```text
+Install Flowith in this agent by following https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md, then make three poster designs for an autumn latte.
 ```
 
-Requires [Bun](https://bun.sh) ≥ 1.1. No other dependencies.
+For internal testing of the hosted MCP on next-gen.flowith.io:
 
-## First run
-
-```bash
-bun scripts/index.ts login     # opens Flowith and prints a code: type it on the page, click Allow — once
+```text
+Install Flowith Next in this agent by following https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md, then make three poster designs for an autumn latte.
 ```
 
-In Codex, the skill opens the working canvas in the app's browser beside the chat. Sign in to Flowith
-there to watch cards appear and follow reviews. See [Live browser](./references/live-browser.md).
+Naming the host also works (`Install Flowith in Codex by following …`). [INSTALL.md](./INSTALL.md) tells the agent how to set itself up; [hosts/install.json](./hosts/install.json) has every prompt, command and link for the website.
+<!-- /generated:prompts -->
 
-## What it can do
+The agent installs Flowith for itself (only for the app you are using), you click **Allow** once on
+flowith.io, and it goes on to your task.
+
+## Install by hand
+
+<!-- generated:install -->
+### Skill + CLI (flowith.io today)
+
+- Claude Code: `npx -y skills add flowith-ai/canvas-cowork -g -a claude-code -y`
+- Codex: `npx -y skills add flowith-ai/canvas-cowork -g -a codex -y`
+- Cursor: `npx -y skills add flowith-ai/canvas-cowork -g -a cursor -y`
+- Antigravity: `npx -y skills add flowith-ai/canvas-cowork -g -a antigravity -y`
+
+Then `node scripts/index.ts login` from the skill's folder (your agent does this for you): type the code it prints on the Flowith page and click **Allow**, once.
+
+### Hosted MCP (coming soon to flowith.io)
+
+No local runtime: the agent gets Flowith's tools from a hosted server and you click **Allow** once on flowith.io. It is live on Flowith Next (next-gen.flowith.io) for testing; the Flowith packages turn on when flowith.io ships it.
+
+| Host | Install |
+|---|---|
+| Claude Code | `claude plugin marketplace add flowith-ai/canvas-cowork`<br>`claude plugin install flowith-next@flowith`<br>`claude mcp login plugin:flowith-next:flowith-next` |
+| Codex | `codex plugin marketplace add flowith-ai/canvas-cowork`<br>`codex plugin add flowith-next@flowith`<br>`codex mcp login flowith-next` |
+| Cursor | [Add to Cursor](https://cursor.com/install-mcp?name=flowith-next&config=eyJ1cmwiOiJodHRwczovL2Zsb3dpdGgtY3JlYXRvci1hZ2VudC1wcmV2aWV3LmZseS5kZXYvbWNwIiwiaGVhZGVycyI6eyJ4LWZsb3dpdGgtbWNwLWNsaWVudCI6ImN1cnNvciIsIngtZmxvd2l0aC1wbHVnaW4tdmVyc2lvbiI6IjIuMC4wIiwieC1mbG93aXRoLWluc3RhbGwtc291cmNlIjoiY3Vyc29yLWRlZXBsaW5rIn19) |
+| Antigravity | `agy plugin install https://github.com/flowith-ai/canvas-cowork/tree/main/plugins/antigravity/flowith-next` |
+<!-- /generated:install -->
+
+## The CLI
+
+Where the hosted MCP isn't available, the skill drives Flowith through a zero-dependency CLI. It runs on
+Node 22.18+ or Bun 1.1+:
 
 ```bash
-cw() { bun scripts/index.ts "$@"; }
+node scripts/index.ts login                          # from the skill's folder; or: bun scripts/index.ts login
+npx -y github:flowith-ai/canvas-cowork login         # from anywhere, nothing installed
+```
+
+`login` opens Flowith and prints a code: type it on the page and click **Allow**, once. In Codex, the
+skill opens the working canvas in the app's browser beside the chat. See
+[Live browser](./references/live-browser.md).
+
+```bash
+cw() { node scripts/index.ts "$@"; }
 
 cw new "Orange Cat Café"                                  # a canvas (or: cw use <canvas>)
 cw image "an orange cat asleep on a café windowsill, morning light" --ratio 4:3 --title "Window cat"
@@ -38,18 +82,19 @@ cw video "pull back to reveal the whole bar" --extend <clip>
 cw text "a 10-word slogan for this café" --model claude-opus-5-5,gemini-3.8-flash --ref <ref>
 cw speech "Welcome to the Orange Cat Café." --for <clip>
 cw upscale <ref> --to 4k · cw cutout <ref> · cw expand <ref> --ratio 9:16
-    cw look --canvas <canvas-url>                             # inspect this canvas even if the active one changes
-    cw selection                                              # see what the user selected in the open canvas
+cw look --canvas <canvas-url>                             # inspect this canvas even if the active one changes
+cw selection                                              # see what the user selected in the open canvas
 cw shots <ref…>                                           # previews to look at
 cw group <refs…> --name "Finals" · cw arrange <group> · cw move <ref> --right-of <ref>
 cw models video · cw credits
 ```
 
-`bun scripts/index.ts help` lists every command; [SKILL.md](./SKILL.md) is the agent's guide, with
-[models](./references/models.md), [prompting](./references/prompting.md),
-[workflows](./references/workflows.md) and [troubleshooting](./references/troubleshooting.md).
+`cw help` lists every command. [SKILL.md](./SKILL.md) is the agent's guide (MCP first, the CLI as
+fallback), with [the CLI](./references/cli.md), [models](./references/models.md),
+[prompting](./references/prompting.md), [workflows](./references/workflows.md) and
+[troubleshooting](./references/troubleshooting.md).
 
-## How it works
+## How the CLI works
 
 - **Login**: after you type the CLI's code on Flowith's connect page and allow it, the page gives the
   CLI a sign-in of its own, seals it to the CLI's one-time key and hands it over Flowith's realtime
@@ -66,6 +111,15 @@ cw models video · cw credits
 - **Generation** goes through the canvas's own routes (`/image_gen/async`, `/video/async`,
   `/completion/async`, card tools), so models, limits, prices and credits are exactly the canvas's.
 - **Models** come live from the canvas catalogue; every parameter is validated against it.
+
+## Already using canvas-cowork?
+
+Nothing to redo: the same commands, the same sign-in (`~/.flowith/canvas-session.json`) and `bun
+scripts/index.ts` all keep working. What 2.0 adds: the CLI also runs on Node 22.18+ (`node
+scripts/index.ts`, or `npx -y github:flowith-ai/canvas-cowork` with nothing installed), the skill uses
+Flowith's hosted MCP tools when your agent has them, and `login` no longer opens a local port (the page
+hands the sign-in over Flowith's realtime service, as it already did for this CLI). Update the skill with
+`npx skills update`.
 
 ## Upgrading from the previous canvas-cowork
 
@@ -133,8 +187,29 @@ Supabase project also needs that project's relay URL and publishable key (`scrip
 ## Development
 
 ```bash
-bun test scripts/__tests__      # unit tests, and the real CLI against a stand-in Flowith (cli.test.ts)
+bun test scripts/__tests__ hosts/__tests__          # unit tests, the real CLI against a stand-in Flowith, host packages
+CW_TEST_RUNTIME=node bun test scripts/__tests__     # the same CLI tests with the CLI running on Node
+node hosts/generate.ts                              # rewrite every host package after changing the manifest or the skill
 ```
+
+Every host package is generated from [hosts/manifest.json](./hosts/manifest.json) (version, MCP URLs per
+channel, headers, starters) plus `SKILL.md`, `references/` and `hosts/assets/`:
+
+| Generated | For |
+|---|---|
+| `.claude-plugin/marketplace.json`, `plugins/claude-code/<channel>/` | Claude Code marketplace and plugins (`.mcp.json`, skills) |
+| `.agents/plugins/marketplace.json`, `plugins/codex/<channel>/` | Codex marketplace and plugins (`.mcp.json`, skills, `get-started` onboarding skill) |
+| `plugins/antigravity/<channel>/` | Antigravity plugins (`plugin.json`, `mcp_config.json`, skills) |
+| `plugins/cursor/<channel>/mcp.json` | Cursor's server entry; the install link is in `hosts/install.json` |
+| `hosts/install.json` | Every copy prompt, command and one-click link, for the website's Connect an agent dialog |
+| The marked regions of README.md and INSTALL.md | Install commands, so the docs can't drift from the packages |
+
+Channels: `flowith` (https://agent.flowith.io/mcp) and `flowith-next`
+(https://flowith-creator-agent-preview.fly.dev/mcp, next-gen testing). Each MCP config sends
+`x-flowith-mcp-client`, `x-flowith-plugin-version` and `x-flowith-install-source` where the host takes
+headers. `hosts/__tests__/generate.test.ts` fails when a generated file differs from what the manifest
+generates. When the production MCP ships, set the `flowith` channel's `live` to `true` and regenerate:
+the docs then lead with the hosted MCP and keep the CLI as the fallback.
 
 ## License
 

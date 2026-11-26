@@ -1,0 +1,59 @@
+{
+  "name": "flowith",
+  "owner": {
+    "name": "Flowith",
+    "url": "https://flowith.io"
+  },
+  "metadata": {
+    "description": "Flowith for Claude Code",
+    "version": "2.0.0"
+  },
+  "plugins": [
+    {
+      "name": "flowith",
+      "source": "./plugins/claude-code/flowith",
+      "description": "Make pictures, clips, voice and music as cards on your Flowith canvas, from your own agent: the same tools, prices and credits as Flo. Coming soon: the hosted server for flowith.io is not live yet; use the canvas-cowork skill and CLI until it is.",
+      "version": "2.0.0",
+      "author": {
+        "name": "Flowith",
+        "url": "https://flowith.io"
+      },
+      "homepage": "https://flowith.io",
+      "license": "MIT",
+      "keywords": [
+        "flowith",
+        "canvas",
+        "image-generation",
+        "video-generation",
+        "text-to-speech",
+        "music-generation",
+        "storyboard",
+        "mcp"
+      ],
+      "category": "creativity"
+    },
+    {
+      "name": "flowith-next",
+      "source": "./plugins/claude-code/flowith-next",
+      "description": "Make pictures, clips, voice and music as cards on your Flowith canvas, from your own agent: the same tools, prices and credits as Flo. Flowith Next: next-gen.flowith.io, for internal testing of the hosted MCP.",
+      "version": "2.0.0",
+      "author": {
+        "name": "Flowith",
+        "url": "https://flowith.io"
+      },
+      "homepage": "https://flowith.io",
+      "license": "MIT",
+      "keywords": [
+        "flowith",
+        "canvas",
+        "image-generation",
+        "video-generation",
+        "text-to-speech",
+        "music-generation",
+        "storyboard",
+        "mcp"
+      ],
+      "category": "creativity"
+    }
+  ]
+}

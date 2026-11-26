@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "flowith": {
+      "url": "https://agent.flowith.io/mcp",
+      "headers": {
+        "x-flowith-mcp-client": "cursor",
+        "x-flowith-plugin-version": "2.0.0",
+        "x-flowith-install-source": "cursor-mcp-json"
+      }
+    }
+  }
+}

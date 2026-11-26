@@ -1,7 +1,9 @@
 # Workflows
 
-`cw` = `bun scripts/index.ts`. Each recipe ends the same way: `cw shots` the results, look at them, fix
-what misses, then tell the user what is on the canvas (refs + url).
+Steps are written as CLI commands (`cw` = `node scripts/index.ts`, see [cli](cli.md)). With Flowith's MCP
+tools, call the matching tool (the table in SKILL.md) with the same prompt, references and title; steps
+marked *(CLI)* need the CLI today. Each recipe ends the same way: look at the results, fix what misses,
+then tell the user what is on the canvas (titles or refs + the canvas link).
 
 ## A short film: idea → shots → frames → clips
 
@@ -24,18 +26,18 @@ Use `cw new "Working title" --json` for a fresh canvas, or take the user's canva
    `--dry-run`. Use `--model seedance-2.5 --draft` to test Seedance's draft mode.
 6. Continue a shot: `cw video "接着…" --extend <clip>`. Voice-over / music for the cut:
    `cw speech "旁白…" --for <clip>` · `cw music "warm acoustic, 90 bpm" --for <clip> --duration 30`.
-7. Put the clips in order: `cw group <clip refs…> --name "成片"` then `cw arrange <group>`; with the canvas
-   open, `cw cut <clip refs…>` lays them on a track in the canvas's editor (加入剪辑).
-8. Learning from a reference film: `cw add ref.mp4` then `cw breakdown <clip>` (拉片) lays out its shots,
-   frames and prompts as cards you can reuse.
+7. Put the clips in order *(CLI)*: `cw group <clip refs…> --name "成片"` then `cw arrange <group>`; with
+   the canvas open, `cw cut <clip refs…>` lays them on a track in the canvas's editor (加入剪辑).
+8. Learning from a reference film *(CLI)*: `cw add ref.mp4` then `cw breakdown <clip>` (拉片) lays out its
+   shots, frames and prompts as cards you can reuse.
 
 ## Product shots for every channel
 
 1. `cw add product.png --title "产品原图"` (or use the user's card).
 2. Scenes from the product, product kept exact:
    `cw image "@image1 放在大理石台面上，晨光，留白在左侧" "@image1 被一只手拿着，户外逆光" --ref <product> --group "产品场景"`
-3. Formats: `cw expand <ref> --ratio 9:16`, `--ratio 4:5`, `--ratio 16:9`.
-4. Cut-out for the store: `cw cutout <ref>`; sharper print: `cw upscale <ref> --to 4k`.
+3. Formats *(CLI)*: `cw expand <ref> --ratio 9:16`, `--ratio 4:5`, `--ratio 16:9`.
+4. Cut-out for the store *(CLI)*: `cw cutout <ref>`; sharper print: `cw upscale <ref> --to 4k`.
 5. A 5-second product clip: `cw video "镜头缓慢环绕 @image1，柔和反光" --ref <best scene> --duration 5`.
 
 ## The same character everywhere
@@ -54,7 +56,7 @@ Use `cw new "Working title" --json` for a fresh canvas, or take the user's canva
 - Clips: run one `cw video … --model X` per model with the same prompt and `--into <group>`; ask first,
   video comparisons are expensive.
 
-## Tidy a canvas
+## Tidy a canvas *(CLI)*
 
 1. `cw look` — read groups, loose cards, their links, and which cards overlap. If only overlaps bother
    the user and the canvas is open, `cw tidy` runs the canvas's own Organize.

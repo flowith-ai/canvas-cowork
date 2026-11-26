@@ -1,0 +1,67 @@
+{
+  "$comment": "The one source of every host package. Edit here (or SKILL.md, references/, hosts/assets/), then run `node hosts/generate.ts`. hosts/__tests__/generate.test.ts fails when any generated file differs from what this manifest generates.",
+  "name": "flowith",
+  "displayName": "Flowith",
+  "version": "2.0.0",
+  "description": "Make pictures, clips, voice and music as cards on your Flowith canvas, from your own agent: the same tools, prices and credits as Flo.",
+  "longDescription": "Flowith gives your agent Flo's hands on your Flowith canvas. Ask for pictures, clips, text, voice-overs or music and they arrive as cards on your canvas, signed with your agent's name, priced and billed exactly like the cards you make yourself. Your agent can open the canvas beside the chat, look at what came out and fix what misses. Sign in once on flowith.io; disconnect any time in Flowith's Connections.",
+  "author": { "name": "Flowith", "url": "https://flowith.io" },
+  "homepage": "https://flowith.io",
+  "privacyPolicyURL": "https://flowith.io/compliance/privacy-policy",
+  "termsOfServiceURL": "https://flowith.io/compliance/tos",
+  "license": "MIT",
+  "brandColor": "#111111",
+  "category": "Creativity",
+  "keywords": ["flowith", "canvas", "image-generation", "video-generation", "text-to-speech", "music-generation", "storyboard", "mcp"],
+  "repository": { "github": "flowith-ai/canvas-cowork", "branch": "main" },
+  "marketplace": { "name": "flowith", "displayName": "Flowith" },
+  "skill": { "name": "flowith", "source": "SKILL.md", "references": "references" },
+  "headers": {
+    "client": "x-flowith-mcp-client",
+    "version": "x-flowith-plugin-version",
+    "installSource": "x-flowith-install-source"
+  },
+  "channels": [
+    {
+      "id": "flowith",
+      "displayName": "Flowith",
+      "site": "https://flowith.io",
+      "mcpUrl": "https://agent.flowith.io/mcp",
+      "live": false,
+      "note": "flowith.io. Off until the hosted MCP and its sign-in ship to production; until then the docs keep the CLI primary."
+    },
+    {
+      "id": "flowith-next",
+      "displayName": "Flowith Next",
+      "site": "https://next-gen.flowith.io",
+      "mcpUrl": "https://flowith-creator-agent-preview.fly.dev/mcp",
+      "live": true,
+      "internal": true,
+      "note": "next-gen.flowith.io, for internal testing of the hosted MCP."
+    }
+  ],
+  "hosts": [
+    { "id": "claude-code", "displayName": "Claude Code", "skillsAgent": "claude-code" },
+    { "id": "codex", "displayName": "Codex", "skillsAgent": "codex" },
+    { "id": "cursor", "displayName": "Cursor", "skillsAgent": "cursor" },
+    { "id": "antigravity", "displayName": "Antigravity", "skillsAgent": "antigravity" }
+  ],
+  "starters": {
+    "en": [
+      "Make three poster designs for an autumn latte, each in a different style",
+      "Storyboard a 15-second ad for a coffee brand: four frames, then animate the best one",
+      "Turn my product photo into a 5-second clip with sound"
+    ],
+    "zh": [
+      "为一款秋季拿铁做三张海报，每张风格不同",
+      "给一个咖啡品牌做 15 秒广告分镜：四个画面，再把最好的一张做成视频",
+      "把我的产品图做成一段 5 秒、带声音的短视频"
+    ]
+  },
+  "installGuide": "https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md",
+  "copyPrompt": {
+    "template": "Install {channel} in {host} by following {guide}, then {task}",
+    "anyHost": "this agent",
+    "defaultTask": "show me what I can make with it."
+  }
+}

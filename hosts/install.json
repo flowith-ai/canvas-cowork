@@ -1,0 +1,166 @@
+{
+  "$comment": "Generated from hosts/manifest.json by hosts/generate.ts; don't edit by hand. What the website's Connect an agent dialog shows.",
+  "version": "2.0.0",
+  "installGuide": "https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md",
+  "headers": {
+    "client": "x-flowith-mcp-client",
+    "version": "x-flowith-plugin-version",
+    "installSource": "x-flowith-install-source"
+  },
+  "channels": [
+    {
+      "id": "flowith",
+      "displayName": "Flowith",
+      "site": "https://flowith.io",
+      "mcpUrl": "https://agent.flowith.io/mcp",
+      "live": false,
+      "internal": false,
+      "copyPrompt": "Install Flowith in this agent by following https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md, then show me what I can make with it.",
+      "copyPromptTemplate": "Install Flowith in this agent by following https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md, then {task}",
+      "hosts": {
+        "claude-code": {
+          "displayName": "Claude Code",
+          "copyPrompt": "Install Flowith in Claude Code by following https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md, then show me what I can make with it.",
+          "mcp": {
+            "commands": [
+              "claude plugin marketplace add flowith-ai/canvas-cowork",
+              "claude plugin install flowith@flowith",
+              "claude mcp login plugin:flowith:flowith"
+            ],
+            "thenNew": "a new session, or `/reload-plugins` in this one"
+          },
+          "cli": {
+            "commands": [
+              "npx -y skills add flowith-ai/canvas-cowork -g -a claude-code -y"
+            ]
+          }
+        },
+        "codex": {
+          "displayName": "Codex",
+          "copyPrompt": "Install Flowith in Codex by following https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md, then show me what I can make with it.",
+          "mcp": {
+            "commands": [
+              "codex plugin marketplace add flowith-ai/canvas-cowork",
+              "codex plugin add flowith@flowith",
+              "codex mcp login flowith"
+            ],
+            "oneClick": "codex://plugins/install/flowith?marketplace=flowith",
+            "thenNew": "a new thread"
+          },
+          "cli": {
+            "commands": [
+              "npx -y skills add flowith-ai/canvas-cowork -g -a codex -y"
+            ]
+          }
+        },
+        "cursor": {
+          "displayName": "Cursor",
+          "copyPrompt": "Install Flowith in Cursor by following https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md, then show me what I can make with it.",
+          "mcp": {
+            "commands": [],
+            "oneClick": "cursor://anysphere.cursor-deeplink/mcp/install?name=flowith&config=eyJ1cmwiOiJodHRwczovL2FnZW50LmZsb3dpdGguaW8vbWNwIiwiaGVhZGVycyI6eyJ4LWZsb3dpdGgtbWNwLWNsaWVudCI6ImN1cnNvciIsIngtZmxvd2l0aC1wbHVnaW4tdmVyc2lvbiI6IjIuMC4wIiwieC1mbG93aXRoLWluc3RhbGwtc291cmNlIjoiY3Vyc29yLWRlZXBsaW5rIn19",
+            "webLink": "https://cursor.com/install-mcp?name=flowith&config=eyJ1cmwiOiJodHRwczovL2FnZW50LmZsb3dpdGguaW8vbWNwIiwiaGVhZGVycyI6eyJ4LWZsb3dpdGgtbWNwLWNsaWVudCI6ImN1cnNvciIsIngtZmxvd2l0aC1wbHVnaW4tdmVyc2lvbiI6IjIuMC4wIiwieC1mbG93aXRoLWluc3RhbGwtc291cmNlIjoiY3Vyc29yLWRlZXBsaW5rIn19",
+            "thenNew": "a new chat once the server shows as connected"
+          },
+          "cli": {
+            "commands": [
+              "npx -y skills add flowith-ai/canvas-cowork -g -a cursor -y"
+            ]
+          }
+        },
+        "antigravity": {
+          "displayName": "Antigravity",
+          "copyPrompt": "Install Flowith in Antigravity by following https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md, then show me what I can make with it.",
+          "mcp": {
+            "commands": [
+              "agy plugin install https://github.com/flowith-ai/canvas-cowork/tree/main/plugins/antigravity/flowith"
+            ],
+            "thenNew": "a new conversation"
+          },
+          "cli": {
+            "commands": [
+              "npx -y skills add flowith-ai/canvas-cowork -g -a antigravity -y"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "flowith-next",
+      "displayName": "Flowith Next",
+      "site": "https://next-gen.flowith.io",
+      "mcpUrl": "https://flowith-creator-agent-preview.fly.dev/mcp",
+      "live": true,
+      "internal": true,
+      "copyPrompt": "Install Flowith Next in this agent by following https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md, then show me what I can make with it.",
+      "copyPromptTemplate": "Install Flowith Next in this agent by following https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md, then {task}",
+      "hosts": {
+        "claude-code": {
+          "displayName": "Claude Code",
+          "copyPrompt": "Install Flowith Next in Claude Code by following https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md, then show me what I can make with it.",
+          "mcp": {
+            "commands": [
+              "claude plugin marketplace add flowith-ai/canvas-cowork",
+              "claude plugin install flowith-next@flowith",
+              "claude mcp login plugin:flowith-next:flowith-next"
+            ],
+            "thenNew": "a new session, or `/reload-plugins` in this one"
+          },
+          "cli": {
+            "commands": [
+              "npx -y skills add flowith-ai/canvas-cowork -g -a claude-code -y"
+            ]
+          }
+        },
+        "codex": {
+          "displayName": "Codex",
+          "copyPrompt": "Install Flowith Next in Codex by following https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md, then show me what I can make with it.",
+          "mcp": {
+            "commands": [
+              "codex plugin marketplace add flowith-ai/canvas-cowork",
+              "codex plugin add flowith-next@flowith",
+              "codex mcp login flowith-next"
+            ],
+            "oneClick": "codex://plugins/install/flowith-next?marketplace=flowith",
+            "thenNew": "a new thread"
+          },
+          "cli": {
+            "commands": [
+              "npx -y skills add flowith-ai/canvas-cowork -g -a codex -y"
+            ]
+          }
+        },
+        "cursor": {
+          "displayName": "Cursor",
+          "copyPrompt": "Install Flowith Next in Cursor by following https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md, then show me what I can make with it.",
+          "mcp": {
+            "commands": [],
+            "oneClick": "cursor://anysphere.cursor-deeplink/mcp/install?name=flowith-next&config=eyJ1cmwiOiJodHRwczovL2Zsb3dpdGgtY3JlYXRvci1hZ2VudC1wcmV2aWV3LmZseS5kZXYvbWNwIiwiaGVhZGVycyI6eyJ4LWZsb3dpdGgtbWNwLWNsaWVudCI6ImN1cnNvciIsIngtZmxvd2l0aC1wbHVnaW4tdmVyc2lvbiI6IjIuMC4wIiwieC1mbG93aXRoLWluc3RhbGwtc291cmNlIjoiY3Vyc29yLWRlZXBsaW5rIn19",
+            "webLink": "https://cursor.com/install-mcp?name=flowith-next&config=eyJ1cmwiOiJodHRwczovL2Zsb3dpdGgtY3JlYXRvci1hZ2VudC1wcmV2aWV3LmZseS5kZXYvbWNwIiwiaGVhZGVycyI6eyJ4LWZsb3dpdGgtbWNwLWNsaWVudCI6ImN1cnNvciIsIngtZmxvd2l0aC1wbHVnaW4tdmVyc2lvbiI6IjIuMC4wIiwieC1mbG93aXRoLWluc3RhbGwtc291cmNlIjoiY3Vyc29yLWRlZXBsaW5rIn19",
+            "thenNew": "a new chat once the server shows as connected"
+          },
+          "cli": {
+            "commands": [
+              "npx -y skills add flowith-ai/canvas-cowork -g -a cursor -y"
+            ]
+          }
+        },
+        "antigravity": {
+          "displayName": "Antigravity",
+          "copyPrompt": "Install Flowith Next in Antigravity by following https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md, then show me what I can make with it.",
+          "mcp": {
+            "commands": [
+              "agy plugin install https://github.com/flowith-ai/canvas-cowork/tree/main/plugins/antigravity/flowith-next"
+            ],
+            "thenNew": "a new conversation"
+          },
+          "cli": {
+            "commands": [
+              "npx -y skills add flowith-ai/canvas-cowork -g -a antigravity -y"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

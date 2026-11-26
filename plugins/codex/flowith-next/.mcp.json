@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "flowith-next": {
+      "type": "http",
+      "url": "https://flowith-creator-agent-preview.fly.dev/mcp",
+      "http_headers": {
+        "x-flowith-mcp-client": "codex",
+        "x-flowith-plugin-version": "2.0.0",
+        "x-flowith-install-source": "codex-plugin"
+      }
+    }
+  }
+}

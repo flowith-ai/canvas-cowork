@@ -12,12 +12,15 @@ export class Realtime {
 	private listeners = new Set<(m: Message) => void>();
 	private heartbeat?: ReturnType<typeof setInterval>;
 	private joined = new Map<string, string>();
+	private url: string;
+	private key: string;
+	private token?: string;
 
-	constructor(
-		private url: string,
-		private key: string,
-		private token?: string,
-	) {}
+	constructor(url: string, key: string, token?: string) {
+		this.url = url;
+		this.key = key;
+		this.token = token;
+	}
 
 	async connect(): Promise<void> {
 		const ws = `${this.url.replace(/^http/, "ws").replace(/\/$/, "")}/realtime/v1/websocket?apikey=${encodeURIComponent(this.key)}&vsn=1.0.0`;

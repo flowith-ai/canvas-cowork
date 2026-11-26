@@ -4,8 +4,8 @@
  * where only making it can tell (a source clip the worker measures, a draft's later render), or when the worker
  * can't be asked: the caller says "unknown" and asks the user, never guesses.
  */
-import type { Model } from "./catalog";
-import { type Api, worker } from "./http";
+import type { Model } from "./catalog.ts";
+import { type Api, worker } from "./http.ts";
 
 /** What /video/price reads of a /video/async body. */
 const PRICED = ["prompt", "imageURL", "keyFrames", "image_urls", "video_urls", "audio_urls", "aspect_ratio", "duration", "audio", "resolution", "draft"];

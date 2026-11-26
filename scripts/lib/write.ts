@@ -5,9 +5,9 @@
  * group. All writes go through PostgREST with the user's session and the `x-canvas-agent` label.
  */
 
-import type { Card, FlowNodeRow } from "./desk";
-import { cardsFrom, fetchRowsById, markHasCards } from "./desk";
-import { type Api, CliError, rest, worker } from "./http";
+import type { Card, FlowNodeRow } from "./desk.ts";
+import { cardsFrom, fetchRowsById, markHasCards } from "./desk.ts";
+import { type Api, CliError, rest, worker } from "./http.ts";
 import {
 	CANVAS_DEFAULT_NODE_WIDTH,
 	type CanvasRect,
@@ -15,7 +15,7 @@ import {
 	groupLayout,
 	isClear,
 	placeSingle,
-} from "./placement";
+} from "./placement.ts";
 
 export type CardKindToMake = "image" | "video" | "audio" | "text" | "note";
 
@@ -247,7 +247,7 @@ export async function placeCards(api: Api, convId: string, cards: Card[], items:
  */
 async function settle(api: Api, convId: string, row: FlowNodeRow, rect: CanvasRect) {
 	try {
-		const { readCanvas } = await import("./desk");
+		const { readCanvas } = await import("./desk.ts");
 		const now = await readCanvas(api, convId);
 		const others = obstaclesOf(now, [row.id]);
 		if (isClear(rect, others)) return;

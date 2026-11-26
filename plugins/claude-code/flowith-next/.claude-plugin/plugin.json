@@ -1,0 +1,22 @@
+{
+  "name": "flowith-next",
+  "version": "2.0.0",
+  "description": "Make pictures, clips, voice and music as cards on your Flowith canvas, from your own agent: the same tools, prices and credits as Flo. Flowith Next: next-gen.flowith.io, for internal testing of the hosted MCP.",
+  "author": {
+    "name": "Flowith",
+    "url": "https://flowith.io"
+  },
+  "homepage": "https://flowith.io",
+  "repository": "https://github.com/flowith-ai/canvas-cowork",
+  "license": "MIT",
+  "keywords": [
+    "flowith",
+    "canvas",
+    "image-generation",
+    "video-generation",
+    "text-to-speech",
+    "music-generation",
+    "storyboard",
+    "mcp"
+  ]
+}

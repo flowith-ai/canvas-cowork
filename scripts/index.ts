@@ -1,12 +1,13 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /**
  * canvas-cowork — work on a Flowith 3.0 canvas from Claude Code, Codex or any agent with a shell.
  *
  * Every command acts on the user's canvas the way their own hands (or the in-app Creator Agent,
  * Flo) would: cards are placed where Flo places them, generations go through the canvas's own
- * routes and pricing, and an open canvas shows each card arrive live. Zero dependencies; Bun.
+ * routes and pricing, and an open canvas shows each card arrive live. Zero dependencies; Node 22.18+ or Bun.
  *
- *   bun scripts/index.ts <command> [args] [--flags]      (`help` lists everything)
+ *   node scripts/index.ts <command> [args] [--flags]     (`help` lists everything)
+ *   bun scripts/index.ts …  ·  npx -y github:flowith-ai/canvas-cowork …
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
@@ -22,7 +23,7 @@ import {
 	modelLine,
 	modelsOf,
 	resolveModel,
-} from "./lib/catalog";
+} from "./lib/catalog.ts";
 import {
 	type Card,
 	canvasUrl,
@@ -35,7 +36,7 @@ import {
 	listCanvases,
 	readCanvas,
 	resolveCanvas,
-} from "./lib/desk";
+} from "./lib/desk.ts";
 import {
 	type ImageJob,
 	type Ref,
@@ -54,10 +55,10 @@ import {
 	videoCardData,
 	videoRequest,
 	waitFor,
-} from "./lib/generate";
-import { type Api, CliError, forbidWrites, serverNow, sleep, worker } from "./lib/http";
-import { type Sent, SETTLE_MS, chargeOf, chargedSince, claimRetry, creditsOf, fingerprint, forgetSent, noteSent, releaseRetry, sentOf, usageOf } from "./lib/ledger";
-import { download, fileFor, isUrl, mediaOf, toUrl } from "./lib/media";
+} from "./lib/generate.ts";
+import { type Api, CliError, forbidWrites, serverNow, sleep, worker } from "./lib/http.ts";
+import { type Sent, SETTLE_MS, chargeOf, chargedSince, claimRetry, creditsOf, fingerprint, forgetSent, noteSent, releaseRetry, sentOf, usageOf } from "./lib/ledger.ts";
+import { download, fileFor, isUrl, mediaOf, toUrl } from "./lib/media.ts";
 import {
 	type Session,
 	activeSession,
@@ -71,10 +72,10 @@ import {
 	openUrl,
 	saveSession,
 	userIdOf,
-} from "./lib/session";
-import { cutout, expand, makeSound, upscaleImage, upscaleVideo } from "./lib/tools";
-import { videoPrice } from "./lib/video-cost";
-import { type CanvasResult, operationWaitSec, printedIds, runOnCanvas, SELECTION_SCRIPT, tidyScript } from "./lib/live";
+} from "./lib/session.ts";
+import { cutout, expand, makeSound, upscaleImage, upscaleVideo } from "./lib/tools.ts";
+import { videoPrice } from "./lib/video-cost.ts";
+import { type CanvasResult, operationWaitSec, printedIds, runOnCanvas, SELECTION_SCRIPT, tidyScript } from "./lib/live.ts";
 import {
 	type Layout,
 	type NewCard,
@@ -92,8 +93,8 @@ import {
 	placeCards,
 	rename,
 	ungroup,
-} from "./lib/write";
-import { CANVAS_NODE_GAP, groupLayout, isClear, placeSingle } from "./lib/placement";
+} from "./lib/write.ts";
+import { CANVAS_NODE_GAP, groupLayout, isClear, placeSingle } from "./lib/placement.ts";
 
 // ---------- args ----------
 
@@ -1154,7 +1155,7 @@ async function cmdAdd(a: Args) {
 		const title = flag(a, "title") ?? up.name;
 		const common = { title, name: up.name, value: up.url, insert: true, mediaSource: "upload", uploadState: "ready", status: "finished" };
 		if (up.media === "image") {
-			const { remoteImageSize } = await import("./lib/media");
+			const { remoteImageSize } = await import("./lib/media.ts");
 			const size = await remoteImageSize(up.url);
 			const ratio = size ? `${size.width}:${size.height}` : "1:1";
 			items.push({ kind: "image", size: cardSize("image", ratio), data: { ...common, isImage: true, mode: "image", aspect_ratio: ratio } });
@@ -1288,7 +1289,7 @@ async function cmdRename(a: Args) {
 	const title = a.pos.slice(1).join(" ").trim();
 	if (!a.pos[0] || !title) throw new CliError('rename <card|canvas> "new title"', "INVALID_PARAM");
 	if (a.pos[0] === "canvas") {
-		const { rest } = await import("./lib/http");
+		const { rest } = await import("./lib/http.ts");
 		await rest(ctx.api, `conversation?id=eq.${canvas.id}`, { method: "PATCH", json: { title }, prefer: "return=minimal" });
 		return out({ canvas: canvas.id, title });
 	}
@@ -1315,7 +1316,7 @@ async function cmdCopy(a: Args) {
 	if (src.kind === "group") throw new CliError("copy takes a card, not a group.", "INVALID_PARAM");
 	const { group_id: _g, creatorMedia: _c, ...data } = src.data;
 	const rect = placeSingle({ width: src.rect.width, height: src.rect.height }, { obstacles: obstaclesOf(cards), anchor: src.groupId ? cards.find((c) => c.id === src.groupId)?.rect : src.rect });
-	const { rest } = await import("./lib/http");
+	const { rest } = await import("./lib/http.ts");
 	const id = crypto.randomUUID();
 	await rest(ctx.api, "flow_node", {
 		json: [{ id, conv_id: canvas.id, type: src.type, p_id: canvas.id, c_ids: [], position: { x: Math.round(rect.x + rect.width / 2), y: rect.y }, width: src.rect.width, height: src.rect.height, data: { ...data, timestamp: Math.floor(Date.now() / 1000).toString() } }],
@@ -1558,7 +1559,7 @@ async function cmdModels(a: Args) {
 
 const HELP = `canvas-cowork — work on a Flowith 3.0 canvas. Every card you make shows up live on the user's canvas.
 
-  bun scripts/index.ts <command> [args] [--flags]
+  node scripts/index.ts <command> [args] [--flags]      (or bun scripts/index.ts, or npx -y github:flowith-ai/canvas-cowork)
 
 SET UP      login [--site flowith.io] [--no-open] · whoami · credits · spent [--since 30m] · logout
 CANVASES    canvases [search] · new "title" [--open] · use <canvas|url> · rename canvas "title"

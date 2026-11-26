@@ -5,8 +5,8 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "fs";
 import { join } from "path";
-import { SELECTION_SCRIPT, tidyScript } from "../lib/live";
-import { CONV, fakeFlowith, ids, precharge } from "./fake-flowith";
+import { SELECTION_SCRIPT, tidyScript } from "../lib/live.ts";
+import { CONV, approveLogin, cliCommand, fakeFlowith, ids, precharge } from "./fake-flowith.ts";
 
 const ref = (id: string) => id.slice(0, 8);
 const fakes: Array<{ stop: () => void }> = [];
@@ -90,7 +90,7 @@ describe("working with the open canvas", () => {
 
 	test("login opens the canvas app and keeps consent instructions visible in JSON mode", async () => {
 		const f = fake();
-		const proc = Bun.spawn(["bun", join(import.meta.dir, "..", "index.ts"), "login", "--site", f.origin, "--no-open", "--json", "--quiet"], {
+		const proc = Bun.spawn(cliCommand("login", "--site", f.origin, "--no-open", "--json", "--quiet"), {
 			env: { ...process.env, FLOWITH_HOME: f.home, FLOWITH_SUPABASE_URL: f.origin, FLOWITH_SUPABASE_KEY: "k" },
 			stdout: "pipe", stderr: "pipe",
 		});
@@ -106,15 +106,13 @@ describe("working with the open canvas", () => {
 			}
 			const url = new URL(link);
 			expect(url.pathname).toBe("/blank");
+			// Only the relay: no local socket for the page to find.
+			expect(url.searchParams.has("cli_port")).toBe(false);
+			expect(url.searchParams.get("cli_code")).toMatch(/^[A-Z2-9]{24}$/);
 			expect(instructions).toContain("type this code");
-			// Exercise the login receipt without creating a live account session.
-			const socket = new WebSocket(`ws://127.0.0.1:${url.searchParams.get("cli_port")}`);
+			// The page's Allow, over the stand-in Realtime: sealed to the CLI's key, and the CLI proves it opened it.
 			const session = JSON.parse(readFileSync(join(f.home, "canvas-session.json"), "utf8"));
-			await new Promise<void>((resolve, reject) => {
-				socket.onerror = () => reject(new Error("The local test login socket failed."));
-				socket.onopen = () => socket.send(JSON.stringify({ type: "session", data: { ...session, nonce: url.searchParams.get("cli_nonce") } }));
-				socket.onmessage = () => { socket.close(); resolve(); };
-			});
+			expect(await approveLogin(f.origin, link, session)).toBe(true);
 			expect(JSON.parse(await new Response(proc.stdout).text())).toMatchObject({ loggedIn: true, site: f.origin });
 			expect(await proc.exited).toBe(0);
 		} finally {

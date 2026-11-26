@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { estimateCredits, imageSizing, resolveModel, videoParams, type Catalog } from "../lib/catalog";
-import { cardsFrom, findCard, readableError, type FlowNodeRow } from "../lib/desk";
-import { imageRequest, nameReferences, resultOf, titleFrom, videoRequest, type Ref } from "../lib/generate";
-import { imageSize } from "../lib/media";
-import { klingReferenceName, seedanceReferenceName } from "../lib/reference-names";
-import { operationWaitSec, printedIds, tidyScript } from "../lib/live";
-import { expandFrame } from "../lib/tools";
-import { arrangePoints, cardSize, nearestFree } from "../lib/write";
+import { estimateCredits, imageSizing, resolveModel, videoParams, type Catalog } from "../lib/catalog.ts";
+import { cardsFrom, findCard, readableError, type FlowNodeRow } from "../lib/desk.ts";
+import { imageRequest, nameReferences, resultOf, titleFrom, videoRequest, type Ref } from "../lib/generate.ts";
+import { imageSize } from "../lib/media.ts";
+import { klingReferenceName, seedanceReferenceName } from "../lib/reference-names.ts";
+import { operationWaitSec, printedIds, tidyScript } from "../lib/live.ts";
+import { expandFrame } from "../lib/tools.ts";
+import { arrangePoints, cardSize, nearestFree } from "../lib/write.ts";
 
 const catalog: Catalog = {
 	"dola-seedream-5-5-261028": { media: "image", title: "Seedream 5.5", sort: -1, supportedAspectRatios: ["1:1", "16:9", "4:3"], supportedImageSizes: ["2k", "1k"], maxReferenceImages: 10, supportedImageBackgrounds: ["auto", "transparent"], estimatedPrice: 12 },
@@ -184,8 +184,8 @@ describe("layout helpers", () => {
 });
 
 describe("listed clip prices (`models`)", () => {
-	const { catalog } = require("./fake-flowith") as typeof import("./fake-flowith");
-	const { listPrice } = require("../lib/video-cost") as typeof import("../lib/video-cost");
+	const { catalog } = require("./fake-flowith.ts") as typeof import("./fake-flowith.ts");
+	const { listPrice } = require("../lib/video-cost.ts") as typeof import("../lib/video-cost.ts");
 	test("say the size they are quoted at; a request's own price comes from the worker", () => {
 		expect(listPrice(catalog["seedance-2.5"] as never)).toEqual({ credits: 622, at: "480p" });
 		expect(listPrice(catalog["kling-video/v4"] as never)).toEqual({ credits: 1021, at: "720p" });
@@ -195,14 +195,14 @@ describe("listed clip prices (`models`)", () => {
 
 describe("charges of cards only claimed for a retry", () => {
 	test("a card only claimed (never sent from here) makes the charge unknown, not zero", async () => {
-		const { chargeOf } = await import("../lib/ledger");
+		const { chargeOf } = await import("../lib/ledger.ts");
 		const claiming = { card: "c1", conv: "v", model: "m", kind: "image" as const, from: 0, to: 0, answer: "claiming" as const, attempt: "x" };
 		// A charge of that model at that moment (another card's) is not taken for it.
 		const other = { model: "m", req_id: "r1", tokens_used: 5000, billing_unit_price: null, created_at: new Date(0).toISOString() };
 		expect("unknown" in chargeOf([claiming], [other], 1)).toBe(true);
 	});
 	test("the fingerprint of card data ignores key order (the database reorders it)", async () => {
-		const { fingerprint } = await import("../lib/ledger");
+		const { fingerprint } = await import("../lib/ledger.ts");
 		expect(fingerprint({ b: 1, a: { d: [1, { y: 2, x: 1 }], c: null } })).toBe(fingerprint({ a: { c: null, d: [1, { x: 1, y: 2 }] }, b: 1 }));
 		expect(fingerprint({ a: 1 })).not.toBe(fingerprint({ a: 2 }));
 	});

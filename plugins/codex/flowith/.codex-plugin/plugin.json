@@ -1,0 +1,53 @@
+{
+  "name": "flowith",
+  "version": "2.0.0",
+  "description": "Make pictures, clips, voice and music as cards on your Flowith canvas, from your own agent: the same tools, prices and credits as Flo. Coming soon: the hosted server for flowith.io is not live yet; use the canvas-cowork skill and CLI until it is.",
+  "author": {
+    "name": "Flowith",
+    "url": "https://flowith.io"
+  },
+  "homepage": "https://flowith.io",
+  "repository": "https://github.com/flowith-ai/canvas-cowork",
+  "license": "MIT",
+  "keywords": [
+    "flowith",
+    "canvas",
+    "image-generation",
+    "video-generation",
+    "text-to-speech",
+    "music-generation",
+    "storyboard",
+    "mcp"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "extensions": {
+    "com.openai": {
+      "onboardingSkill": "./skills/get-started/SKILL.md"
+    }
+  },
+  "interface": {
+    "displayName": "Flowith",
+    "shortDescription": "Pictures, clips and sound on your canvas",
+    "longDescription": "Flowith gives your agent Flo's hands on your Flowith canvas. Ask for pictures, clips, text, voice-overs or music and they arrive as cards on your canvas, signed with your agent's name, priced and billed exactly like the cards you make yourself. Your agent can open the canvas beside the chat, look at what came out and fix what misses. Sign in once on flowith.io; disconnect any time in Flowith's Connections.",
+    "developerName": "Flowith",
+    "category": "Creativity",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://flowith.io",
+    "privacyPolicyURL": "https://flowith.io/compliance/privacy-policy",
+    "termsOfServiceURL": "https://flowith.io/compliance/tos",
+    "defaultPrompt": [
+      "Make three poster designs for an autumn latte, each in a different style",
+      "Storyboard a 15-second ad for a coffee brand: four frames, then animate the best one",
+      "Turn my product photo into a 5-second clip with sound"
+    ],
+    "brandColor": "#111111",
+    "composerIcon": "./assets/logo.svg",
+    "logo": "./assets/logo.svg",
+    "logoDark": "./assets/logo-dark.svg"
+  }
+}

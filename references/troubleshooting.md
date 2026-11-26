@@ -1,12 +1,25 @@
 # Troubleshooting
 
+## Flowith's MCP tools
+
+| What happens | What to do |
+|---|---|
+| The tools aren't there right after installing | Hosts load a new server in a new session: Claude Code `/reload-plugins` or a new session, Codex a new thread, Antigravity / Cursor a new conversation. Carry the user's task into it |
+| Sign-in didn't happen, or the server says it isn't authorised | Sign in again with the host's own login: Claude Code `claude mcp login plugin:flowith:flowith`, Codex `codex mcp login flowith`, Cursor / Antigravity the server's Authenticate button. The user clicks **Allow** on flowith.io |
+| It worked, then every call is refused | The user disconnected this agent in Flowith (Connections), or the sign-in expired: sign in again as above |
+| Out of credits, or the model needs a higher plan | Pass on what the tool says, with its top-up link; don't switch models silently |
+| The hosted server answers 404 | It isn't live for that site yet: use the CLI ([cli](cli.md)) |
+| `handoffUrl` shows "link expired" | It works once, within two minutes: call `open_canvas` again |
+
+## CLI errors
+
 Errors print one JSON line `{"error": CODE, "message": …}` and exit 1.
 
 | Code | Meaning | What to do |
 |---|---|---|
 | `NOT_LOGGED_IN` | No session, it expired and couldn't renew, or it was ended (Disconnect in Flowith, `logout`) | `cw login` (the user types the code and clicks Allow in the browser) |
 | `LOGIN_TIMEOUT` | Nobody allowed the connection within 2.5 minutes | Run `login` again; the user opens the link, types the printed code and clicks Allow |
-| `LOGIN_UNAVAILABLE` | Neither the Realtime relay nor the local connection is available | Check network access to Flowith Realtime, then run `login` again |
+| `LOGIN_UNAVAILABLE` | Flowith's realtime service, which carries the sign-in back to the CLI, can't be reached | Check network access to Flowith Realtime (`*.supabase.co`), then run `login` again |
 | `CANVAS_NOT_OPEN` | No browser acknowledged the operation | Open the reported canvas in the browser that approved `login`. Inspect the canvas before resending an operation that could create cards or spend credits |
 | `REALTIME_UNAVAILABLE` | The CLI could not connect to the browser's relay | Check network access to Flowith Realtime. `cw look` and other direct commands can still work |
 | `CANVAS_ERROR` | The canvas refused the operation (wrong card kind, still generating…) | Read the message; `cw look` |

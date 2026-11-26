@@ -1,6 +1,24 @@
 # Live browser
 
-Show the canvas beside the chat for user-facing work as soon as you know the target.
+Show the canvas beside the chat for user-facing work as soon as you know the target. The agent works the
+same with no canvas open; the browser is for the user to watch and react.
+
+## With Flowith's MCP tools
+
+1. `open_canvas` (or `create_canvas` for a new one) gives `url` and `handoffUrl`. `handoffUrl` opens
+   Flowith already signed in as the user, on that canvas, laid out for a narrow side pane (no app
+   sidebar or Flo rail). It works once, within two minutes.
+2. Open `handoffUrl` in the host's own browser beside the chat (Codex: the in-app browser `iab`;
+   Antigravity, Cursor and Claude: their browser pane). Reuse the tab that already shows this canvas;
+   open a new one only if none does. Keep that tab for the whole task.
+3. Check that the tab shows the canvas, not a sign-in page or "link expired". Expired or used: call
+   `open_canvas` again for a fresh link. Signed in as someone else: the page asks which account to use;
+   let the user choose.
+4. Share `url` (the plain canvas link) in the chat, never `handoffUrl`.
+
+If the host has no browser beside the chat, give the user `url`.
+
+## With the CLI
 
 1. Take `browserHandoff.url` from `cw new "Title" --json` or `cw open --handoff --canvas <ref|url> --json`.
    For an existing canvas, this resolves it and leaves the active canvas alone. Use the returned URL in

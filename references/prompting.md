@@ -1,8 +1,9 @@
 # Prompting on the canvas
 
-The canvas sends your words as written, with two exceptions the CLI handles for you: reference names are
-rewritten to each model's own naming, and unnamed references are named at the end so every item sent is
-named once. Everything else — the craft — is yours.
+The canvas sends your words as written. How references are named is the one mechanical part: with Flowith's
+MCP tools, follow each tool's description; the CLI rewrites `@image1`-style names to each model's own naming
+and names unnamed references at the end, so every item sent is named once. Everything else, the craft, is
+yours. Commands below are the CLI's (`cw`, see [cli](cli.md)); the hosted tools take the same prompts.
 
 ## References
 

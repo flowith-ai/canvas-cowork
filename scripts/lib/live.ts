@@ -7,9 +7,9 @@
  * when the user allowed it at `login`, so nothing on the public topic can be read or forged.
  */
 
-import { isUuid } from "./desk";
-import { type Api, CliError, guardWrite } from "./http";
-import { Realtime, openWith, sealWith } from "./realtime";
+import { isUuid } from "./desk.ts";
+import { type Api, CliError, guardWrite } from "./http.ts";
+import { Realtime, openWith, sealWith } from "./realtime.ts";
 
 export interface CanvasResult {
 	kind?: string;

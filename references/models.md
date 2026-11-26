@@ -1,15 +1,16 @@
 # Which model for what
 
-`cw models [image|video|text|audio]` is the live list (the same catalogue the canvas picker shows) with
-ratios, sizes, durations, reference limits and approximate credits; `cw models <id>` gives one model's
-full limits. Every value you pass is checked against it, and a wrong one answers with the allowed list.
+The live list is the canvas's own catalogue (the same one its model picker shows): the generation tools'
+descriptions name the models they take, and the CLI's `cw models [image|video|text|audio]` lists
+ratios, sizes, durations, reference limits and approximate credits (`cw models <id>` for one model's full
+limits). Every value you pass is checked against it, and a wrong one answers with the allowed list.
 Prices below are what the canvas actually charged in tests, in credits (1 credit = $0.001), 2026-11;
-`cw spent` shows yours. "advanced" models (tier t1) need paid credits; free / trial credits cover only
+`credits` (`cw spent`) shows yours. "advanced" models (tier t1) need paid credits; free / trial credits cover only
 the others.
 
 When you name no model, a card starts on the canvas's own default: **Seedream 5.5** for pictures,
-**Seedance 2.5 Flash** for clips, **Gemini 3.8 Flash** for text. Pass `--model <id>`; the display name
-also works (`--model "Nano Banana 2"`).
+**Seedance 2.5 Flash** for clips, **Gemini 3.8 Flash** for text. Name a model by its id; the display name also works (CLI:
+`--model "Nano Banana 2"`).
 
 ## Pictures
 

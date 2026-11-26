@@ -59,10 +59,14 @@ Then, in the installed skill's folder (the path `skills add` printed, e.g. `~/.c
 ```bash
 claude plugin marketplace add flowith-ai/canvas-cowork
 claude plugin install flowith-next@flowith
-claude mcp login plugin:flowith-next:flowith-next
 ```
 
-`mcp login` opens next-gen.flowith.io; the user clicks **Allow** (run it in the background and wait for it). The tools load in a new session, or `/reload-plugins` in this one.
+Then sign in and work in this same session. Don't run `claude mcp login`: from your shell it stops at once (it needs a terminal). A plugin's server loads only after `/reload-plugins`, which only the user can type:
+
+1. Start a background wait (`sleep 20`, run in the background) and tell the user in one line: "Type /reload-plugins and I'll open the sign-in page." When the wait ends, look for the tool `mcp__plugin_flowith-next_flowith-next__authenticate` (ToolSearch `select:mcp__plugin_flowith-next_flowith-next__authenticate`). Not there yet: wait again, for up to 5 minutes.
+2. Call it. It answers with a sign-in link: open it for the user (`open '<link>'` on macOS, `xdg-open` on Linux, `start` on Windows) and tell them in one line to click **Allow** on the page that opened (a new user signs up there first and comes back to it). Start a background wait again; when it ends, look for `list_canvases`. Not there yet: wait again, for up to 10 minutes. The tools arrive by themselves after **Allow**.
+3. If the page after **Allow** couldn't reach Claude Code, ask the user for that page's address and pass it to `mcp__plugin_flowith-next_flowith-next__complete_authentication`.
+4. Verify with `list_canvases`, then do the user's task right here: no new session is needed.
 
 ### Codex
 
@@ -72,7 +76,9 @@ codex plugin add flowith-next@flowith
 codex mcp login flowith-next
 ```
 
-`mcp login` opens next-gen.flowith.io; the user clicks **Allow** (run it in the background and wait for it). The tools load in a new thread. In the Codex app, once the marketplace is added, `codex://plugins/install/flowith-next?marketplace=flowith` opens the install page.
+Codex's sandbox has no network and can't write to Codex's own folder, and these commands need both: run each with escalated permissions (`sandbox_permissions: "require_escalated"` and a short reason such as "Install Flowith Next") so the user approves it. If Codex rejects escalation without asking the user, tell them in one line: "Type /permissions, choose Ask for approval, then say go on." `mcp login` opens next-gen.flowith.io; the user clicks **Allow** (run it in the background and wait for it).
+
+The tools load only in a new thread, which you start yourself: call `create_thread` (Codex's `codex_tui` tools) with the user's request, word for word, plus "Flowith Next is installed and signed in; check with list_canvases, then do this." Then tell the user in one line that it is running in a new thread (`codex://threads/<threadId>`), where Codex may ask them to allow Flowith's tools. In the Codex app, once the marketplace is added, `codex://plugins/install/flowith-next?marketplace=flowith` opens the install page.
 
 ### Cursor
 
@@ -114,17 +120,19 @@ The Flowith packages (`flowith`) are built the same way and turn on when flowith
 
 ## Carry the task
 
-- **Hosted MCP**: the tools appear in a new session (Claude Code also loads them with `/reload-plugins`).
-  If you can start a new session, thread or task yourself (Claude Code's `spawn_task`, a Codex tool that
-  opens a new thread), start it with the user's original request, word for word, plus "Flowith is
-  installed and signed in; check with list_canvases, then do this." Otherwise tell the user the one thing
-  to do, in one line, with their task ready to paste:
-  - Claude Code: "Type `/reload-plugins`, then say: <their task>"
-  - Codex: "Open a new thread and paste: <their task>"
-  - Cursor, Antigravity: "Start a new chat and paste: <their task>"
+The user asked for something besides installing: they should get it without repeating themselves or
+restarting anything.
+
+- **Claude Code**: the sign-in above ends with the tools in this session (after the user's
+  `/reload-plugins`): do the task here.
+- **Codex**: start the new thread yourself with `create_thread`, as above. Only if you have no such tool,
+  tell the user in one line: "Open a new thread and paste: <their task>".
+- **Cursor, Antigravity**: if you can start a new chat yourself, start it with the user's request, word
+  for word, plus "Flowith is installed and signed in; check with list_canvases, then do this."
+  Otherwise, one line: "Start a new chat and paste: <their task>".
 - **Skill + CLI**: no new session is needed. Read the installed skill's `SKILL.md` and do the task now.
-- When there is something to look at, open the canvas beside the chat as the skill says, and report what
-  you made with the canvas link.
+- When there is something to look at, open the canvas for the user as the skill says (beside the chat,
+  or in their own browser from a terminal), and report what you made with the canvas link.
 
 ## No task? Offer three starters
 
@@ -143,9 +151,9 @@ make":
   version; ask the user to update the app, or use the skill + CLI path if Node 22.18+ is available.
 - **Network errors** (timeouts, TLS, DNS, proxy): retry once; if the user has a local proxy, retry through
   it. Don't leave a proxy configured afterwards.
-- **Sign-in didn't complete**: run the host's login again (Claude Code `claude mcp login
-  plugin:<channel>:<channel>`, Codex `codex mcp login <channel>`, CLI `login`). The user clicks **Allow**
-  once.
+- **Sign-in didn't complete**: sign in again the host's own way: Claude Code, call the server's
+  `authenticate` tool again (or the user picks the server in `/mcp` → Authenticate); Codex, `codex mcp
+  login <channel>` (escalated); the CLI, `login`. The user clicks **Allow** once.
 - **Out of credits** on the first job: pass on what Flowith says, with its top-up link.
 - **Anything else**: [references/troubleshooting.md](./references/troubleshooting.md). Tell the user
   plainly what worked and what didn't; never claim Flowith works before a real read answered.

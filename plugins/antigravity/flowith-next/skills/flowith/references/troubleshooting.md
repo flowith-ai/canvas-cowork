@@ -4,8 +4,8 @@
 
 | What happens | What to do |
 |---|---|
-| The tools aren't there right after installing | Hosts load a new server in a new session: Claude Code `/reload-plugins` or a new session, Codex a new thread, Antigravity / Cursor a new conversation. Carry the user's task into it |
-| Sign-in didn't happen, or the server says it isn't authorised | Sign in again with the host's own login: Claude Code `claude mcp login plugin:flowith:flowith`, Codex `codex mcp login flowith`, Cursor / Antigravity the server's Authenticate button. The user clicks **Allow** on flowith.io |
+| The tools aren't there right after installing | A host loads a new server only in a new session or after a reload: Claude Code after the user types `/reload-plugins` (then sign in with the server's `authenticate` tool), Codex in a new thread (start it with `create_thread`), Antigravity / Cursor in a new conversation. Carry the user's task into it |
+| Sign-in didn't happen, or the server says it isn't authorised | Sign in again the host's own way: Claude Code, the server's `authenticate` tool (or `/mcp` → Authenticate; `claude mcp login` can't finish from an agent's shell), Codex `codex mcp login flowith` (escalated), Cursor / Antigravity the server's Authenticate button. The user clicks **Allow** on flowith.io |
 | It worked, then every call is refused | The user disconnected this agent in Flowith (Connections), or the sign-in expired: sign in again as above |
 | `status: "needs_approval"` | Above the user's ask-above limit; nothing was placed. Ask the user with the price; on a yes, send the same call with `approveCredits: <credits>` |
 | `status: "not_started"` | Their credits can't pay for it; nothing was placed or charged. Pass on the `message` with its `topUpUrl`; don't switch models silently |

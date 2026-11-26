@@ -44,13 +44,11 @@ password, key or token.
 | Find cards | `find_canvas_nodes { canvasId, text?, kinds?, state?, placedBy?, groupRef?, … }` | `cw look [words] --kind image` |
 | Pictures | `generate_image { canvasId, title, prompt, model?, aspectRatio?, quality?, resolution?, near? }` | `cw image "p" ["p2"…]` |
 | Wait for a job | `get_task { taskId, waitSeconds? }` (0–50 s, default 20) | `cw wait <ref>` |
-| Credits | `credits` → `availableCredits`, `askAboveCredits`, `topUpUrl` | `cw credits` · `cw spent` |
+| Credits | `credits` → `credits` (the balance their Flowith page shows), `askAboveCredits`, `topUpUrl` | `cw credits` · `cw spent` |
 | Change a picture, clips, voice and music | `edit_image`, `generate_video`, `generate_audio` (same answers as `generate_image`) | `cw edit` · `cw video` · `cw speech` · `cw music` |
 
-`edit_image`, `generate_video` and `generate_audio` are arriving in the hosted tools; until they are in your
-tool list, the CLI does them (it has a one-click sign-in of its own). The CLI also has the card tools
-the hosted tools don't cover yet (upscale, cut-out, expand, retry, vary, group / arrange, and the
-canvas's own split, angles, relight, lip-sync, 拉片, characters, director stage):
+The CLI also has the card tools the hosted tools don't cover yet (upscale, cut-out, expand, retry, vary,
+group / arrange, and the canvas's own split, angles, relight, lip-sync, 拉片, characters, director stage):
 [references/cli.md](references/cli.md). Where the server's own tool descriptions differ from this
 table, they win.
 
@@ -76,7 +74,10 @@ A generation answers at once; it never blocks until the picture exists.
 
 When creating, editing or reviewing cards in a desktop agent with a browser beside the chat (Codex's
 in-app browser, Antigravity's, Cursor's, Claude's browser pane), open the exact canvas there before
-making changes. Skip it for list, account, model or price lookups, or when the user wants headless work.
+making changes. In a terminal with no browser of its own (Claude Code, the Codex CLI), open it in the
+user's own browser once there is something to look at: `open '<handoffUrl>'` on macOS, `xdg-open` on
+Linux, `start` on Windows. Skip it for list, account, model or price lookups, or when the user wants
+headless work.
 
 - **MCP**: `open_canvas { canvasId }` (after `create_canvas` too: that answer has no `handoffUrl`).
   Open its `handoffUrl` in the host's side browser: it signs that tab in as the user and shows the

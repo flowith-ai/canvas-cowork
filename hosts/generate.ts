@@ -20,6 +20,11 @@ export interface Channel {
 	displayName: string;
 	site: string;
 	mcpUrl: string;
+	/** The install address copy prompts name: <site>/agent, which serves INSTALL.md to agents and a page to people. */
+	installUrl: string;
+	/** False until installUrl serves the guide (flowith.io/agent ships with hypergpt-frontend's release): prompts then
+	 * name installGuide. Default true. */
+	installUrlLive?: boolean;
 	/** Whether this channel's hosted MCP (and its sign-in) is live. Off: the docs keep the CLI primary. */
 	live: boolean;
 	internal?: boolean;
@@ -54,6 +59,7 @@ export interface Manifest {
 	channels: Channel[];
 	hosts: Host[];
 	starters: { en: string[]; zh: string[] };
+	/** INSTALL.md's own address (raw GitHub): what each channel's installUrl passes on. */
 	installGuide: string;
 	copyPrompt: { template: string; anyHost: string; defaultTask: string };
 }
@@ -300,11 +306,14 @@ export function mcpInstall(m: Manifest, host: Host["id"], channel: Channel): Hos
 
 export const cliInstall = (m: Manifest, host: Host) => `npx -y skills add ${m.repository.github} -g -a ${host.skillsAgent} -y`;
 
+/** The address a channel's copy prompts name: its /agent address once that serves the guide, else INSTALL.md itself. */
+export const promptGuide = (m: Manifest, channel: Channel) => (channel.installUrlLive === false ? m.installGuide : channel.installUrl);
+
 export function copyPrompt(m: Manifest, channel: Channel, host?: Host, task = m.copyPrompt.defaultTask) {
 	return m.copyPrompt.template
 		.replace("{channel}", channel.displayName)
 		.replace("{host}", host?.displayName ?? m.copyPrompt.anyHost)
-		.replace("{guide}", m.installGuide)
+		.replace("{guide}", promptGuide(m, channel))
 		.replace("{task}", task);
 }
 
@@ -319,6 +328,8 @@ function installJson(m: Manifest): string {
 			displayName: channel.displayName,
 			site: channel.site,
 			mcpUrl: channel.mcpUrl,
+			installUrl: channel.installUrl,
+			installUrlLive: channel.installUrlLive ?? true,
 			live: channel.live,
 			internal: channel.internal ?? false,
 			copyPrompt: copyPrompt(m, channel),

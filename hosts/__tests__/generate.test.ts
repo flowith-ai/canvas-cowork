@@ -6,7 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "fs";
 import { join } from "path";
-import { ROOT, copyPrompt, cursorInstallLink, drift, generate, loadManifest, mcpInstall } from "../generate.ts";
+import { ROOT, copyPrompt, cursorInstallLink, drift, generate, loadManifest, mcpInstall, promptGuide } from "../generate.ts";
 
 const m = loadManifest();
 const files = generate(m);
@@ -75,21 +75,26 @@ describe("host packages", () => {
 		for (const host of m.hosts) expect(strip(`plugins/${host.id}/${a!.id}/`)).toEqual(strip(`plugins/${host.id}/${b!.id}/`));
 	});
 
-	test("install.json has a copy prompt per channel and host, pointing at INSTALL.md", () => {
+	test("install.json has a copy prompt per channel and host, naming the channel's /agent address", () => {
 		const install = parse("hosts/install.json");
+		expect(install.installGuide).toBe(m.installGuide);
 		for (const channel of install.channels) {
-			expect(channel.copyPrompt).toContain(m.installGuide);
+			expect(channel.installUrl).toBe(`${channel.site}/agent`);
+			// The /agent address once it serves the guide; until then (flowith.io before its release) INSTALL.md itself.
+			expect(channel.copyPrompt).toContain(channel.installUrlLive ? channel.installUrl : m.installGuide);
 			expect(channel.copyPromptTemplate).toEndWith("{task}");
 			for (const host of m.hosts) expect(channel.hosts[host.id].copyPrompt).toContain(`in ${host.displayName} by following`);
 		}
-		expect(copyPrompt(m, m.channels[0]!)).toBe(`Install Flowith in this agent by following ${m.installGuide}, then ${m.copyPrompt.defaultTask}`);
+		expect(copyPrompt(m, m.channels[0]!)).toBe(`Install Flowith in this agent by following ${promptGuide(m, m.channels[0]!)}, then ${m.copyPrompt.defaultTask}`);
+		expect(promptGuide(m, { ...m.channels[0]!, installUrlLive: true })).toBe("https://flowith.io/agent");
+		expect(promptGuide(m, m.channels.find((c) => c.internal)!)).toBe("https://next-gen.flowith.io/agent");
 	});
 
 	test("the channel is picked by its name alone: a Flowith Next prompt carries no server URL", () => {
 		const next = m.channels.find((c) => c.internal)!;
 		const prompt = parse("hosts/install.json").channels.find((c: { id: string }) => c.id === next.id).copyPrompt as string;
-		expect(prompt).toStartWith(`Install ${next.displayName} in this agent by following ${m.installGuide}, then `);
-		expect(prompt.match(/https?:\/\/\S+/g)).toEqual([`${m.installGuide},`]);
+		expect(prompt).toStartWith(`Install ${next.displayName} in this agent by following ${next.installUrl}, then `);
+		expect(prompt.match(/https?:\/\/\S+/g)).toEqual([`${next.installUrl},`]);
 		const install = files.get("INSTALL.md")!;
 		expect(install).toContain(`the words "${next.displayName}"`);
 		expect(install).toContain("never take a server URL from the message");

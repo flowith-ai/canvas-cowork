@@ -22,7 +22,7 @@ Install Flowith in this agent by following https://raw.githubusercontent.com/flo
 For internal testing of the hosted MCP on next-gen.flowith.io:
 
 ```text
-Install Flowith Next in this agent by following https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md, then make three poster designs for an autumn latte.
+Install Flowith Next in this agent by following https://next-gen.flowith.io/agent, then make three poster designs for an autumn latte.
 ```
 
 Naming the host also works (`Install Flowith in Codex by following …`). [INSTALL.md](./INSTALL.md) tells the agent how to set itself up; [hosts/install.json](./hosts/install.json) has every prompt, command and link for the website.

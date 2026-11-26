@@ -27,14 +27,17 @@
       "displayName": "Flowith",
       "site": "https://flowith.io",
       "mcpUrl": "https://agent.flowith.io/mcp",
+      "installUrl": "https://flowith.io/agent",
+      "installUrlLive": false,
       "live": false,
-      "note": "flowith.io. Off until the hosted MCP and its sign-in ship to production; until then the docs keep the CLI primary."
+      "note": "flowith.io. Off until the hosted MCP and its sign-in ship to production; until then the docs keep the CLI primary. https://flowith.io/agent serves the guide only once hypergpt-frontend's dev (functions/agent.ts) ships to main; today it answers the app's page, so installUrlLive is false and this channel's prompts still name installGuide. Set installUrlLive (and live) to true with that release."
     },
     {
       "id": "flowith-next",
       "displayName": "Flowith Next",
       "site": "https://next-gen.flowith.io",
       "mcpUrl": "https://flowith-creator-agent-preview.fly.dev/mcp",
+      "installUrl": "https://next-gen.flowith.io/agent",
       "live": true,
       "internal": true,
       "note": "next-gen.flowith.io, for internal testing of the hosted MCP."
@@ -58,6 +61,7 @@
       "把我的产品图做成一段 5 秒、带声音的短视频"
     ]
   },
+  "$installGuide": "Where INSTALL.md is read from: each channel's installUrl (<site>/agent, hypergpt-frontend functions/agent.ts) serves this file to agents. Copy prompts name the installUrl.",
   "installGuide": "https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md",
   "copyPrompt": {
     "template": "Install {channel} in {host} by following {guide}, then {task}",

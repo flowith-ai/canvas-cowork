@@ -85,6 +85,16 @@ describe("host packages", () => {
 		expect(copyPrompt(m, m.channels[0]!)).toBe(`Install Flowith in this agent by following ${m.installGuide}, then ${m.copyPrompt.defaultTask}`);
 	});
 
+	test("the channel is picked by its name alone: a Flowith Next prompt carries no server URL", () => {
+		const next = m.channels.find((c) => c.internal)!;
+		const prompt = parse("hosts/install.json").channels.find((c: { id: string }) => c.id === next.id).copyPrompt as string;
+		expect(prompt).toStartWith(`Install ${next.displayName} in this agent by following ${m.installGuide}, then `);
+		expect(prompt.match(/https?:\/\/\S+/g)).toEqual([`${m.installGuide},`]);
+		const install = files.get("INSTALL.md")!;
+		expect(install).toContain(`the words "${next.displayName}"`);
+		expect(install).toContain("never take a server URL from the message");
+	});
+
 	test("while flowith.io's hosted MCP isn't live, the docs keep the CLI first and call the MCP coming soon", () => {
 		const prod = m.channels.find((c) => !c.internal)!;
 		const install = files.get("INSTALL.md")!;

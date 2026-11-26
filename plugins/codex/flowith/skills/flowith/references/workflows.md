@@ -1,8 +1,8 @@
 # Workflows
 
 Steps are written as CLI commands (`cw` = `node scripts/index.ts`, see [cli](cli.md)). With Flowith's MCP
-tools, call the matching tool (the table in SKILL.md) with the same prompt, references and title; steps
-marked *(CLI)* need the CLI today. Each recipe ends the same way: look at the results, fix what misses,
+tools, call the matching tool (the table in SKILL.md) with the same prompt and title, `near` its source,
+then wait with `get_task`; steps marked *(CLI)* need the CLI today. Each recipe ends the same way: look at the results, fix what misses,
 then tell the user what is on the canvas (titles or refs + the canvas link).
 
 ## A short film: idea → shots → frames → clips

@@ -137,24 +137,23 @@ description: Welcome someone who just installed ${m.displayName} in one short me
 If ${m.displayName} was installed in the middle of a task (the user asked for something besides installing it), skip the
 welcome: check the connection as in step 1, then do that task with the \`${m.skill.name}\` skill in this conversation.
 
-1. Check the connection with a real read: list the user's canvases with the ${m.displayName} tools. The first call
-   may open ${m.displayName} in the browser; the user signs in if asked and clicks **Allow** once. Don't say it works
-   before that read answers. If the tools aren't here, follow https://github.com/${m.repository.github}/blob/${m.repository.branch}/INSTALL.md.
-2. Write one short message in the user's language, and call no other tools for it:
-   - One or two sentences: ${m.displayName} makes pictures, clips, voice and music as cards on their own canvas,
-     at the canvas's own prices, and you can open the canvas beside this chat to look at the results together.
-   - These three starters as a numbered list, word for word:
+1. Check the connection with a real read: \`list_canvases { limit: 5 }\`. The first call may open ${m.displayName} in the
+   browser; the user signs in if asked and clicks **Allow** once. Don't say it works before that read answers. If
+   the tools aren't here, follow https://github.com/${m.repository.github}/blob/${m.repository.branch}/INSTALL.md.
+2. Call \`get_started { locale }\` with the user's language (\`en\`, \`zh\`; for another language take \`en\` and
+   translate faithfully). Write one short message from it, and call no other tools for it:
+   - its \`welcome\`, in one or two sentences;
+   - its three \`starters\` as a numbered list (each starter's \`title\`; keep its \`prompt\` for when they pick it);
+   - one closing line: reply with a number, or say what to make.
 
-${list(m.starters.en).replace(/^/gm, "     ")}
+   If \`get_started\` isn't in your tools, say in one or two sentences that ${m.displayName} makes pictures, clips,
+   voice and music as cards on their own canvas, and offer these, word for word (in Chinese, the second list):
 
-     In Chinese:
+${list(m.starters.en).replace(/^/gm, "   ")}
 
-${list(m.starters.zh).replace(/^/gm, "     ")}
-
-     In another language, translate them faithfully.
-   - One closing line: reply with a number, or say what to make.
-3. When they answer, do it with the \`${m.skill.name}\` skill. A starter that needs their file (a product photo): ask
-   for it first.
+${list(m.starters.zh).replace(/^/gm, "   ")}
+3. When they answer, do it with the \`${m.skill.name}\` skill (a number: that starter's \`prompt\`). A starter that needs
+   their file (a product photo): ask for it first.
 
 Never explain how ${m.displayName} was installed or configured, and don't mention models, plans or credits here.
 `;

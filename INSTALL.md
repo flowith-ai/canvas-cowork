@@ -68,8 +68,10 @@ claude plugin install flowith-next@flowith
 Then sign in and work in this same session, in exactly this order. Don't run `claude mcp login`: from your shell it stops at once (it needs a terminal). A plugin's server loads only after `/reload-plugins`, which only the user can type, and your background wait is what wakes you up after each thing the user does:
 
 ```text
-1. Run `sleep 20` in the background, then tell the user in one line: "Type /reload-plugins and I'll open the sign-in page."
-2. When the wait ends, look for mcp__plugin_flowith-next_flowith-next__authenticate (ToolSearch "select:mcp__plugin_flowith-next_flowith-next__authenticate"). Not there yet: run `sleep 20` in the background again and write nothing at all (up to 5 minutes).
+1. Right after the install, in the same reply, do both:
+   a. Call Bash with run_in_background: true and the command `sleep 25`. Never skip it: the user's /reload-plugins doesn't wake you up, and this wait is the only thing that brings you back after it.
+   b. Tell the user in one line: "Type /reload-plugins and I'll open the sign-in page."
+2. When the wait ends, look for mcp__plugin_flowith-next_flowith-next__authenticate (ToolSearch "select:mcp__plugin_flowith-next_flowith-next__authenticate"). Not there yet: call Bash again with run_in_background: true and `sleep 20`, and write nothing at all (up to 5 minutes).
 3. Call it. Open the link it answers for the user (open '<link>' on macOS, xdg-open on Linux, start on Windows) and tell them in one line: "I've opened the sign-in page: click Allow there (sign up first if you're new), and I'll carry on when you're done." Then run this one command in the background (10-minute timeout); it ends by itself once they have clicked Allow: until claude mcp list 2>/dev/null | grep -q "plugin:flowith-next:flowith-next.*Connected"; do sleep 5; done
 4. When it ends, look for list_canvases (not there yet: sleep 5 and look again).
 5. Call list_canvases, then do the user's task right here: no new session is needed.

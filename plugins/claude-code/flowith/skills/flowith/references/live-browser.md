@@ -5,9 +5,10 @@ same with no canvas open; the browser is for the user to watch and react.
 
 ## With Flowith's MCP tools
 
-1. `open_canvas` (or `create_canvas` for a new one) gives `url` and `handoffUrl`. `handoffUrl` opens
-   Flowith already signed in as the user, on that canvas, laid out for a narrow side pane (no app
-   sidebar or Flo rail). It works once, within two minutes.
+1. `open_canvas { canvasId }` gives `url`, `handoffUrl` and `expiresIn` (call it after `create_canvas`
+   too: a new canvas's answer has no `handoffUrl`). `handoffUrl` opens Flowith already signed in as the
+   user, on that canvas, laid out for a narrow side pane (no app sidebar or Flo rail). It works once,
+   within `expiresIn` seconds. An answer with `url` alone: open `url`, and the user signs in there once.
 2. Open `handoffUrl` in the host's own browser beside the chat (Codex: the in-app browser `iab`;
    Antigravity, Cursor and Claude: their browser pane). Reuse the tab that already shows this canvas;
    open a new one only if none does. Keep that tab for the whole task.

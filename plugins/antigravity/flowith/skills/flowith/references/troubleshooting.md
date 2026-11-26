@@ -7,9 +7,12 @@
 | The tools aren't there right after installing | Hosts load a new server in a new session: Claude Code `/reload-plugins` or a new session, Codex a new thread, Antigravity / Cursor a new conversation. Carry the user's task into it |
 | Sign-in didn't happen, or the server says it isn't authorised | Sign in again with the host's own login: Claude Code `claude mcp login plugin:flowith:flowith`, Codex `codex mcp login flowith`, Cursor / Antigravity the server's Authenticate button. The user clicks **Allow** on flowith.io |
 | It worked, then every call is refused | The user disconnected this agent in Flowith (Connections), or the sign-in expired: sign in again as above |
-| Out of credits, or the model needs a higher plan | Pass on what the tool says, with its top-up link; don't switch models silently |
+| `status: "needs_approval"` | Above the user's ask-above limit; nothing was placed. Ask the user with the price; on a yes, send the same call with `approveCredits: <credits>` |
+| `status: "not_started"` | Their credits can't pay for it; nothing was placed or charged. Pass on the `message` with its `topUpUrl`; don't switch models silently |
+| `get_task` keeps saying `generating` | Clips take 1 to 8 minutes: keep calling it (`waitSeconds: 50`). Don't send the generation again; it is running on Flowith |
+| `get_task` says `failed` | Read its `message`: rephrase or pick another model for a refusal, top up for credits (`topUpUrl`) |
 | The hosted server answers 404 | It isn't live for that site yet: use the CLI ([cli](cli.md)) |
-| `handoffUrl` shows "link expired" | It works once, within two minutes: call `open_canvas` again |
+| `handoffUrl` shows "link expired" | It works once, within `expiresIn` seconds: call `open_canvas` again |
 
 ## CLI errors
 

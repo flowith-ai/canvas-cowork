@@ -17,7 +17,10 @@ same with no canvas open; the browser is for the user to watch and react.
    let the user choose.
 4. Share `url` (the plain canvas link) in the chat, never `handoffUrl`.
 
-If the host has no browser beside the chat, give the user `url`.
+If the host has no browser beside the chat but runs on the user's computer (Claude Code, the Codex CLI),
+open `handoffUrl` in their own browser with the system's opener (`open '<handoffUrl>'` on macOS,
+`xdg-open` on Linux, `start` on Windows): it opens signed in, or just goes to the canvas when that
+browser is already signed in as them. Share `url` in the chat either way.
 
 ## With the CLI
 

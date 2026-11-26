@@ -24,10 +24,9 @@
           "mcp": {
             "commands": [
               "claude plugin marketplace add flowith-ai/canvas-cowork",
-              "claude plugin install flowith@flowith",
-              "claude mcp login plugin:flowith:flowith"
+              "claude plugin install flowith@flowith"
             ],
-            "thenNew": "a new session, or `/reload-plugins` in this one"
+            "thenNew": "this session, after the user types `/reload-plugins`"
           },
           "cli": {
             "commands": [
@@ -101,10 +100,9 @@
           "mcp": {
             "commands": [
               "claude plugin marketplace add flowith-ai/canvas-cowork",
-              "claude plugin install flowith-next@flowith",
-              "claude mcp login plugin:flowith-next:flowith-next"
+              "claude plugin install flowith-next@flowith"
             ],
-            "thenNew": "a new session, or `/reload-plugins` in this one"
+            "thenNew": "this session, after the user types `/reload-plugins`"
           },
           "cli": {
             "commands": [

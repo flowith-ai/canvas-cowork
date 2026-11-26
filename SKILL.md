@@ -34,23 +34,25 @@ password, key or token.
 
 ## What to call
 
-| Need | MCP tool | CLI |
-|---|---|---|
-| A first look, three starters | `get_started { locale? }` → `welcome`, `starters` (title, prompt, cover) | `cw help` |
-| Find a canvas | `list_canvases { query?, limit? }` → `canvasId`, `title`, `url` each | `cw canvases [words]` |
-| Start one | `create_canvas { title }` → `canvasId`, `url` | `cw new "Title"` |
-| Show it beside the chat | `open_canvas { canvasId }` → `url`, `handoffUrl` | `cw open --handoff --canvas <url>` |
-| See what is on it | `read_canvas { canvasId }`: the canvas map (its areas); `area` for one area's cards, `refs` for exact cards | `cw look` · `cw read <ref>` |
-| Find cards | `find_canvas_nodes { canvasId, text?, kinds?, state?, placedBy?, groupRef?, … }` | `cw look [words] --kind image` |
-| Pictures | `generate_image { canvasId, title, prompt, model?, aspectRatio?, quality?, resolution?, near? }` | `cw image "p" ["p2"…]` |
-| Wait for a job | `get_task { taskId, waitSeconds? }` (0–50 s, default 20) | `cw wait <ref>` |
-| Credits | `credits` → `credits` (the balance their Flowith page shows), `askAboveCredits`, `topUpUrl` | `cw credits` · `cw spent` |
-| Change a picture, clips, voice and music | `edit_image`, `generate_video`, `generate_audio` (same answers as `generate_image`) | `cw edit` · `cw video` · `cw speech` · `cw music` |
+The hosted tools are Flo's own, by Flo's schemas; cards are named by ref, and every tool but the account
+ones takes `canvasId`. The server's own list and descriptions win over this summary.
 
-The CLI also has the card tools the hosted tools don't cover yet (upscale, cut-out, expand, retry, vary,
-group / arrange, and the canvas's own split, angles, relight, lip-sync, 拉片, characters, director stage):
-[references/cli.md](references/cli.md). Where the server's own tool descriptions differ from this
-table, they win.
+| Need | MCP tools | CLI |
+|---|---|---|
+| Account | `get_started { locale? }`, `list_canvases { query?, limit? }`, `create_canvas { title }`, `open_canvas { canvasId }` → `url`, `handoffUrl`, `credits` → `credits` (the balance their Flowith page shows), `askAboveCredits`, `topUpUrl` | `cw help` · `cw canvases` · `cw new` · `cw open --handoff` · `cw credits` |
+| Overview: read, then look | `read_canvas` (the map of areas; `area` for one; `refs` + `view: true` for exact cards with their pictures), `view_canvas { mode?: "map" \| "photo", area? }` (an image of the canvas), `find_canvas_nodes`, `read_selection` (what the user selected and sees) | `cw look` · `cw read <ref>` · `cw selection` |
+| Micro edits (one call = one undo step) | `edit_canvas { operations: [...], focus? }` for several at once; `create_canvas_node`, `update_canvas_node` (rename, text, colour, size, link / unlink, ungroup), `layout_canvas { script }` (move, align, arrange), `group_canvas_nodes`, `copy_canvas_node`, `delete_canvas_node`, `canvas_comment`, `focus_canvas_nodes` (show the user the result) | `cw arrange` · `cw group` · `cw focus` |
+| Making | `generate_image`, `edit_image`, `generate_video`, `generate_audio`, then `get_task { taskId, waitSeconds? }` | `cw image` · `cw edit` · `cw video` · `cw speech` · `cw music` · `cw wait` |
+| Card tools and composition | `card_tool`, `upscale_image`, `make_transparent_image`, `image_action`, `video_action`, `create_storyboard`, `lay_out_storyboard`, `storyboard_action`, `make_board_film`, `break_down_video`, `build_director_stage`, `shoot_director_shot`, `director_action`, `timeline_action`, `add_to_cut`, `make_character`, `character_action`, `find_elements`, `save_element`, `library_element` | [references/cli.md](references/cli.md) |
+| The user's own files | `prepare_upload { fileName, contentType, sizeBytes }` → run its `command` (an HTTP PUT of the file), then `import_media { uploadId, near? }` | `cw upload <file>` |
+
+## Steps that need the canvas open
+
+Edits, layout, selection and some card tools run in the user's open canvas (that is where their undo
+history lives). With no canvas open they answer `status: "needs_canvas"` with `url` and `handoffUrl`:
+open `handoffUrl` yourself (the side browser, or in a terminal `open '<handoffUrl>'` on macOS,
+`xdg-open` on Linux, `start` on Windows), wait a few seconds for it to load, and call the same tool again.
+Don't ask the user to open it and report back. `status: "running"` with a `taskId`: wait with `get_task`.
 
 ## How a generation answers
 

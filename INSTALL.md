@@ -69,11 +69,11 @@ Then sign in and work in this same session, in exactly this order. Don't run `cl
 
 ```text
 1. Run `sleep 20` in the background, then tell the user in one line: "Type /reload-plugins and I'll open the sign-in page."
-2. When the wait ends, look for mcp__plugin_flowith-next_flowith-next__authenticate (ToolSearch "select:mcp__plugin_flowith-next_flowith-next__authenticate"). Not there yet: run `sleep 20` in the background again and write nothing (up to 5 minutes).
-3. Call it. Open the link it answers for the user (open '<link>' on macOS, xdg-open on Linux, start on Windows) and tell them in one line: "I've opened the sign-in page: click Allow there (sign up first if you're new), and I'll carry on when you're done." Then run `sleep 30` in the background.
-4. When the wait ends, look for list_canvases. Not there yet: run `sleep 20` in the background again and write nothing (up to 10 minutes). The tools arrive by themselves after Allow.
+2. When the wait ends, look for mcp__plugin_flowith-next_flowith-next__authenticate (ToolSearch "select:mcp__plugin_flowith-next_flowith-next__authenticate"). Not there yet: run `sleep 20` in the background again and write nothing at all (up to 5 minutes).
+3. Call it. Open the link it answers for the user (open '<link>' on macOS, xdg-open on Linux, start on Windows) and tell them in one line: "I've opened the sign-in page: click Allow there (sign up first if you're new), and I'll carry on when you're done." Then run this one command in the background (10-minute timeout); it ends by itself once they have clicked Allow: until claude mcp list 2>/dev/null | grep -q "plugin:flowith-next:flowith-next.*Connected"; do sleep 5; done
+4. When it ends, look for list_canvases (not there yet: sleep 5 and look again).
 5. Call list_canvases, then do the user's task right here: no new session is needed.
-Between these steps write nothing to the user: no "still waiting" lines when a wait ends. They see the two lines above, then their result.
+Between these steps write nothing to the user: no "waiting" lines when a wait ends. They see the two lines above, then their result.
 If the page after Allow couldn't reach Claude Code: ask the user for that page's address and pass it to mcp__plugin_flowith-next_flowith-next__complete_authentication.
 ```
 

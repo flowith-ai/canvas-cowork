@@ -1,7 +1,7 @@
 /** The canary's own rules: targets, when it spends credits, when it alerts, what the card says. The loop itself runs
  * against next-gen (`node canary/agent-connect.ts`); it can't be faked here without faking what it is there to catch. */
 import { describe, expect, test } from "bun:test";
-import { TARGETS, alertDecision, buildCard, imageDue, parseArgs, type Report } from "../agent-connect.ts";
+import { TARGETS, alertDecision, buildCard, chargeMatchesQuote, imageDue, parseArgs, sessionsToEnd, type Report } from "../agent-connect.ts";
 
 const hour = 3600_000;
 const now = Date.parse("2026-11-26T12:00:00Z");
@@ -20,6 +20,33 @@ describe("options", () => {
 		expect(parseArgs(["--email", "agent-qa-canary-2@flowith.cc"], {}).email).toBe("agent-qa-canary-2@flowith.cc");
 		expect(() => parseArgs(["--target", "prod"], {})).toThrow("--target");
 		expect(() => parseArgs(["--imagee", "always"], {})).toThrow("Unknown flag");
+	});
+
+	test("each schedule is a job of its own (hourly by default)", () => {
+		expect(parseArgs([], {}).job).toBe("hourly");
+		expect(parseArgs(["--job", "daily-image", "--image", "always", "--email", "agent-qa-g-s1@flowith.cc"], {})).toMatchObject({ job: "daily-image", image: "always", email: "agent-qa-g-s1@flowith.cc" });
+		expect(() => parseArgs(["--job", "../x"], {})).toThrow("--job");
+	});
+});
+
+describe("what a run may end and spend", () => {
+	test("only the sessions its own client opened: the account may be shared", () => {
+		const sessions = [
+			{ sessionId: "a", clientId: "flc_mine" },
+			{ sessionId: "b", clientId: "flc_other" },
+			{ sessionId: "c", clientId: "https://claude.ai/oauth/claude-code-client-metadata" },
+			{ sessionId: "d", clientId: "flc_mine" },
+			{ sessionId: "e", clientId: null },
+		];
+		expect(sessionsToEnd(sessions, "flc_mine")).toEqual(["a", "d"]);
+		expect(sessionsToEnd(sessions, undefined)).toEqual([]);
+	});
+
+	test("a generation must cost what it was quoted, to the cent", () => {
+		expect(chargeMatchesQuote(21, 21)).toBe(true);
+		expect(chargeMatchesQuote(21.004, 21)).toBe(true);
+		expect(chargeMatchesQuote(21.39, 21)).toBe(false);
+		expect(chargeMatchesQuote(0, 21)).toBe(false);
 	});
 });
 
@@ -59,5 +86,13 @@ describe("alerts", () => {
 		expect(text).toContain("decision 500");
 		expect(text).not.toContain("1234");
 		expect(buildCard({ ...report, ok: true }, { ...opts, test: false }, "recovery").header.template).toBe("green");
+	});
+
+	test("the daily image job says so in its card", () => {
+		const report: Report = { ok: false, target: "next-gen", job: "daily-image", imageRun: true, step: "generate_image", error: "charged 21.39 credits, quoted 21", startedAt: ago(0), ms: 4000, log: [] };
+		const card = buildCard(report, { ...TARGETS["next-gen"], test: false }, "failure");
+		expect(card.header.title.content).toBe("Agent Connect canary failed · next-gen · daily-image");
+		expect(card.header.subtitle.content).toContain("image (charge = quote)");
+		expect(buildCard({ ...report, job: "hourly", imageRun: false, step: "write" }, { ...TARGETS["next-gen"], test: false }, "failure").header.subtitle.content).toBe("register → consent → token → MCP read/write → side tab → disconnect: write");
 	});
 });

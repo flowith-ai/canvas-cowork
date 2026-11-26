@@ -3,14 +3,20 @@
  * Agent Connect canary: the whole hosted-MCP loop a user's agent goes through, with no person, so a host, upstream or
  * deploy change is caught before a user hits it (Agent Connect v2, design rule 8).
  *
- *   node canary/agent-connect.ts [--target next-gen|flowith] [--image auto|always|never] [--alert] [--test]
+ *   node canary/agent-connect.ts [--target next-gen|flowith] [--job hourly|<name>] [--email agent-qa-…@flowith.cc]
+ *                                [--image auto|always|never] [--alert] [--test]
  *
  * discovery → register (DCR) → authorize → consent (the account's own browser session reads the request and clicks
  * Allow through the same endpoints the consent page calls) → code + state + iss → token → MCP initialize, tools,
- * list_canvases, credits, the canary canvas, generate_image + get_task (once a day: it spends credits), read_canvas →
- * open_canvas → redeem the side-tab ticket (single use) → refresh → agent-sessions names the client → disconnect →
- * the MCP refuses the token. Every session it opens is ended, even when a step fails, and the browser session is
- * signed out at the end.
+ * list_canvases, credits, the canary canvas → a free write (create_canvas_node, read back, removed again) and a relayed
+ * step with no canvas open (needs_canvas with a handoffUrl) → generate_image + get_task when asked (it spends credits:
+ * the charge must equal the quote) → read_canvas → open_canvas → redeem the side-tab ticket (single use) → refresh →
+ * agent-sessions names the client → disconnect → the MCP refuses the token. It ends only the sessions it opened (its
+ * own client's), even when a step fails, and signs its browser session out at the end: other agents may share the
+ * account.
+ *
+ * Schedules (Agent.Space, this Mac): hourly `--image never` on agent-qa-canary (no credits spent); once a day
+ * `--job daily-image --image always` on an account with starter credits. Each job keeps its own state (mute, recovery).
  *
  * The account is an internal test account (agent-qa-…@flowith.cc, a free user). Its browser session is minted the way
  * hypergpt-frontend's visual-ux-audit sign-in-as.mjs does: the Supabase secret key (env SUPABASE_SECRET_KEY, else the
@@ -51,12 +57,18 @@ export const CLIENT_NAME = "Flowith Canary";
 export const CANVAS_TITLE = "Agent Connect canary";
 const REDIRECT = "http://127.0.0.1:53682/callback";
 /** The tools the loop needs; the rest of the server's list is reported, not required. */
-export const REQUIRED_TOOLS = ["get_started", "list_canvases", "create_canvas", "open_canvas", "read_canvas", "find_canvas_nodes", "generate_image", "get_task", "credits"];
+export const REQUIRED_TOOLS = ["get_started", "list_canvases", "create_canvas", "open_canvas", "read_canvas", "find_canvas_nodes", "create_canvas_node", "focus_canvas_nodes", "generate_image", "get_task", "credits"];
+/** Credits are counted to the cent: a charge further from its quote than this is a mismatch. */
+const CHARGE_TOLERANCE = 0.005;
+/** How long after a generation is done the balance is read again, so a late settlement is counted. */
+const SETTLE_MS = 8_000;
 const MUTE_MS = 6 * 3600_000;
 const IMAGE_EVERY_MS = 23 * 3600_000;
 
 export interface Options {
 	target: TargetName;
+	/** Which schedule this run is: its own state file, named in the alert. */
+	job: string;
 	site: string;
 	issuer: string;
 	mcp: string;
@@ -77,18 +89,21 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
 		if (["alert", "test", "json"].includes(key)) flags.set(key, "1");
 		else flags.set(key, inline ?? argv[++i] ?? "");
 	}
-	const known = ["target", "site", "issuer", "mcp", "email", "image", "image-model", "alert", "test", "json"];
+	const known = ["target", "job", "site", "issuer", "mcp", "email", "image", "image-model", "alert", "test", "json"];
 	for (const key of flags.keys()) if (!known.includes(key)) throw new Error(`Unknown flag --${key}`);
 	const target = (flags.get("target") ?? env.CANARY_TARGET ?? "next-gen") as TargetName;
 	if (!Object.hasOwn(TARGETS, target)) throw new Error(`--target must be ${Object.keys(TARGETS).join(" or ")}`);
 	const email = flags.get("email") ?? env.CANARY_EMAIL ?? "agent-qa-canary@flowith.cc";
 	if (!/^agent-qa-[a-z0-9-]+@flowith\.cc$/.test(email)) throw new Error(`Only agent-qa-<name>@flowith.cc test accounts; got "${email}"`);
+	const job = flags.get("job") ?? env.CANARY_JOB ?? "hourly";
+	if (!/^[a-z0-9-]{1,40}$/.test(job)) throw new Error(`--job must be a short lowercase name; got "${job}"`);
 	const image = flags.get("image") ?? "auto";
 	if (!["auto", "always", "never"].includes(image)) throw new Error("--image must be auto, always or never");
 	const preset = TARGETS[target];
 	const origin = (url: string) => url.replace(/\/+$/, "");
 	return {
 		target,
+		job,
 		site: origin(flags.get("site") ?? preset.site),
 		issuer: origin(flags.get("issuer") ?? preset.issuer),
 		mcp: flags.get("mcp") ?? preset.mcp,
@@ -123,12 +138,17 @@ export function alertDecision(state: State, result: { ok: true } | { ok: false; 
 export interface Report {
 	ok: boolean;
 	target: TargetName;
+	job?: string;
+	/** Whether this run made an image (the daily job), for the card's subtitle. */
+	imageRun?: boolean;
 	step?: string;
 	error?: string;
 	startedAt: string;
 	ms: number;
 	log: string[];
 	creditsSpent?: number;
+	/** What generate_image quoted, to compare with creditsSpent. */
+	creditsQuoted?: number;
 	/** The balance after the run, for sizing the cadence; never put in the alert. */
 	creditsLeft?: number;
 	/** Why the image step didn't make an image this run, when it was due. */
@@ -154,12 +174,40 @@ export function buildCard(report: Report, opts: Pick<Options, "site" | "issuer" 
 		schema: "2.0",
 		config: { update_multi: true, wide_screen_mode: true },
 		header: {
-			title: { tag: "plain_text", content: `${prefix}Agent Connect canary ${failed ? "failed" : "recovered"} · ${report.target}` },
-			subtitle: { tag: "plain_text", content: failed ? `register → consent → token → MCP → generate → side tab → disconnect: ${report.step}` : "register → consent → token → MCP → generate → side tab → disconnect" },
+			title: { tag: "plain_text", content: `${prefix}Agent Connect canary ${failed ? "failed" : "recovered"} · ${report.target}${report.job && report.job !== "hourly" ? ` · ${report.job}` : ""}` },
+			subtitle: { tag: "plain_text", content: `${loopName(report)}${failed ? `: ${report.step}` : ""}` },
 			template: failed ? "red" : "green",
 		},
 		body: { direction: "vertical", padding: "10px 12px 12px 12px", elements: [{ tag: "markdown", content: lines.join("\n") }] },
 	};
+}
+
+const loopName = (report: Pick<Report, "imageRun">) =>
+	`register → consent → token → MCP read/write${report.imageRun ? " → image (charge = quote)" : ""} → side tab → disconnect`;
+
+/** The agent sessions this run opened, out of the account's: its own client's (the OAuth session and the side tabs it
+ * minted). The account may be shared, so nothing else is ended. */
+export const sessionsToEnd = (sessions: { sessionId: string; clientId?: string | null }[], clientId: string | undefined) =>
+	clientId ? sessions.filter((s) => s.clientId === clientId).map((s) => s.sessionId) : [];
+
+/** Whether a generation cost what it was quoted, to the cent. */
+export const chargeMatchesQuote = (spent: number, quoted: number) => Math.abs(spent - quoted) < CHARGE_TOLERANCE;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** The canary's own note goes again the way the app deletes a card (flow_node is_delete, by its owner's session): the
+ * MCP gives a card's 8-hex ref, the start of its id. Answers how many cards it removed. */
+async function removeNote(accessToken: string, note: { ref: string; canvasId: string }): Promise<number | string> {
+	const headers = { apikey: SUPABASE_KEY, authorization: `Bearer ${accessToken}` };
+	const rows = await http(`${SUPABASE_URL}/rest/v1/flow_node?conv_id=eq.${note.canvasId}&is_delete=eq.false&select=id`, { headers });
+	if (rows.status !== 200 || !Array.isArray(rows.data)) return `flow_node read ${rows.status}`;
+	const ids = rows.data.map((r: { id: string }) => r.id).filter((id: string) => id.startsWith(`${note.ref}-`));
+	let removed = 0;
+	for (const id of ids) {
+		const r = await http(`${SUPABASE_URL}/rest/v1/flow_node?id=eq.${id}&conv_id=eq.${note.canvasId}`, { method: "PATCH", headers: { ...headers, prefer: "return=representation" }, json: { is_delete: true } });
+		if (r.status === 200 && Array.isArray(r.data)) removed += r.data.length;
+	}
+	return removed;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -241,7 +289,10 @@ export async function run(opts: Options, state: State): Promise<Report> {
 	};
 
 	let browser: { access_token: string } | null = null;
-	const report: Report = { ok: false, target: opts.target, startedAt: new Date(started).toISOString(), ms: 0, log };
+	let clientId: string | undefined;
+	let note: { ref: string; canvasId: string } | undefined;
+	const imageRun = imageDue(opts, state, started);
+	const report: Report = { ok: false, target: opts.target, job: opts.job, imageRun, startedAt: new Date(started).toISOString(), ms: 0, log };
 	const asBrowser = () => ({ authorization: `Bearer ${browser?.access_token}` });
 
 	try {
@@ -277,7 +328,8 @@ export async function run(opts: Options, state: State): Promise<Report> {
 			must(r.status === 201 || r.status === 200, `register ${r.status}: ${short(r.data)}`);
 			must(r.data?.client_id, "no client_id");
 			say(`registered ${r.data.client_id}`);
-			return r.data.client_id as string;
+			clientId = r.data.client_id as string;
+			return clientId;
 		});
 
 		const verifier = b64u(randomBytes(32));
@@ -368,6 +420,7 @@ export async function run(opts: Options, state: State): Promise<Report> {
 			return made.canvasId as string;
 		});
 
+
 		const balance = async () => {
 			const c = await call("credits", {});
 			must(typeof c?.credits === "number" && typeof c?.topUpUrl === "string", `credits: ${short(c)}`);
@@ -377,7 +430,24 @@ export async function run(opts: Options, state: State): Promise<Report> {
 		report.creditsLeft = before;
 		say("credits answers");
 
-		if (imageDue(opts, state, started)) {
+		await step("write", async () => {
+			const value = `Canary write ${new Date(started).toISOString()}`;
+			const made = await call("create_canvas_node", { canvasId, type: "4", value });
+			must(made?.status === "done" && typeof made.card === "string", `create_canvas_node: ${short(made)}`);
+			const read = await call("read_canvas", { canvasId, refs: [made.card] });
+			note = { ref: made.card, canvasId };
+			const node = (read?.nodes ?? []).find((n: { ref?: string }) => n.ref === made.card);
+			must(node?.text === value, `read_canvas doesn't give the new note back as written: ${short(read)}`);
+			// A relayed step (it runs in the user's open canvas): with none open it must answer needs_canvas with the link.
+			const focus = await call("focus_canvas_nodes", { canvasId, nodeIds: [made.card] });
+			must(focus?.status === "needs_canvas" && String(focus.handoffUrl ?? "").startsWith(`${opts.site}/connect-agent/open?`), `focus_canvas_nodes with no canvas open: ${short(focus)}`);
+			const removed = await removeNote(browser!.access_token, note);
+			must(removed === 1, `couldn't remove the canary's note again (${removed})`);
+			note = undefined;
+			say(`create_canvas_node ${made.card} read back, removed; a relayed step with no canvas open → needs_canvas`);
+		});
+
+		if (imageRun) {
 			await step("generate_image", async () => {
 				const title = `Canary ${new Date(started).toISOString().slice(0, 16).replace("T", " ")}`;
 				const gen = await call("generate_image", { canvasId, title, prompt: "A small green check mark centred on a plain white background, flat icon", ...(opts.imageModel === "default" ? {} : { model: opts.imageModel }), aspectRatio: "1:1" });
@@ -392,6 +462,8 @@ export async function run(opts: Options, state: State): Promise<Report> {
 					return;
 				}
 				must(gen?.status === "generating" && gen.taskId && gen.card, `generate_image ${short(gen, 900)}`);
+				must(typeof gen.credits === "number", `generate_image gave no price: ${short(gen, 400)}`);
+				report.creditsQuoted = gen.credits as number;
 				let task = gen;
 				const t0 = Date.now();
 				while (task.status === "generating" && Date.now() - t0 < 300_000) task = await call("get_task", { taskId: gen.taskId, waitSeconds: 50 });
@@ -401,10 +473,12 @@ export async function run(opts: Options, state: State): Promise<Report> {
 				const img = await fetch(url, { signal: AbortSignal.timeout(30_000) });
 				must(img.ok && (img.headers.get("content-type") ?? "").startsWith("image/"), `result ${img.status} ${img.headers.get("content-type")}`);
 				await img.arrayBuffer();
+				state.lastImageAt = new Date().toISOString();
+				await sleep(SETTLE_MS);
 				report.creditsLeft = await balance();
 				report.creditsSpent = Math.round((before - report.creditsLeft) * 100) / 100;
-				state.lastImageAt = new Date().toISOString();
-				say(`generate_image ${opts.imageModel} → card ${gen.card} done in ${Math.round((Date.now() - t0) / 1000)} s, ${report.creditsSpent} credits`);
+				say(`generate_image ${opts.imageModel} → card ${gen.card} done in ${Math.round((Date.now() - t0) / 1000)} s, charged ${report.creditsSpent}, quoted ${report.creditsQuoted}`);
+				must(chargeMatchesQuote(report.creditsSpent, report.creditsQuoted!), `charged ${report.creditsSpent} credits, quoted ${report.creditsQuoted}`);
 			});
 		}
 
@@ -461,12 +535,13 @@ export async function run(opts: Options, state: State): Promise<Report> {
 		say(`FAILED at ${report.step}: ${report.error}`);
 	} finally {
 		if (browser) {
-			// The canary account is only the canary's: end every agent session it still has, then sign the browser out.
+			if (note) say(`cleanup removed the canary's note: ${await removeNote(browser.access_token, note).catch((e) => (e as Error).message)}`);
+			// Only this run's own sessions (its client's): the account may be shared with other agents.
 			const left = await http(`${opts.issuer}/user/agent-sessions`, { headers: asBrowser() }).catch(() => null);
-			const ids: string[] = left?.data?.sessions?.map((s: { sessionId: string }) => s.sessionId) ?? [];
+			const ids = sessionsToEnd(left?.data?.sessions ?? [], clientId);
 			if (ids.length) {
 				await http(`${opts.issuer}/user/agent-session/end`, { method: "POST", headers: asBrowser(), json: { sessionIds: ids.slice(0, 20) } }).catch(() => null);
-				say(`cleanup ended ${ids.length} leftover agent session(s)`);
+				say(`cleanup ended ${ids.length} session(s) this run had left open`);
 			}
 			await http(`${SUPABASE_URL}/auth/v1/logout?scope=local`, { method: "POST", headers: { apikey: SUPABASE_KEY, ...asBrowser() } }).catch(() => null);
 		}
@@ -485,7 +560,7 @@ async function postFeishu(card: unknown) {
 async function main() {
 	loadDotEnv(join(HERE, ".env"));
 	const opts = parseArgs(process.argv.slice(2));
-	const stateFile = join(HERE, ".state", `${opts.target}.json`);
+	const stateFile = join(HERE, ".state", `${opts.target}-${opts.job}.json`);
 	const state: State = existsSync(stateFile) ? JSON.parse(readFileSync(stateFile, "utf8")) : {};
 	const report = await run(opts, state);
 	const now = Date.now();
@@ -511,8 +586,8 @@ async function main() {
 		writeFileSync(stateFile, JSON.stringify(state, null, 2), { mode: 0o600 });
 	}
 	const summary = report.ok
-		? `canary ${opts.target} ok in ${Math.round(report.ms / 1000)} s${report.creditsSpent !== undefined ? `, image ${report.creditsSpent} credits` : report.imageSkipped ? `, image skipped (${report.imageSkipped})` : ", no image this run"}, ${report.creditsLeft} credits left`
-		: `canary ${opts.target} FAILED at ${report.step}: ${report.error}${alerted ? " (alerted)" : kind ? "" : " (alert muted)"}`;
+		? `canary ${opts.target} ${opts.job} ok in ${Math.round(report.ms / 1000)} s${report.creditsSpent !== undefined ? `, image charged ${report.creditsSpent} = quoted ${report.creditsQuoted}` : report.imageSkipped ? `, image skipped (${report.imageSkipped})` : ", no image this run"}, ${report.creditsLeft} credits left`
+		: `canary ${opts.target} ${opts.job} FAILED at ${report.step}: ${report.error}${alerted ? " (alerted)" : kind ? "" : " (alert muted)"}`;
 	if (opts.json) console.log(JSON.stringify({ ...report, alerted }));
 	console.log(summary);
 	process.exitCode = report.ok ? 0 : 1;

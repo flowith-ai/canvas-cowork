@@ -39,24 +39,51 @@ ones takes `canvasId`. The server's own list and descriptions win over this summ
 
 | Need | MCP tools | CLI |
 |---|---|---|
-| Account | `get_started { locale? }`, `list_canvases { query?, limit? }`, `create_canvas { title }`, `open_canvas { canvasId }` → `url`, `handoffUrl`, `credits` → `credits` (the balance their Flowith page shows), `askAboveCredits`, `topUpUrl` | `cw help` · `cw canvases` · `cw new` · `cw open --handoff` · `cw credits` |
-| Ideas: the template gallery | `open_templates { type?, query? }` → `handoffUrl`, `taskId` (wait with `get_task`: it answers with the template the user picked and the steps to make it), `browse_templates { type?, query?, category?, limit?, cursor? }` (the same list, most used first, to choose from in chat) | — |
+| Account | `get_started { locale?, request? }`, `list_canvases { query?, limit? }`, `create_canvas { title }`, `open_canvas { canvasId }` → `url`, `handoffUrl`, `credits` → `credits` (the balance their Flowith page shows), `askAboveCredits`, `topUpUrl` | `cw help` · `cw canvases` · `cw new` · `cw open --handoff` · `cw credits` |
+| Templates: one finished piece from a recipe | `get_template { id, given?, canvasId?, version? }` (the recipe, what is still missing, each tier's plan and price, the protocol), `open_templates { category?, query? }` → `handoffUrl`, `taskId` (`get_task` answers with the user's pick and what they gave there), `browse_templates { category?, query?, kind? }`, `quote_plan`, `open_budget`; the user's brand: `brand`, `save_brand` | — |
 | Overview: read, then look | `read_canvas` (the map of areas; `area` for one; `refs` + `view: true` for exact cards with their pictures), `view_canvas { mode?: "map" \| "photo", area? }` (an image of the canvas), `find_canvas_nodes`, `read_selection` (what the user selected and sees) | `cw look` · `cw read <ref>` · `cw selection` |
 | Micro edits (one call = one undo step) | `edit_canvas { operations: [...], focus? }` for several at once; `create_canvas_node`, `update_canvas_node` (rename, text, colour, size, link / unlink, ungroup), `layout_canvas { script }` (move, align, arrange), `group_canvas_nodes`, `copy_canvas_node`, `delete_canvas_node`, `canvas_comment`, `focus_canvas_nodes` (show the user the result) | `cw arrange` · `cw group` · `cw focus` |
 | Making | `generate_image`, `edit_image`, `generate_video`, `generate_audio`, then `get_task { taskId, waitSeconds? }` | `cw image` · `cw edit` · `cw video` · `cw speech` · `cw music` · `cw wait` |
 | Card tools and composition | `card_tool`, `upscale_image`, `make_transparent_image`, `image_action`, `video_action`, `create_storyboard`, `lay_out_storyboard`, `storyboard_action`, `make_board_film`, `break_down_video`, `build_director_stage`, `shoot_director_shot`, `director_action`, `timeline_action`, `add_to_cut`, `make_character`, `character_action`, `find_elements`, `save_element`, `library_element` | [references/cli.md](references/cli.md) |
 | The user's own files | `prepare_upload { fileName, contentType, sizeBytes }` → run its `command` (an HTTP PUT of the file), then `import_media { uploadId, near? }` | `cw upload <file>` |
 
-## When the user has no idea yet
+## Templates: from what the user asked to the film on their computer
 
-A first run, "what can you make?", "make something nice": don't invent a brief. Call `get_started`
-and offer its starters (the templates people make most, with covers). For the whole gallery, call
-`open_templates` and open its `handoffUrl` in your side browser (as for a canvas), say one short line
-("Pick one you like and I'll make it"), then wait with `get_task { taskId, waitSeconds: 50 }` until it
-answers `done`: follow the steps it gives (ask for the user's photo when the template needs one, make it
-on a new canvas, open the canvas). In a terminal with no browser, open it in the user's own browser. When
-the user would rather you choose, or there is no browser at all, `browse_templates` gives the same list.
-A locked template needs a Flowith plan: pass on its `upgradeUrl`.
+A template is a recipe that makes one finished piece on the user's canvas (a 15-second product film, a set
+of shop pictures, a launch video for an app): its inputs, stages, checks and price per tier. `get_template`
+gives its `protocol`; follow it step by step. In short:
+
+1. **They said what to make** (their first message, or the task carried over from installing Flowith):
+   `get_started { locale, request: <their words> }` answers with every template their account can run.
+   Choose the one whose `useWhen` fits (none of its `avoidWhen`) and go straight to it; don't offer a list.
+   If none fits, say so in a line and offer the closest one or two. **They said nothing yet**: offer
+   `get_started`'s three starters by number and title (covers in chat; motion only in the gallery). To
+   see them all, `open_templates` and open its `handoffUrl` in your side browser, say one line ("pick one
+   and I'll make it"), then `get_task { taskId, waitSeconds: 50 }` until it answers `done`. A pick only
+   drafts it: confirm before anything is made. With no side browser (a terminal), list them in chat
+   with `browse_templates`, or open the gallery in the user's own browser.
+2. **Ask once for what's missing.** Read `brand` first: its name, logo and colours count as given. Then
+   `get_template { id, given }` with everything the user already said or gave in the gallery, and ask in
+   one message only for what `missing.ask` lists (with its limits) and for consent where `missing.confirm`
+   names a photo of a real person. Never ask twice.
+3. **One price, one yes.** On a new canvas (`create_canvas`, then `open_canvas` beside you), `quote_plan`
+   with the template's plan: tell the user the total in one line and ask once. On their yes, `open_budget`
+   and pass its `budgetId` to every paid call: what fits runs without asking again.
+4. **Make it, check it, hand it over.** Run the stages in order (a stage with a gate: show it and wait for
+   their ok). Run every check and fix a failed shot alone. Export the finished piece and **save the files
+   on the user's computer** with your own tools, named after the piece: in the project you're working in
+   (a `marketing/` folder unless they name one), else their Downloads folder. Say each path, what it
+   spent and the canvas link (the editable project stays there).
+5. **Changes after.** Words (subtitles, titles) are edited on the cut, never regenerated, and cost
+   nothing. Another shape or length (a 16:9 of a 9:16 film): don't assume a method. Look at the cut
+   (`timeline_action` preview) and decide shot by shot: crop when the subject stays whole, extend or make
+   it again at the new shape when it would not. Say which and why in a line, price what costs and ask once.
+6. **Their brand.** When they give a brand (name, logo, colours) and want it remembered, `save_brand`
+   (the logo as a Flowith file: `import_media` it, then its `url`). It is on their Flowith account: every
+   chat, every agent and the cut editor have it after.
+
+A template whose `forYou.canRun` is false: say why before anything else (it needs a plan: `upgradeUrl`;
+short of credits: how many, with `topUpUrl`).
 
 ## Steps that need the canvas open
 

@@ -40,12 +40,15 @@ user's brand: `brand`, `save_brand`. `get_template` gives its `protocol`; follow
 there (the narrow side-tab layout; it signs that browser in). With none (Claude Code in a terminal), open
 its `url` in the user's own browser; never `handoffUrl` there.
 
-**Waiting for the user** (a pick in the gallery, a payment on the top-up page): call
-`get_task { taskId, waitSeconds: 50 }` again each time it answers `waiting`, until it answers `done`
-(then go on) or `expired` (a pick lasts 30 minutes, a top-up an hour: then say so in a line). Don't stop to
-ask them to tell you when they're done, and don't repeat your invitation: the page hands their pick or
-payment back to you by itself.
+**Waiting for the user** (a pick in the gallery, a payment on the top-up page): once the page is open,
+say one line ("pick one and I'll make it", "once it's paid I'll go on"), then
+`get_task { taskId, waitSeconds: 3600 }`. In Claude Code that one call stays open until they pick or pay
+or the page closes (a pick lasts 30 minutes, a top-up an hour), with progress along the way; elsewhere it
+answers within a minute. While it answers `waiting`, `generating` or `running`, or the call drops, call it
+again, until `done` (go on) or `expired` (say so in a line). Never ask them to tell you when they're done or
+to come back, and don't repeat your invitation: the page hands their pick or payment back to you.
 
-A template whose `forYou.canRun` is false: say why before anything else (it needs a plan: `upgradeUrl`;
-short of credits: how many, with `topUpUrl`).
+A template whose `forYou.canRun` is false because it needs a plan: say so before anything else, with its
+`upgradeUrl`. Short of credits is no reason to stop or to send them to a pricing page: go on to the quote,
+which says the shortfall, and `open_budget` hands over a top-up page for just that.
 

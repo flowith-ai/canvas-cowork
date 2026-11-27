@@ -90,6 +90,20 @@ describe("host packages", () => {
 		expect(promptGuide(m, m.channels.find((c) => c.internal)!)).toBe("https://next-gen.flowith.io/agent");
 	});
 
+	test("INSTALL-claude-code.md: only Claude Code's steps, short enough that a summarizing fetch passes them on whole", () => {
+		const guide = files.get("INSTALL-claude-code.md")!;
+		expect(guide).toStartWith("# Install Flowith in Claude Code\n");
+		expect(guide.length).toBeLessThan(5000);
+		const next = m.channels.find((c) => c.internal)!;
+		expect(guide).toContain(`claude plugin install ${next.id}@${m.marketplace.name}`);
+		expect(guide).toContain(`mcp__plugin_${next.id}_${next.id}__authenticate`);
+		expect(guide).toContain(`grep -q "plugin:${next.id}:${next.id}.*Connected"`);
+		expect(guide).toContain("run_in_background: true and the command `sleep 25`");
+		for (const other of ["codex plugin", "cursor://", "agy plugin"]) expect(guide).not.toContain(other);
+		// The same steps as INSTALL.md's Claude Code section, word for word.
+		expect(files.get("INSTALL.md")!).toContain(guide.slice(guide.indexOf("Then sign in and work"), guide.indexOf("```\n\n## ", guide.indexOf("```text"))));
+	});
+
 	test("the channel is picked by its name alone: a Flowith Next prompt carries no server URL", () => {
 		const next = m.channels.find((c) => c.internal)!;
 		const prompt = parse("hosts/install.json").channels.find((c: { id: string }) => c.id === next.id).copyPrompt as string;

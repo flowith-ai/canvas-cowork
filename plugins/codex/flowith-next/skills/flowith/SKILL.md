@@ -28,9 +28,10 @@ with the canvas link. Never just "go check the canvas".
 3. **Neither is set up**: set Flowith up for this host first, following
    https://github.com/flowith-ai/canvas-cowork/blob/main/INSTALL.md, then carry on with the user's task.
 
-Signing in is one click for the user. MCP: the first call opens flowith.io and they click **Allow**
-once. CLI: `cw login` prints a code they type on the Flowith page before **Allow**. Never ask for a
-password, key or token.
+Signing in takes the user one click at most. MCP: the first call opens flowith.io, which connects at
+once when they copied the install line there in the last 10 minutes, and otherwise asks them to click
+**Allow** once. CLI: `cw login` prints a code they type on the Flowith page before **Allow**. Never ask
+for a password, key or token.
 
 ## What to call
 

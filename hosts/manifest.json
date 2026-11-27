@@ -28,9 +28,9 @@
       "site": "https://flowith.io",
       "mcpUrl": "https://agent.flowith.io/mcp",
       "installUrl": "https://flowith.io/agent",
-      "installUrlLive": false,
-      "live": false,
-      "note": "flowith.io. Off until the hosted MCP and its sign-in ship to production; until then the docs keep the CLI primary. https://flowith.io/agent serves the guide only once hypergpt-frontend's dev (functions/agent.ts) ships to main; today it answers the app's page, so installUrlLive is false and this channel's prompts still name installGuide. Set installUrlLive (and live) to true with that release."
+      "installUrlLive": true,
+      "live": true,
+      "note": "flowith.io. Live since 2026-11-27 (Koho): the hosted MCP at agent.flowith.io/mcp, its sign-in at edge.flowith.io and flowith.io/agent (hypergpt-frontend functions/agent.ts) are on production, so the docs lead with the hosted MCP and the prompts name installUrl."
     },
     {
       "id": "flowith-next",

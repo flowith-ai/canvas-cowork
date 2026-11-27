@@ -292,6 +292,22 @@ describe("--dry-run sends nothing that changes the canvas", () => {
 		expect(r.json).toMatchObject({ jobs: 2, estimatedCredits: null });
 		expect(r.json.estimateNote).toContain("Ask the user");
 	});
+	test("a picture is priced at its size and the user's member rate, as the worker charges it", async () => {
+		const member = fake({ modelRates: { "gemini-3.1-flash-image": 0.8 } });
+		const r = await member.run("image", "rainy window", "--model", "gemini-3.1-flash-image", "--size", "4k", "--dry-run");
+		expect(r.json).toMatchObject({ jobs: 1, estimatedCredits: 108 });
+		expect(r.json.estimateNote).toBeUndefined();
+	});
+	test("on a team canvas a picture is priced at the team's rate, never the user's own", async () => {
+		const run = (g: ReturnType<typeof fake>) => g.run("image", "rainy window", "--model", "gemini-3.1-flash-image", "--dry-run");
+		expect((await run(fake({ team: true, modelRates: { "gemini-3.1-flash-image": 0.8 } }))).json.estimatedCredits).toBe(45);
+		expect((await run(fake({ team: true, teamRates: { "gemini-3.1-flash-image": 0.7 } }))).json.estimatedCredits).toBe(31.5);
+	});
+	test("rates the worker can't give leave the list price, and say so", async () => {
+		const r = await fake({ modelRates: 500 }).run("image", "rainy window", "--model", "gemini-3.1-flash-image", "--dry-run");
+		expect(r.json.estimatedCredits).toBe(45);
+		expect(r.json.estimateNote).toContain("list price");
+	});
 	test("text takes a text card as its reference", async () => {
 		const r = await f.run("text", "summarise", "--ref", ref(ids.text), "--dry-run");
 		expect(r.json.error).toBeUndefined();

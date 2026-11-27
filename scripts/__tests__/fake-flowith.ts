@@ -17,6 +17,8 @@ export const cliCommand = (...args: string[]) => [RUNTIME, join(import.meta.dir,
 
 export const USER = "11111111-1111-4111-8111-111111111111";
 export const CONV = "22222222-2222-4222-8222-222222222222";
+/** The team a team canvas (`team: true`) belongs to. */
+export const TEAM = "33333333-3333-4333-8333-333333333333";
 const agentKey = b64url(crypto.getRandomValues(new Uint8Array(32)));
 export const ids = {
 	group: "a0000000-0000-4000-8000-000000000001",
@@ -49,6 +51,11 @@ export function canvasRows() {
 export const catalog = {
 	"z-image-turbo": { media: "image", title: "Z Image Turbo", consume_num: 5, price: { completion: 5000, prompt: 0 }, supportedAspectRatios: ["1:1", "16:9"], supportsImageInput: true },
 	"unpriced-image": { media: "image", title: "Unpriced Image", supportedAspectRatios: ["1:1"] },
+	// Priced per size and reference picture as its route charges it (prod /models, 2026-11-26).
+	"gemini-3.1-flash-image": {
+		media: "image", title: "Nano Banana 2", supportedAspectRatios: ["1:1", "16:9"], supportedImageSizes: ["1k", "2k", "4k"], supportsImageInput: true,
+		estimatedPriceBySize: { default: 45, "1k": 45, "2k": 90, "4k": 135 }, price: { completion: 45000, prompt: 0 },
+	},
 	"seedance-2.5-flash": {
 		media: "video", title: "Seedance 2.5 Flash", supportedDurations: ["-1", "4", "5", "10"], supportedResolutions: ["480p", "720p"],
 		supportedAspectRatios: ["adaptive", "16:9", "9:16", "1:1"], pricePerSecond: { audioOff: 80704, audioOn: 80704 }, price: { completion: 403520, prompt: 0 },
@@ -128,6 +135,10 @@ export interface FakeOptions {
 	agentSession?: boolean;
 	/** A team canvas (its charges go to the team's payer, out of the user's sight). */
 	team?: boolean;
+	/** GET /user/paid-member `modelRates` (the user's own discounts); a number: that HTTP status instead. */
+	modelRates?: Record<string, number> | number;
+	/** GET /team `model_rates` of the team canvas's team (its Studio plan's prices); null: list prices. */
+	teamRates?: Record<string, number> | null;
 	/** false: a submitted card stays generating (the worker hasn't written its result yet). */
 	finish?: boolean;
 	/**
@@ -251,7 +262,7 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 			if (p === "/models") return Response.json(catalog);
 			if (p.startsWith("/rest/v1/conversation")) {
 				if (req.method !== "GET" && body && typeof body === "object" && "title" in body && typeof body.title === "string") title = body.title;
-				return Response.json([{ id: CONV, title, updated_at: at, metadata: {}, team_id: opts.team ? "33333333-3333-4333-8333-333333333333" : null }]);
+				return Response.json([{ id: CONV, title, updated_at: at, metadata: {}, team_id: opts.team ? TEAM : null }]);
 			}
 			if (p.startsWith("/rest/v1/flow_node")) {
 				if (req.method === "GET") {
@@ -289,6 +300,11 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 				return Response.json(opts.agentSession === false ? { ended: [], refused: asked } : { ended: asked, refused: [] });
 			}
 			if (p === "/user/credits") return Response.json([]);
+			if (p === "/user/paid-member") {
+				const rates = opts.modelRates ?? {};
+				return typeof rates === "number" ? Response.json({ error: "Failed to read membership" }, { status: rates }) : Response.json({ paidMember: true, modelRates: rates });
+			}
+			if (p === "/team") return Response.json({ teams: [{ id: TEAM, name: "Studio", model_rates: opts.teamRates ?? null }] });
 			if (["/image_gen/async", "/video/async", "/completion/async"].includes(p)) {
 				const submit = opts.submit ?? "ok";
 				if (submit === "reset") {

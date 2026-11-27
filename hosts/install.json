@@ -1,6 +1,6 @@
 {
   "$comment": "Generated from hosts/manifest.json by hosts/generate.ts; don't edit by hand. What the website's Connect an agent dialog shows.",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "installGuide": "https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md",
   "headers": {
     "client": "x-flowith-mcp-client",
@@ -61,8 +61,8 @@
           "copyPrompt": "Install Flowith in Cursor by following https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md, then show me what I can make with it.",
           "mcp": {
             "commands": [],
-            "oneClick": "cursor://anysphere.cursor-deeplink/mcp/install?name=flowith&config=eyJ1cmwiOiJodHRwczovL2FnZW50LmZsb3dpdGguaW8vbWNwIiwiaGVhZGVycyI6eyJ4LWZsb3dpdGgtbWNwLWNsaWVudCI6ImN1cnNvciIsIngtZmxvd2l0aC1wbHVnaW4tdmVyc2lvbiI6IjIuMC4wIiwieC1mbG93aXRoLWluc3RhbGwtc291cmNlIjoiY3Vyc29yLWRlZXBsaW5rIn19",
-            "webLink": "https://cursor.com/install-mcp?name=flowith&config=eyJ1cmwiOiJodHRwczovL2FnZW50LmZsb3dpdGguaW8vbWNwIiwiaGVhZGVycyI6eyJ4LWZsb3dpdGgtbWNwLWNsaWVudCI6ImN1cnNvciIsIngtZmxvd2l0aC1wbHVnaW4tdmVyc2lvbiI6IjIuMC4wIiwieC1mbG93aXRoLWluc3RhbGwtc291cmNlIjoiY3Vyc29yLWRlZXBsaW5rIn19",
+            "oneClick": "cursor://anysphere.cursor-deeplink/mcp/install?name=flowith&config=eyJ1cmwiOiJodHRwczovL2FnZW50LmZsb3dpdGguaW8vbWNwIiwiaGVhZGVycyI6eyJ4LWZsb3dpdGgtbWNwLWNsaWVudCI6ImN1cnNvciIsIngtZmxvd2l0aC1wbHVnaW4tdmVyc2lvbiI6IjIuMC4xIiwieC1mbG93aXRoLWluc3RhbGwtc291cmNlIjoiY3Vyc29yLWRlZXBsaW5rIn19",
+            "webLink": "https://cursor.com/install-mcp?name=flowith&config=eyJ1cmwiOiJodHRwczovL2FnZW50LmZsb3dpdGguaW8vbWNwIiwiaGVhZGVycyI6eyJ4LWZsb3dpdGgtbWNwLWNsaWVudCI6ImN1cnNvciIsIngtZmxvd2l0aC1wbHVnaW4tdmVyc2lvbiI6IjIuMC4xIiwieC1mbG93aXRoLWluc3RhbGwtc291cmNlIjoiY3Vyc29yLWRlZXBsaW5rIn19",
             "thenNew": "a new chat once the server shows as connected"
           },
           "cli": {
@@ -98,7 +98,7 @@
                 "url": "https://agent.flowith.io/mcp",
                 "headers": {
                   "x-flowith-mcp-client": "workbuddy",
-                  "x-flowith-plugin-version": "2.0.0",
+                  "x-flowith-plugin-version": "2.0.1",
                   "x-flowith-install-source": "workbuddy-mcp-json"
                 }
               }
@@ -180,8 +180,8 @@
           "copyPrompt": "Install Flowith Next in Cursor by following https://next-gen.flowith.io/agent, then show me what I can make with it.",
           "mcp": {
             "commands": [],
-            "oneClick": "cursor://anysphere.cursor-deeplink/mcp/install?name=flowith-next&config=eyJ1cmwiOiJodHRwczovL2Zsb3dpdGgtY3JlYXRvci1hZ2VudC1wcmV2aWV3LmZseS5kZXYvbWNwIiwiaGVhZGVycyI6eyJ4LWZsb3dpdGgtbWNwLWNsaWVudCI6ImN1cnNvciIsIngtZmxvd2l0aC1wbHVnaW4tdmVyc2lvbiI6IjIuMC4wIiwieC1mbG93aXRoLWluc3RhbGwtc291cmNlIjoiY3Vyc29yLWRlZXBsaW5rIn19",
-            "webLink": "https://cursor.com/install-mcp?name=flowith-next&config=eyJ1cmwiOiJodHRwczovL2Zsb3dpdGgtY3JlYXRvci1hZ2VudC1wcmV2aWV3LmZseS5kZXYvbWNwIiwiaGVhZGVycyI6eyJ4LWZsb3dpdGgtbWNwLWNsaWVudCI6ImN1cnNvciIsIngtZmxvd2l0aC1wbHVnaW4tdmVyc2lvbiI6IjIuMC4wIiwieC1mbG93aXRoLWluc3RhbGwtc291cmNlIjoiY3Vyc29yLWRlZXBsaW5rIn19",
+            "oneClick": "cursor://anysphere.cursor-deeplink/mcp/install?name=flowith-next&config=eyJ1cmwiOiJodHRwczovL2Zsb3dpdGgtY3JlYXRvci1hZ2VudC1wcmV2aWV3LmZseS5kZXYvbWNwIiwiaGVhZGVycyI6eyJ4LWZsb3dpdGgtbWNwLWNsaWVudCI6ImN1cnNvciIsIngtZmxvd2l0aC1wbHVnaW4tdmVyc2lvbiI6IjIuMC4xIiwieC1mbG93aXRoLWluc3RhbGwtc291cmNlIjoiY3Vyc29yLWRlZXBsaW5rIn19",
+            "webLink": "https://cursor.com/install-mcp?name=flowith-next&config=eyJ1cmwiOiJodHRwczovL2Zsb3dpdGgtY3JlYXRvci1hZ2VudC1wcmV2aWV3LmZseS5kZXYvbWNwIiwiaGVhZGVycyI6eyJ4LWZsb3dpdGgtbWNwLWNsaWVudCI6ImN1cnNvciIsIngtZmxvd2l0aC1wbHVnaW4tdmVyc2lvbiI6IjIuMC4xIiwieC1mbG93aXRoLWluc3RhbGwtc291cmNlIjoiY3Vyc29yLWRlZXBsaW5rIn19",
             "thenNew": "a new chat once the server shows as connected"
           },
           "cli": {
@@ -217,7 +217,7 @@
                 "url": "https://flowith-creator-agent-preview.fly.dev/mcp",
                 "headers": {
                   "x-flowith-mcp-client": "workbuddy",
-                  "x-flowith-plugin-version": "2.0.0",
+                  "x-flowith-plugin-version": "2.0.1",
                   "x-flowith-install-source": "workbuddy-mcp-json"
                 }
               }

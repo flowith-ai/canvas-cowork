@@ -72,6 +72,15 @@ export const OWNED_DIRS = ["plugins"];
 export const DOCS = ["README.md", "INSTALL.md"];
 
 const json = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
+/**
+ * The MCP server's name inside the Claude Code plugins, the same for every channel. Claude Code names a plugin's tools
+ * "plugin:<plugin>:<server> — <tool title>" and offers "Yes, and don't ask again" only while that name is under 48
+ * columns (2.1.332); with the plugin's id twice ("plugin:flowith-next:flowith-next", 32), every title over 12 characters
+ * lost it, so each wait for the user (get_task) asked again (作品模板闭环 戊, 11-28). With "flowith", titles up to 17
+ * characters keep it on Flowith Next and up to 22 on flowith.io.
+ */
+const CLAUDE_CODE_SERVER = "flowith";
+
 const githubUrl = (m: Manifest) => `https://github.com/${m.repository.github}`;
 const treeUrl = (m: Manifest, path: string) => `${githubUrl(m)}/tree/${m.repository.branch}/${path}`;
 const blobUrl = (m: Manifest, path: string) => `${githubUrl(m)}/blob/${m.repository.branch}/${path}`;
@@ -187,7 +196,7 @@ function claudeCodePackage(m: Manifest, channel: Channel, skills: Record<string,
 			keywords: m.keywords,
 		}),
 		".mcp.json": json({
-			mcpServers: { [channel.id]: { type: "http", url: channel.mcpUrl, headers: headersFor(m, "claude-code", "claude-code-plugin") } },
+			mcpServers: { [CLAUDE_CODE_SERVER]: { type: "http", url: channel.mcpUrl, headers: headersFor(m, "claude-code", "claude-code-plugin") } },
 		}),
 		...skills,
 	};
@@ -388,7 +397,7 @@ const fence = (lines: string[]) => ["```bash", ...lines, "```"].join("\n");
 
 /** Claude Code's sign-in steps for a hosted channel (INSTALL.md). */
 function claudeCodeSteps(channel: Channel): string[] {
-	const tool = (name: string) => `mcp__plugin_${channel.id}_${channel.id}__${name}`;
+	const tool = (name: string) => `mcp__plugin_${channel.id}_${CLAUDE_CODE_SERVER}__${name}`;
 	return [
 		"Then sign in and work in this same session, in exactly this order. Don't run `claude mcp login`: from your shell it stops at once (it needs a terminal). A plugin's server loads only after `/reload-plugins`, which only the user can type, and your background wait is what wakes you up after each thing the user does:",
 		"",
@@ -397,7 +406,7 @@ function claudeCodeSteps(channel: Channel): string[] {
 		"   a. Call Bash with run_in_background: true and the command `sleep 10`. Never skip it: the user's /reload-plugins doesn't wake you up, and this wait is the only thing that brings you back after it (kept short, so they don't sit waiting once they have typed it).",
 		`   b. Tell the user in one line: "Type /reload-plugins and I'll open the sign-in page."`,
 		`2. When the wait ends, look for ${tool("authenticate")} (ToolSearch "select:${tool("authenticate")}"). Not there yet: call Bash again with run_in_background: true and \`sleep 10\`, and write nothing at all (up to 5 minutes).`,
-		`3. Call it. Then open the link it answers and wait, in ONE Bash call in the background (10-minute timeout; one approval, not two), and tell the user in one line: "I've opened Flowith in your browser to connect it. If it asks, sign in and click Allow; I'll carry on by myself." The call (on Linux xdg-open, on Windows start, in place of open) ends by itself once they are connected, usually at once since they copied the install line on Flowith: open '<link>'; until claude mcp list 2>/dev/null | grep -q "plugin:${channel.id}:${channel.id}.*Connected"; do sleep 5; done`,
+		`3. Call it. Then open the link it answers and wait, in ONE Bash call in the background (10-minute timeout; one approval, not two), and tell the user in one line: "I've opened Flowith in your browser to connect it. If it asks, sign in and click Allow; I'll carry on by myself." The call (on Linux xdg-open, on Windows start, in place of open) ends by itself once they are connected, usually at once since they copied the install line on Flowith: open '<link>'; until claude mcp list 2>/dev/null | grep -q "plugin:${channel.id}:${CLAUDE_CODE_SERVER}.*Connected"; do sleep 5; done`,
 		"4. When it ends, look for list_canvases (not there yet: sleep 5 and look again).",
 		"5. A task: call list_canvases, then do it right here (no new session is needed). No task: call only get_started (it reads the account, so it is the check) and offer its starters.",
 		"Between these steps write nothing to the user: no \"waiting\" lines when a wait ends. They see the two lines above, then their result.",

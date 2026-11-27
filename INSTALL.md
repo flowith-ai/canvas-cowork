@@ -82,12 +82,12 @@ Then sign in and work in this same session, in exactly this order. Don't run `cl
 1. Right after the install, in the same reply, do both:
    a. Call Bash with run_in_background: true and the command `sleep 10`. Never skip it: the user's /reload-plugins doesn't wake you up, and this wait is the only thing that brings you back after it (kept short, so they don't sit waiting once they have typed it).
    b. Tell the user in one line: "Type /reload-plugins and I'll open the sign-in page."
-2. When the wait ends, look for mcp__plugin_flowith-next_flowith-next__authenticate (ToolSearch "select:mcp__plugin_flowith-next_flowith-next__authenticate"). Not there yet: call Bash again with run_in_background: true and `sleep 10`, and write nothing at all (up to 5 minutes).
-3. Call it. Then open the link it answers and wait, in ONE Bash call in the background (10-minute timeout; one approval, not two), and tell the user in one line: "I've opened Flowith in your browser to connect it. If it asks, sign in and click Allow; I'll carry on by myself." The call (on Linux xdg-open, on Windows start, in place of open) ends by itself once they are connected, usually at once since they copied the install line on Flowith: open '<link>'; until claude mcp list 2>/dev/null | grep -q "plugin:flowith-next:flowith-next.*Connected"; do sleep 5; done
+2. When the wait ends, look for mcp__plugin_flowith-next_flowith__authenticate (ToolSearch "select:mcp__plugin_flowith-next_flowith__authenticate"). Not there yet: call Bash again with run_in_background: true and `sleep 10`, and write nothing at all (up to 5 minutes).
+3. Call it. Then open the link it answers and wait, in ONE Bash call in the background (10-minute timeout; one approval, not two), and tell the user in one line: "I've opened Flowith in your browser to connect it. If it asks, sign in and click Allow; I'll carry on by myself." The call (on Linux xdg-open, on Windows start, in place of open) ends by itself once they are connected, usually at once since they copied the install line on Flowith: open '<link>'; until claude mcp list 2>/dev/null | grep -q "plugin:flowith-next:flowith.*Connected"; do sleep 5; done
 4. When it ends, look for list_canvases (not there yet: sleep 5 and look again).
 5. A task: call list_canvases, then do it right here (no new session is needed). No task: call only get_started (it reads the account, so it is the check) and offer its starters.
 Between these steps write nothing to the user: no "waiting" lines when a wait ends. They see the two lines above, then their result.
-Only if the wait ran out without connecting (the page couldn't hand the sign-in back to Claude Code): ask the user for that page's address and pass it to mcp__plugin_flowith-next_flowith-next__complete_authentication. Don't tell them about this beforehand.
+Only if the wait ran out without connecting (the page couldn't hand the sign-in back to Claude Code): ask the user for that page's address and pass it to mcp__plugin_flowith-next_flowith__complete_authentication. Don't tell them about this beforehand.
 ```
 
 ### Codex
@@ -111,7 +111,7 @@ In the Codex app, once the marketplace is added, `codex://plugins/install/flowit
 Open this install link (`open '<link>'` on macOS, `xdg-open` on Linux, `start` on Windows). Cursor asks the user to confirm the install, then shows that the server needs sign-in: the user clicks Connect and next-gen.flowith.io opens (Cursor's desktop sign-in comes back to localhost). When the user copied the install line on next-gen.flowith.io in the last 10 minutes, the page connects at once; otherwise they sign in if asked and click **Allow** once.
 
 ```text
-cursor://anysphere.cursor-deeplink/mcp/install?name=flowith-next&config=eyJ1cmwiOiJodHRwczovL2Zsb3dpdGgtY3JlYXRvci1hZ2VudC1wcmV2aWV3LmZseS5kZXYvbWNwIiwiaGVhZGVycyI6eyJ4LWZsb3dpdGgtbWNwLWNsaWVudCI6ImN1cnNvciIsIngtZmxvd2l0aC1wbHVnaW4tdmVyc2lvbiI6IjIuMC4wIiwieC1mbG93aXRoLWluc3RhbGwtc291cmNlIjoiY3Vyc29yLWRlZXBsaW5rIn19
+cursor://anysphere.cursor-deeplink/mcp/install?name=flowith-next&config=eyJ1cmwiOiJodHRwczovL2Zsb3dpdGgtY3JlYXRvci1hZ2VudC1wcmV2aWV3LmZseS5kZXYvbWNwIiwiaGVhZGVycyI6eyJ4LWZsb3dpdGgtbWNwLWNsaWVudCI6ImN1cnNvciIsIngtZmxvd2l0aC1wbHVnaW4tdmVyc2lvbiI6IjIuMC4xIiwieC1mbG93aXRoLWluc3RhbGwtc291cmNlIjoiY3Vyc29yLWRlZXBsaW5rIn19
 ```
 
 Where links can't open, add only this entry under `mcpServers` in `~/.cursor/mcp.json` and keep every other server as it is ([the file](https://github.com/flowith-ai/canvas-cowork/blob/main/plugins/cursor/flowith-next/mcp.json)); the user signs in from Cursor's MCP settings:
@@ -122,7 +122,7 @@ Where links can't open, add only this entry under `mcpServers` in `~/.cursor/mcp
     "url": "https://flowith-creator-agent-preview.fly.dev/mcp",
     "headers": {
       "x-flowith-mcp-client": "cursor",
-      "x-flowith-plugin-version": "2.0.0",
+      "x-flowith-plugin-version": "2.0.1",
       "x-flowith-install-source": "cursor-mcp-json"
     }
   }
@@ -148,7 +148,7 @@ WorkBuddy has no install command. Add only this entry under `mcpServers` in `~/.
     "url": "https://flowith-creator-agent-preview.fly.dev/mcp",
     "headers": {
       "x-flowith-mcp-client": "workbuddy",
-      "x-flowith-plugin-version": "2.0.0",
+      "x-flowith-plugin-version": "2.0.1",
       "x-flowith-install-source": "workbuddy-mcp-json"
     }
   }

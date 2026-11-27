@@ -1,11 +1,11 @@
 {
   "mcpServers": {
-    "flowith-next": {
+    "flowith": {
       "type": "http",
       "url": "https://flowith-creator-agent-preview.fly.dev/mcp",
       "headers": {
         "x-flowith-mcp-client": "claude-code",
-        "x-flowith-plugin-version": "2.0.0",
+        "x-flowith-plugin-version": "2.0.1",
         "x-flowith-install-source": "claude-code-plugin"
       }
     }

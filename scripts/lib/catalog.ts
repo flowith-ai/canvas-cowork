@@ -5,7 +5,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
-import { CliError } from "./http.ts";
+import { type Api, CliError, worker } from "./http.ts";
 import { home } from "./session.ts";
 
 export type Kind = "text" | "image" | "video" | "audio";
@@ -37,6 +37,13 @@ export interface Model {
 	referenceAssetLimits?: { total: number; image: number; audio: number; video: number };
 	consume_num?: number;
 	estimatedPrice?: number;
+	/**
+	 * A picture's list price at each size it offers, as its route charges it (flo-workers resolveImageBillingBasePrice),
+	 * `default` for a request that names none.
+	 */
+	estimatedPriceBySize?: Record<string, number>;
+	/** What 1, 2, … reference pictures add to one picture, in credits (each entry the whole addition). */
+	estimatedReferencePrices?: number[];
 	/** Token-billed pictures: the price of one 1024×1024 picture at each quality. */
 	estimatedBreakdown?: Array<{ quality: string; price: number }>;
 	estimatedPricePer5s?: number;
@@ -193,21 +200,29 @@ export function videoParams(
 	};
 }
 
-/** Credits a run is expected to cost, from the catalogue (1 credit = $0.001). */
-/** Seedream 5.5's list price in credits (flo-workers SEEDREAM_55_PRICING): by output tier, plus each input picture. */
-const SEEDREAM_55_LIST = { low: 20, high: 35, input: 8 };
+/**
+ * A picture's list price as its route charges this request, where the catalogue publishes it per size and reference
+ * picture (Seedream 5.5's launch price included): the size named when the model makes it, else its default, plus what
+ * the pictures add. Undefined for a model without that table (token-billed GPT Image, priced per quality).
+ */
+function pictureAtRequest(m: Model, size: string | undefined, refs = 0): number | undefined {
+	const table = m.estimatedPriceBySize;
+	if (!table) return undefined;
+	const named = size ? Object.keys(table).find((k) => k !== "default" && k.toLowerCase() === size.toLowerCase()) : undefined;
+	const base = table[named ?? "default"];
+	if (typeof base !== "number" || !Number.isFinite(base)) return undefined;
+	const added = m.estimatedReferencePrices;
+	return base + (refs > 0 && added?.length ? (added[Math.min(refs, added.length) - 1] ?? 0) : 0);
+}
 
+/** Credits a run is expected to cost at list price, from the catalogue (1 credit = $0.001); memberRates gives the user's rate. */
 export function estimateCredits(
 	m: Model,
 	p: { duration?: string; resolution?: string; audio?: boolean; chars?: number; quality?: string; pixels?: string; size?: string; refs?: number } = {},
 ): number | undefined {
-	if (m.media === "image" && m.title === "Seedream 5.5") {
-		// 1K / 1.5K are the low tier; the default (2K) the high one. A launch discount applies until its end date.
-		const discounted = m.discount && (!m.launchCampaignUntil || Date.parse(String(m.launchCampaignUntil)) > Date.now()) ? 1 - m.discount / 100 : 1;
-		const tier = p.size && /^1(\.5)?k$/i.test(p.size) ? SEEDREAM_55_LIST.low : SEEDREAM_55_LIST.high;
-		return Math.round((tier + (p.refs ?? 0) * SEEDREAM_55_LIST.input) * discounted * 10) / 10;
-	}
 	if (m.media === "image") {
+		const exact = pictureAtRequest(m, p.size, p.refs);
+		if (exact !== undefined) return exact;
 		// Token-billed pictures (GPT Image): the quality's 1024² price, scaled by the picture's area.
 		const byQuality = p.quality ? m.estimatedBreakdown?.find((b) => b.quality === p.quality)?.price : undefined;
 		if (byQuality !== undefined) {
@@ -222,6 +237,32 @@ export function estimateCredits(
 		return m.audioPricing.credits;
 	}
 	return undefined;
+}
+
+/** A model's share of its list price, keyed by model id as /models lists it; a model absent pays the list price. */
+export type MemberRates = Record<string, number>;
+
+/**
+ * What the user pays on each discounted model on this canvas, as the worker charges it: their own rates on their
+ * canvas (GET /user/paid-member `modelRates`: member prices and their plan's model discounts, Nano Banana 2, GPT 6 …),
+ * on a team's canvas the team's (GET /team `model_rates`, while its Studio plan is open; otherwise the list price).
+ * Undefined when the worker can't say: the caller then quotes the list price and says so.
+ */
+export async function memberRates(api: Api, teamId?: string): Promise<MemberRates | undefined> {
+	try {
+		const rates = teamId
+			? (await worker<{ teams?: Array<{ id?: string; model_rates?: unknown }> }>(api, "/team")).teams?.find((t) => t.id === teamId)?.model_rates ?? {}
+			: (await worker<{ modelRates?: unknown }>(api, "/user/paid-member")).modelRates;
+		if (!rates || typeof rates !== "object") return undefined;
+		return Object.fromEntries(Object.entries(rates).filter((e): e is [string, number] => typeof e[1] === "number" && e[1] > 0 && e[1] < 1));
+	} catch {
+		return undefined;
+	}
+}
+
+/** A list price at `rate`, rounded to the thousandth of a credit the charge is kept in (flo-workers applyPlanMemberPriceRate). */
+export function atRate(credits: number, rate = 1): number {
+	return rate === 1 ? credits : Math.max(0.001, Math.round(credits * 1000 * rate) / 1000);
 }
 
 /** One line per model for `models`. */

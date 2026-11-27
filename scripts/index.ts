@@ -17,9 +17,11 @@ import {
 	type Catalog,
 	type Kind,
 	AUDIO_MODELS,
+	atRate,
 	defaultModel,
 	estimateCredits,
 	fetchCatalog,
+	memberRates,
 	modelLine,
 	modelsOf,
 	resolveModel,
@@ -183,17 +185,17 @@ async function context(a: Args): Promise<Ctx> {
 }
 
 /** The canvas a command works on: --canvas, $FLOWITH_CANVAS, or the active one. */
-async function canvasOf(ctx: Ctx, a: Args, opts: { create?: string } = {}): Promise<{ id: string; title: string | null; created?: boolean; team?: boolean }> {
+async function canvasOf(ctx: Ctx, a: Args, opts: { create?: string } = {}): Promise<{ id: string; title: string | null; created?: boolean; team?: boolean; teamId?: string }> {
 	const ref = flag(a, "canvas") ?? process.env.FLOWITH_CANVAS;
 	if (ref) {
 		const found = await resolveCanvas(ctx.api, ctx.userId, ref, ctx.site);
 		const c = found.team_id === undefined ? await getCanvas(ctx.api, found.id) : found;
-		return { id: c.id, title: c.title, team: !!c.team_id };
+		return { id: c.id, title: c.title, team: !!c.team_id, teamId: c.team_id ?? undefined };
 	}
 	if (ctx.session.canvas) {
 		try {
 			const c = await getCanvas(ctx.api, ctx.session.canvas);
-			return { id: c.id, title: c.title, team: !!c.team_id };
+			return { id: c.id, title: c.title, team: !!c.team_id, teamId: c.team_id ?? undefined };
 		} catch (e) {
 			if (!(e instanceof CliError && e.code === "NOT_FOUND")) throw e;
 		}
@@ -628,6 +630,8 @@ async function cmdImage(a: Args, base?: { source: Card }) {
 	const wanted = flags(a, "model");
 	const models = (wanted.length ? wanted : [undefined]).map((w) => resolveModel(catalog, "image", w));
 	const modelId = models.map((m) => m.id).join(", ");
+	// Asked alongside the references: what this canvas's payer pays on each model (their member discounts).
+	const rates = memberRates(ctx.api, canvas.teamId);
 	const extraRefs = await toRefs(ctx, canvas.id, cards, flags(a, "ref"), dryRun);
 	const sourceRef: Ref[] = base ? [{ url: base.source.url!, name: base.source.title ?? base.source.ref, media: "image", card: base.source }] : [];
 	const refs = [...sourceRef, ...extraRefs];
@@ -645,17 +649,23 @@ async function cmdImage(a: Args, base?: { source: Card }) {
 		}))),
 	);
 	const built = jobs.map((j) => imageRequest(j, "00000000-0000-0000-0000-000000000000", canvas.id));
+	const rate = await rates;
 	const estimates = jobs.map((j, i) => {
 		const body = built[i]!.body as { quality?: string; aspect_ratio?: string; image_size?: string };
 		const pixels = /^\d+x\d+$/.test(body.aspect_ratio ?? "") ? body.aspect_ratio : undefined;
-		return estimateCredits(j.model, { quality: body.quality, pixels, size: body.image_size, refs: j.refs.length });
+		const list = estimateCredits(j.model, { quality: body.quality, pixels, size: body.image_size, refs: j.refs.length });
+		return list === undefined ? undefined : atRate(list, rate?.[j.modelId]);
 	});
 	const credits = estimates.some((estimate) => estimate === undefined)
 		? null
-		: Math.round(estimates.reduce<number>((sum, estimate) => sum + (estimate ?? 0), 0));
+		: Math.round(estimates.reduce<number>((sum, estimate) => sum + (estimate ?? 0), 0) * 1000) / 1000;
 	const pricing = {
 		estimatedCredits: credits,
-		...(credits === null ? { estimateNote: "The catalogue has no price for at least one image request. Ask the user before running this batch." } : {}),
+		...(credits === null
+			? { estimateNote: "The catalogue has no price for at least one image request. Ask the user before running this batch." }
+			: !rate
+				? { estimateNote: "At list price: the user's member discounts couldn't be read, so the charge may be lower." }
+				: {}),
 	};
 	if (has(a, "dry-run")) return out({ model: modelId, jobs: jobs.length, ...pricing, requests: built.map((b) => b.body) });
 	const title = flag(a, "title");

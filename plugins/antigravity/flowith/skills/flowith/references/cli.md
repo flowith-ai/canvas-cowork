@@ -58,9 +58,10 @@ exact title also works. Commands print JSON (`--json` for one line). Errors exit
   that only change the canvas have no dry run and say so). Ask the user before anything over ~1,000
   credits **and whenever `estimatedCredits` is `null`** (priced only when made: a source clip of unknown
   length, Gemini Omni editing a clip). A clip's estimate is the worker's own price for that very request;
-  a picture's comes from the catalogue. Finished pictures and clips report `chargedCredits` (the
-  canvas's own charge, refunds included), or `null` with a `chargedNote` when it can't be tied to the
-  request. `cw spent` totals a canvas. `NO_CREDITS` / `MODEL_LOCKED`: stop and tell the user.
+  a picture's is the catalogue's price for its size and reference pictures, at the user's member rate.
+  Finished pictures and clips report `chargedCredits` (the canvas's own charge, refunds included), or
+  `null` with a `chargedNote` when it can't be tied to the request. `cw spent` totals a canvas.
+  `NO_CREDITS` / `MODEL_LOCKED`: stop and tell the user.
 - **Long jobs**: run video commands with a long shell timeout (≥ 600 s) or in the background, or pass
   `--no-wait` and later `cw wait <ref>`. Keep the returned refs, and inspect the canvas before resending
   a browser operation that could have started without a result reaching you.

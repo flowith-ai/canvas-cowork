@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { estimateCredits, imageSizing, resolveModel, videoParams, type Catalog } from "../lib/catalog.ts";
+import { atRate, estimateCredits, imageSizing, resolveModel, videoParams, type Catalog } from "../lib/catalog.ts";
 import { cardsFrom, findCard, readableError, type FlowNodeRow } from "../lib/desk.ts";
 import { imageRequest, nameReferences, resultOf, titleFrom, videoRequest, type Ref } from "../lib/generate.ts";
 import { imageSize } from "../lib/media.ts";
@@ -48,12 +48,21 @@ describe("models", () => {
 		expect(estimateCredits(m, { quality: "low", pixels: "1024x1024" })).toBe(20);
 		expect(estimateCredits(m, { quality: "max", pixels: "2048x2048" })).toBe(696);
 	});
-	test("Seedream 5.5 is priced by tier and input pictures, with its launch discount", () => {
-		const m = { media: "image", title: "Seedream 5.5", discount: 40, launchCampaignUntil: "2999-01-01T00:00:00Z" };
+	test("pictures priced per size and reference are priced as the catalogue publishes them (Seedream 5.5, prod 2026-11-26)", () => {
+		const m = {
+			media: "image", title: "Seedream 5.5", estimatedPrice: 12,
+			estimatedPriceBySize: { default: 21, "2k": 21, "1.5k": 12, "1k": 12 }, estimatedReferencePrices: [4.8, 9.6, 14.4],
+		};
 		expect(estimateCredits(m)).toBe(21);
 		expect(estimateCredits(m, { refs: 1 })).toBe(25.8);
-		expect(estimateCredits(m, { size: "1k" })).toBe(12);
-		expect(estimateCredits({ ...m, launchCampaignUntil: "2000-01-01T00:00:00Z" })).toBe(35);
+		expect(estimateCredits(m, { size: "1K" })).toBe(12);
+		// More pictures than the table lists add its last entry (the route's cap).
+		expect(estimateCredits(m, { refs: 5 })).toBe(21 + 14.4);
+	});
+	test("a member rate is kept to the thousandth of a credit, as the charge is", () => {
+		expect(atRate(135, 0.8)).toBe(108);
+		expect(atRate(25.8, 0.9)).toBe(23.22);
+		expect(atRate(45)).toBe(45);
 	});
 });
 

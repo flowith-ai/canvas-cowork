@@ -413,7 +413,13 @@ function mcpSection(m: Manifest, channel: Channel): string {
 		const install = mcpInstall(m, host.id, channel);
 		parts.push(`### ${host.displayName}\n`);
 		if (host.id === "claude-code") {
-			parts.push(fence([install.oneCall!]), "", "Run it as one Bash call: one approval.", "", ...claudeCodeSteps(channel));
+			parts.push(
+				fence([install.oneCall!]),
+				"",
+				`Run it as one Bash call: one approval. The plugin holds only the address of Flowith's remote MCP server (\`.mcp.json\`) and two skills (\`flowith\`, \`get-started\`): no hooks, commands or code that runs on this computer. It is at ${treeUrl(m, `plugins/claude-code/${channel.id}`)}.`,
+				"",
+				...claudeCodeSteps(channel),
+			);
 		} else if (host.id === "codex")
 			parts.push(
 				fence([install.oneCall!]),

@@ -28,8 +28,8 @@ Install Flowith Next in this agent by following https://next-gen.flowith.io/agen
 Naming the host also works (`Install Flowith in Codex by following …`). [INSTALL.md](./INSTALL.md) tells the agent how to set itself up; [hosts/install.json](./hosts/install.json) has every prompt, command and link for the website.
 <!-- /generated:prompts -->
 
-The agent installs Flowith for itself (only for the app you are using), you click **Allow** once on
-flowith.io, and it goes on to your task.
+The agent installs Flowith for itself (only for the app you are using) and goes on to your task. Copied
+from flowith.io, the line connects your account by itself; otherwise you click **Allow** once there.
 
 ## Install by hand
 
@@ -40,12 +40,13 @@ flowith.io, and it goes on to your task.
 - Codex: `npx -y skills add flowith-ai/canvas-cowork -g -a codex -y`
 - Cursor: `npx -y skills add flowith-ai/canvas-cowork -g -a cursor -y`
 - Antigravity: `npx -y skills add flowith-ai/canvas-cowork -g -a antigravity -y`
+- DeepSeek Harness: `npx -y skills add flowith-ai/canvas-cowork -g -a codex -y`
 
 Then `node scripts/index.ts login` from the skill's folder (your agent does this for you): type the code it prints on the Flowith page and click **Allow**, once.
 
 ### Hosted MCP (coming soon to flowith.io)
 
-No local runtime: the agent gets Flowith's tools from a hosted server and you click **Allow** once on flowith.io. It is live on Flowith Next (next-gen.flowith.io) for testing; the Flowith packages turn on when flowith.io ships it.
+No local runtime: the agent gets Flowith's tools from a hosted server, and flowith.io connects it without a click when you copied the line there (one click on **Allow** otherwise). It is live on Flowith Next (next-gen.flowith.io) for testing; the Flowith packages turn on when flowith.io ships it.
 
 | Host | Install |
 |---|---|
@@ -53,6 +54,8 @@ No local runtime: the agent gets Flowith's tools from a hosted server and you cl
 | Codex | `codex plugin marketplace add flowith-ai/canvas-cowork`<br>`codex plugin add flowith-next@flowith`<br>`codex mcp login flowith-next` |
 | Cursor | [Add to Cursor](https://cursor.com/install-mcp?name=flowith-next&config=eyJ1cmwiOiJodHRwczovL2Zsb3dpdGgtY3JlYXRvci1hZ2VudC1wcmV2aWV3LmZseS5kZXYvbWNwIiwiaGVhZGVycyI6eyJ4LWZsb3dpdGgtbWNwLWNsaWVudCI6ImN1cnNvciIsIngtZmxvd2l0aC1wbHVnaW4tdmVyc2lvbiI6IjIuMC4wIiwieC1mbG93aXRoLWluc3RhbGwtc291cmNlIjoiY3Vyc29yLWRlZXBsaW5rIn19) |
 | Antigravity | `agy plugin install https://github.com/flowith-ai/canvas-cowork/tree/main/plugins/antigravity/flowith-next` |
+| WorkBuddy | add the `flowith-next` entry to `~/.workbuddy/mcp.json` (INSTALL.md) |
+| DeepSeek Harness | the skill + CLI below |
 <!-- /generated:install -->
 
 ## The CLI

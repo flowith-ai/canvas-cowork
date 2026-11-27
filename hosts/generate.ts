@@ -32,10 +32,12 @@ export interface Channel {
 }
 
 export interface Host {
-	id: "claude-code" | "codex" | "cursor" | "antigravity";
+	id: "claude-code" | "codex" | "cursor" | "antigravity" | "workbuddy" | "deepseek-harness";
 	displayName: string;
-	/** The agent id `npx skills add -a` takes for this host. */
-	skillsAgent: string;
+	/** The agent id `npx skills add -a` takes for this host; null when the skills CLI doesn't know it. */
+	skillsAgent: string | null;
+	/** Why that id, when it isn't the host's own. */
+	skillsNote?: string;
 }
 
 export interface Manifest {
@@ -267,13 +269,29 @@ function cursorPackage(m: Manifest, channel: Channel): Record<string, string> {
 export interface HostInstall {
 	/** Shell commands, in order, that install and sign in on this host. */
 	commands: string[];
+	/** The same commands as one shell call, for a host that asks for approval per call: one approval, not one each. */
+	oneCall?: string;
 	/** A link the host opens to install in one click, where it has one. */
 	oneClick?: string;
 	/** The same one-click install as an https link, for web pages. */
 	webLink?: string;
 	/** What opens the tools: a new session or thread, or nothing. */
 	thenNew?: string;
+	/** A host whose agent adds the server by writing its MCP config: the file, and the one entry to add under mcpServers. */
+	config?: { path: string; entry: Record<string, unknown> };
+	/** A host that can't sign in to a remote MCP server like this one: it uses the skill + CLI. */
+	cliOnly?: true;
 }
+
+/**
+ * Commands joined into one shell call. `;`, not `&&`: adding a marketplace or plugin that is already there (a second
+ * install) fails harmlessly, and the last command (the sign-in) still runs and gives the call its exit status.
+ */
+const oneCall = (commands: string[]) => commands.join("; ");
+
+/** What a sign-in asks of the user (作品模板闭环 甲): nothing right after a copy on the site, else one click. */
+const signInNote = (site: string) =>
+	`When the user copied the install line on ${site} in the last 10 minutes, the page connects at once; otherwise they sign in if asked and click **Allow** once.`;
 
 export function mcpInstall(m: Manifest, host: Host["id"], channel: Channel): HostInstall {
 	const repo = m.repository.github;
@@ -284,11 +302,13 @@ export function mcpInstall(m: Manifest, host: Host["id"], channel: Channel): Hos
 			// pasted redirect URL only when stdin is a terminal). The agent signs in with the server's `authenticate` tool.
 			return {
 				commands: [`claude plugin marketplace add ${repo}`, `claude plugin install ${plugin}`],
+				oneCall: oneCall([`claude plugin marketplace add ${repo}`, `claude plugin install ${plugin}`]),
 				thenNew: "this session, after the user types `/reload-plugins`",
 			};
 		case "codex":
 			return {
 				commands: [`codex plugin marketplace add ${repo}`, `codex plugin add ${plugin}`, `codex mcp login ${channel.id}`],
+				oneCall: oneCall([`codex plugin marketplace add ${repo}`, `codex plugin add ${plugin}`, `codex mcp login ${channel.id}`]),
 				oneClick: codexInstallLink(m, channel),
 				thenNew: "a new thread",
 			};
@@ -301,10 +321,23 @@ export function mcpInstall(m: Manifest, host: Host["id"], channel: Channel): Hos
 			};
 		case "antigravity":
 			return { commands: [`agy plugin install ${treeUrl(m, packageDir("antigravity", channel))}`], thenNew: "a new conversation" };
+		case "workbuddy":
+			// WorkBuddy (Tencent) has no install command or link: its MCP servers live in ~/.workbuddy/mcp.json (插件 → MCP 服务器 →
+			// 配置 MCP edits the same file). The entry is the CodeBuddy family's remote shape; not yet run on a real WorkBuddy.
+			return {
+				commands: [],
+				config: { path: "~/.workbuddy/mcp.json", entry: { type: "http", url: channel.mcpUrl, headers: headersFor(m, "workbuddy", "workbuddy-mcp-json") } },
+				thenNew: "a new conversation once WorkBuddy shows the server connected",
+			};
+		case "deepseek-harness":
+			// Its MCP client signs in only its own connector plugins (deepseek-harness packages/mcp/mcp-account): any other server
+			// needs a bearer token pasted into its config, which Flowith never hands out. So the skill + CLI, in this conversation.
+			return { commands: [], cliOnly: true, thenNew: "this conversation" };
 	}
 }
 
-export const cliInstall = (m: Manifest, host: Host) => `npx -y skills add ${m.repository.github} -g -a ${host.skillsAgent} -y`;
+/** The skills CLI's install for this host, or null when the CLI doesn't know it (the CLI then runs with no install). */
+export const cliInstall = (m: Manifest, host: Host) => (host.skillsAgent ? `npx -y skills add ${m.repository.github} -g -a ${host.skillsAgent} -y` : null);
 
 /** The address a channel's copy prompts name: its /agent address once that serves the guide, else INSTALL.md itself. */
 export const promptGuide = (m: Manifest, channel: Channel) => (channel.installUrlLive === false ? m.installGuide : channel.installUrl);
@@ -341,7 +374,7 @@ function installJson(m: Manifest): string {
 						displayName: host.displayName,
 						copyPrompt: copyPrompt(m, channel, host),
 						mcp: mcpInstall(m, host.id, channel),
-						cli: { commands: [cliInstall(m, host)] },
+						cli: { commands: [cliInstall(m, host) ?? `npx -y github:${m.repository.github} login`] },
 					},
 				]),
 			),
@@ -364,11 +397,11 @@ function claudeCodeSteps(channel: Channel): string[] {
 		"   a. Call Bash with run_in_background: true and the command `sleep 25`. Never skip it: the user's /reload-plugins doesn't wake you up, and this wait is the only thing that brings you back after it.",
 		`   b. Tell the user in one line: "Type /reload-plugins and I'll open the sign-in page."`,
 		`2. When the wait ends, look for ${tool("authenticate")} (ToolSearch "select:${tool("authenticate")}"). Not there yet: call Bash again with run_in_background: true and \`sleep 20\`, and write nothing at all (up to 5 minutes).`,
-		`3. Call it. Open the link it answers for the user (open '<link>' on macOS, xdg-open on Linux, start on Windows) and tell them in one line: "I've opened the sign-in page: click Allow there (sign up first if you're new), and I'll carry on when you're done." Then run this one command in the background (10-minute timeout); it ends by itself once they have clicked Allow: until claude mcp list 2>/dev/null | grep -q "plugin:${channel.id}:${channel.id}.*Connected"; do sleep 5; done`,
+		`3. Call it. Then open the link it answers and wait, in ONE Bash call in the background (10-minute timeout; one approval, not two), and tell the user in one line: "I've opened Flowith in your browser to connect it. If it asks, sign in and click Allow; I'll carry on by myself." The call (on Linux xdg-open, on Windows start, in place of open) ends by itself once they are connected, usually at once since they copied the install line on Flowith: open '<link>'; until claude mcp list 2>/dev/null | grep -q "plugin:${channel.id}:${channel.id}.*Connected"; do sleep 5; done`,
 		"4. When it ends, look for list_canvases (not there yet: sleep 5 and look again).",
 		"5. Call list_canvases, then do the user's task right here: no new session is needed.",
 		"Between these steps write nothing to the user: no \"waiting\" lines when a wait ends. They see the two lines above, then their result.",
-		`If the page after Allow couldn't reach Claude Code: ask the user for that page's address and pass it to ${tool("complete_authentication")}.`,
+		`If the page couldn't hand the sign-in back to Claude Code: ask the user for that page's address and pass it to ${tool("complete_authentication")}.`,
 		"```",
 	];
 }
@@ -380,12 +413,12 @@ function mcpSection(m: Manifest, channel: Channel): string {
 		const install = mcpInstall(m, host.id, channel);
 		parts.push(`### ${host.displayName}\n`);
 		if (host.id === "claude-code") {
-			parts.push(fence(install.commands), "", ...claudeCodeSteps(channel));
+			parts.push(fence([install.oneCall!]), "", "Run it as one Bash call: one approval.", "", ...claudeCodeSteps(channel));
 		} else if (host.id === "codex")
 			parts.push(
-				fence(install.commands),
+				fence([install.oneCall!]),
 				"",
-				`Codex's sandbox has no network and can't write to Codex's own folder, and these commands need both: run each with escalated permissions (\`sandbox_permissions: "require_escalated"\` and a short reason such as "Install ${channel.displayName}") so the user approves it. If Codex rejects escalation without asking the user, tell them in one line: "Type /permissions, choose Ask for approval, then say go on." \`mcp login\` opens ${site}; the user clicks **Allow** (run it in the background and wait for it).`,
+				`Run this as **one** shell call, so the user approves once: with escalated permissions (\`sandbox_permissions: "require_escalated"\`, justification "Install ${channel.displayName} and connect your account"; Codex's sandbox has no network and can't write to Codex's own folder) and a timeout of 10 minutes or more: \`mcp login\` opens ${site} and ends by itself once the user is connected. ${signInNote(site)} Never split it into three calls: each would ask the user again. If Codex rejects escalation without asking the user, tell them in one line: "Type /permissions, choose Ask for approval, then say go on."`,
 				"",
 				"The tools load only in a new thread, which you start yourself:",
 				"",
@@ -397,7 +430,7 @@ function mcpSection(m: Manifest, channel: Channel): string {
 			);
 		else if (host.id === "cursor")
 			parts.push(
-				"Open this install link (`open '<link>'` on macOS, `xdg-open` on Linux, `start` on Windows); Cursor asks the user to confirm, then to sign in:",
+				`Open this install link (\`open '<link>'\` on macOS, \`xdg-open\` on Linux, \`start\` on Windows). Cursor asks the user to confirm the install, then shows that the server needs sign-in: the user clicks Connect and ${site} opens (Cursor's desktop sign-in comes back to localhost). ${signInNote(site)}`,
 				"",
 				"```text",
 				install.oneClick!,
@@ -409,12 +442,31 @@ function mcpSection(m: Manifest, channel: Channel): string {
 				JSON.stringify({ [channel.id]: { url: channel.mcpUrl, headers: headersFor(m, "cursor", "cursor-mcp-json") } }, null, 2),
 				"```",
 			);
-		else parts.push(fence(install.commands), "", `Antigravity opens ${site} to sign in when the server first connects. The tools load in ${install.thenNew}.`);
+		else if (host.id === "antigravity")
+			parts.push(
+				fence(install.commands),
+				"",
+				`Antigravity opens ${site} to sign in when the server first connects. Its sign-in comes back through antigravity.google, not this computer, so ${site} always asks the user to click **Allow**, and Antigravity's page then shows a code the user pastes back into Antigravity. The tools load in ${install.thenNew}.`,
+			);
+		else if (host.id === "workbuddy")
+			parts.push(
+				`WorkBuddy has no install command. Add only this entry under \`mcpServers\` in \`${install.config!.path}\` (create the file if it isn't there; keep every other server as it is). WorkBuddy applies the file at once and lists Flowith under 插件 → MCP 服务器; when it shows it needs authorization, the user clicks 授权 there and ${site} opens. ${signInNote(site)} If you can't write that file (it is outside the workspace), tell the user in one line: "In WorkBuddy open 插件 → MCP 服务器 → 配置 MCP and add this entry", with the entry below.`,
+				"",
+				"```json",
+				JSON.stringify({ [channel.id]: install.config!.entry }, null, 2),
+				"```",
+				"",
+				`The tools load in ${install.thenNew}: start it with the user's request, word for word, if you can; otherwise one line: "Start a new conversation and paste: <their task>".`,
+			);
+		else
+			parts.push(
+				`DeepSeek Harness signs in to remote MCP servers only through its own connector plugins, so use the **skill + CLI** below, in ${install.thenNew}: the skill goes into \`~/.agents/skills\`, which it watches, so nothing needs a restart. The CLI's sign-in is the one place a code is typed: the user types the code the CLI prints on ${site} and clicks **Allow**.`,
+			);
 		parts.push("");
 	}
 	parts.push(
 		"### Any other agent that can add a remote MCP server\n",
-		`Add a Streamable HTTP server named \`${channel.id}\` at \`${channel.mcpUrl}\` with the host's own command or settings. It signs in with OAuth on first use (the user clicks **Allow** on ${site}).`,
+		`Add a Streamable HTTP server named \`${channel.id}\` at \`${channel.mcpUrl}\` with the host's own command or settings. It signs in with OAuth on first use, on ${site}. ${signInNote(site)}`,
 	);
 	return parts.join("\n");
 }
@@ -425,7 +477,11 @@ function cliSection(m: Manifest): string {
 		"",
 		"| Host | Command |",
 		"|---|---|",
-		...m.hosts.map((host) => `| ${host.displayName} | \`${cliInstall(m, host)}\` |`),
+		...m.hosts.map((host) => {
+			const command = cliInstall(m, host);
+			const note = host.skillsNote ? ` (${host.skillsNote})` : "";
+			return `| ${host.displayName} | ${command ? `\`${command}\`${note}` : `no skills CLI id: use the hosted MCP above, or the CLI with no install`} |`;
+		}),
 		"",
 		`Another agent with a shell: the same command with its own id from [the skills CLI's list](https://github.com/vercel-labs/skills/blob/main/docs/agents.md) (never without \`-a\`: that installs for every agent on the computer), or run the CLI with no install: \`npx -y github:${m.repository.github} <command>\`.`,
 		"",
@@ -494,7 +550,12 @@ export function docRegions(m: Manifest): Record<string, Record<string, string>> 
 			"|---|---|",
 			...m.hosts.map((host) => {
 				const install = mcpInstall(m, host.id, channel);
-				const cmds = [...install.commands.map((c) => `\`${c}\``), ...(host.id === "claude-code" ? ["then `/reload-plugins`: your agent opens the sign-in page"] : [])].join("<br>");
+				const cmds = [
+					...install.commands.map((c) => `\`${c}\``),
+					...(host.id === "claude-code" ? ["then `/reload-plugins`: your agent opens the sign-in page"] : []),
+					...(install.config ? [`add the \`${channel.id}\` entry to \`${install.config.path}\` (INSTALL.md)`] : []),
+					...(install.cliOnly ? ["the skill + CLI below"] : []),
+				].join("<br>");
 				const link = install.webLink ? `[Add to Cursor](${install.webLink})` : "";
 				return `| ${host.displayName} | ${[cmds, link].filter(Boolean).join("<br>")} |`;
 			}),
@@ -506,19 +567,19 @@ export function docRegions(m: Manifest): Record<string, Record<string, string>> 
 					`### Hosted MCP (recommended)\n`,
 					hostTable(prod),
 					"",
-					"Sign-in happens on first use: the host opens flowith.io and you click **Allow** once.",
+					"Sign-in happens on first use: the host opens flowith.io, which connects at once if you copied the line there; otherwise you click **Allow** once.",
 					"",
 					"### Skill + CLI (hosts that can't add a remote MCP server)\n",
-					m.hosts.map((host) => `- ${host.displayName}: \`${cliInstall(m, host)}\``).join("\n"),
+					m.hosts.flatMap((host) => (cliInstall(m, host) ? [`- ${host.displayName}: \`${cliInstall(m, host)}\``] : [])).join("\n"),
 				]
 			: [
 					`### Skill + CLI (${prodHost} today)\n`,
-					m.hosts.map((host) => `- ${host.displayName}: \`${cliInstall(m, host)}\``).join("\n"),
+					m.hosts.flatMap((host) => (cliInstall(m, host) ? [`- ${host.displayName}: \`${cliInstall(m, host)}\``] : [])).join("\n"),
 					"",
 					"Then `node scripts/index.ts login` from the skill's folder (your agent does this for you): type the code it prints on the Flowith page and click **Allow**, once.",
 					"",
 					`### Hosted MCP (coming soon to ${prodHost})\n`,
-					`No local runtime: the agent gets ${m.displayName}'s tools from a hosted server and you click **Allow** once on flowith.io. It is live on ${next.map((c) => `${c.displayName} (${new URL(c.site).host})`).join(", ")} for testing; the ${prod.displayName} packages turn on when ${prodHost} ships it.`,
+					`No local runtime: the agent gets ${m.displayName}'s tools from a hosted server, and flowith.io connects it without a click when you copied the line there (one click on **Allow** otherwise). It is live on ${next.map((c) => `${c.displayName} (${new URL(c.site).host})`).join(", ")} for testing; the ${prod.displayName} packages turn on when ${prodHost} ships it.`,
 					"",
 					...next.flatMap((c) => [hostTable(c), ""]),
 				]

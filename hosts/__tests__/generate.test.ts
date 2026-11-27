@@ -118,4 +118,35 @@ describe("host packages", () => {
 			expect(readme).not.toContain(`claude plugin install ${prod.id}@`);
 		}
 	});
+
+	// 作品模板闭环 甲: each host asks the user as little as it can.
+	test("Codex installs and signs in with one escalated call, Claude Code installs with one Bash call", () => {
+		for (const channel of m.channels) {
+			const codex = mcpInstall(m, "codex", channel);
+			expect(codex.oneCall).toBe(codex.commands.join("; "));
+			expect(codex.oneCall!.endsWith(`codex mcp login ${channel.id}`)).toBe(true);
+			expect(mcpInstall(m, "claude-code", channel).oneCall).toBe(`claude plugin marketplace add ${m.repository.github}; claude plugin install ${channel.id}@${m.marketplace.name}`);
+		}
+		const install = files.get("INSTALL.md")!;
+		expect(install).toContain("Run this as **one** shell call, so the user approves once");
+		expect(install).toContain("Never split it into three calls");
+		// The sign-in step never tells the user to click Allow before the page asks: a fresh copy needs no click.
+		expect(install).not.toContain("click Allow there (sign up first");
+		expect(install).toContain("If it asks, sign in and click Allow");
+	});
+
+	test("all six hosts the website lists have their way in: WorkBuddy through its mcp.json, DeepSeek Harness through the skill + CLI", () => {
+		expect(m.hosts.map((host) => host.id)).toEqual(["claude-code", "codex", "cursor", "antigravity", "workbuddy", "deepseek-harness"]);
+		const install = files.get("INSTALL.md")!;
+		const json = parse("hosts/install.json");
+		for (const channel of m.channels) {
+			const workbuddy = mcpInstall(m, "workbuddy", channel);
+			expect(workbuddy.config).toEqual({ path: "~/.workbuddy/mcp.json", entry: { type: "http", url: channel.mcpUrl, headers: { "x-flowith-mcp-client": "workbuddy", "x-flowith-plugin-version": m.version, "x-flowith-install-source": "workbuddy-mcp-json" } } });
+			expect(mcpInstall(m, "deepseek-harness", channel).cliOnly).toBe(true);
+			expect(Object.keys(json.channels.find((c: { id: string }) => c.id === channel.id).hosts)).toEqual(m.hosts.map((host) => host.id));
+		}
+		expect(install).toContain("### WorkBuddy");
+		expect(install).toContain("### DeepSeek Harness");
+		expect(install).toContain("`npx -y skills add flowith-ai/canvas-cowork -g -a codex -y` (the skills CLI has no DeepSeek Harness id");
+	});
 });

@@ -47,7 +47,14 @@
     { "id": "claude-code", "displayName": "Claude Code", "skillsAgent": "claude-code" },
     { "id": "codex", "displayName": "Codex", "skillsAgent": "codex" },
     { "id": "cursor", "displayName": "Cursor", "skillsAgent": "cursor" },
-    { "id": "antigravity", "displayName": "Antigravity", "skillsAgent": "antigravity" }
+    { "id": "antigravity", "displayName": "Antigravity", "skillsAgent": "antigravity" },
+    { "id": "workbuddy", "displayName": "WorkBuddy", "skillsAgent": null },
+    {
+      "id": "deepseek-harness",
+      "displayName": "DeepSeek Harness",
+      "skillsAgent": "codex",
+      "skillsNote": "the skills CLI has no DeepSeek Harness id: `codex` installs into ~/.agents/skills, which DeepSeek Harness reads and watches (no restart). Codex-family agents read that folder too."
+    }
   ],
   "starters": {
     "en": [

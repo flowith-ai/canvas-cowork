@@ -28,6 +28,7 @@
               "claude plugin marketplace add flowith-ai/canvas-cowork",
               "claude plugin install flowith@flowith"
             ],
+            "oneCall": "claude plugin marketplace add flowith-ai/canvas-cowork; claude plugin install flowith@flowith",
             "thenNew": "this session, after the user types `/reload-plugins`"
           },
           "cli": {
@@ -45,6 +46,7 @@
               "codex plugin add flowith@flowith",
               "codex mcp login flowith"
             ],
+            "oneCall": "codex plugin marketplace add flowith-ai/canvas-cowork; codex plugin add flowith@flowith; codex mcp login flowith",
             "oneClick": "codex://plugins/install/flowith?marketplace=flowith",
             "thenNew": "a new thread"
           },
@@ -83,6 +85,45 @@
               "npx -y skills add flowith-ai/canvas-cowork -g -a antigravity -y"
             ]
           }
+        },
+        "workbuddy": {
+          "displayName": "WorkBuddy",
+          "copyPrompt": "Install Flowith in WorkBuddy by following https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md, then show me what I can make with it.",
+          "mcp": {
+            "commands": [],
+            "config": {
+              "path": "~/.workbuddy/mcp.json",
+              "entry": {
+                "type": "http",
+                "url": "https://agent.flowith.io/mcp",
+                "headers": {
+                  "x-flowith-mcp-client": "workbuddy",
+                  "x-flowith-plugin-version": "2.0.0",
+                  "x-flowith-install-source": "workbuddy-mcp-json"
+                }
+              }
+            },
+            "thenNew": "a new conversation once WorkBuddy shows the server connected"
+          },
+          "cli": {
+            "commands": [
+              "npx -y github:flowith-ai/canvas-cowork login"
+            ]
+          }
+        },
+        "deepseek-harness": {
+          "displayName": "DeepSeek Harness",
+          "copyPrompt": "Install Flowith in DeepSeek Harness by following https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md, then show me what I can make with it.",
+          "mcp": {
+            "commands": [],
+            "cliOnly": true,
+            "thenNew": "this conversation"
+          },
+          "cli": {
+            "commands": [
+              "npx -y skills add flowith-ai/canvas-cowork -g -a codex -y"
+            ]
+          }
         }
       }
     },
@@ -106,6 +147,7 @@
               "claude plugin marketplace add flowith-ai/canvas-cowork",
               "claude plugin install flowith-next@flowith"
             ],
+            "oneCall": "claude plugin marketplace add flowith-ai/canvas-cowork; claude plugin install flowith-next@flowith",
             "thenNew": "this session, after the user types `/reload-plugins`"
           },
           "cli": {
@@ -123,6 +165,7 @@
               "codex plugin add flowith-next@flowith",
               "codex mcp login flowith-next"
             ],
+            "oneCall": "codex plugin marketplace add flowith-ai/canvas-cowork; codex plugin add flowith-next@flowith; codex mcp login flowith-next",
             "oneClick": "codex://plugins/install/flowith-next?marketplace=flowith",
             "thenNew": "a new thread"
           },
@@ -159,6 +202,45 @@
           "cli": {
             "commands": [
               "npx -y skills add flowith-ai/canvas-cowork -g -a antigravity -y"
+            ]
+          }
+        },
+        "workbuddy": {
+          "displayName": "WorkBuddy",
+          "copyPrompt": "Install Flowith Next in WorkBuddy by following https://next-gen.flowith.io/agent, then show me what I can make with it.",
+          "mcp": {
+            "commands": [],
+            "config": {
+              "path": "~/.workbuddy/mcp.json",
+              "entry": {
+                "type": "http",
+                "url": "https://flowith-creator-agent-preview.fly.dev/mcp",
+                "headers": {
+                  "x-flowith-mcp-client": "workbuddy",
+                  "x-flowith-plugin-version": "2.0.0",
+                  "x-flowith-install-source": "workbuddy-mcp-json"
+                }
+              }
+            },
+            "thenNew": "a new conversation once WorkBuddy shows the server connected"
+          },
+          "cli": {
+            "commands": [
+              "npx -y github:flowith-ai/canvas-cowork login"
+            ]
+          }
+        },
+        "deepseek-harness": {
+          "displayName": "DeepSeek Harness",
+          "copyPrompt": "Install Flowith Next in DeepSeek Harness by following https://next-gen.flowith.io/agent, then show me what I can make with it.",
+          "mcp": {
+            "commands": [],
+            "cliOnly": true,
+            "thenNew": "this conversation"
+          },
+          "cli": {
+            "commands": [
+              "npx -y skills add flowith-ai/canvas-cowork -g -a codex -y"
             ]
           }
         }

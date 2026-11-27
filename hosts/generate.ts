@@ -29,6 +29,10 @@ export interface Channel {
 	live: boolean;
 	internal?: boolean;
 	note?: string;
+	/** Whether this channel's server has the work templates (get_started's request, the gallery, the brand): its
+	 * craft skill gets hosts/skill-templates.md and its get-started skill offers templates. flowith.io gets them with
+	 * the template release (canvas-cowork#27), which folds the fragment into SKILL.md and drops this field. */
+	templates?: boolean;
 }
 
 export interface Host {
@@ -109,15 +113,23 @@ const channelDescription = (m: Manifest, channel: Channel) =>
 
 // ---------- skills ----------
 
-/** The craft skill (SKILL.md and its references), named for the plugin, and the onboarding skill. */
-function skillFiles(m: Manifest, root: string): Record<string, string> {
+/** The templates section a channel with templates gets, placed before this heading of SKILL.md. */
+const TEMPLATES_FRAGMENT = "hosts/skill-templates.md";
+const TEMPLATES_BEFORE = "## Steps that need the canvas open\n";
+
+/** The craft skill (SKILL.md and its references), named for the plugin, and the onboarding skill, for one channel. */
+function skillFiles(m: Manifest, root: string, channel: Channel): Record<string, string> {
 	const files: Record<string, string> = {};
-	const source = readFileSync(join(root, m.skill.source), "utf8");
+	let source = readFileSync(join(root, m.skill.source), "utf8");
 	if (!/^---\nname: [^\n]+\n/.test(source)) throw new Error(`${m.skill.source} must start with front matter whose first line is \`name:\`.`);
+	if (channel.templates) {
+		if (source.split(TEMPLATES_BEFORE).length !== 2) throw new Error(`${m.skill.source} must have one "${TEMPLATES_BEFORE.trim()}" heading: ${TEMPLATES_FRAGMENT} goes before it.`);
+		source = source.replace(TEMPLATES_BEFORE, `${readFileSync(join(root, TEMPLATES_FRAGMENT), "utf8")}${TEMPLATES_BEFORE}`);
+	}
 	files[`skills/${m.skill.name}/SKILL.md`] = source.replace(/^---\nname: [^\n]+\n/, `---\nname: ${m.skill.name}\n`);
 	for (const name of readdirSync(join(root, m.skill.references)).filter((f) => f.endsWith(".md")).sort())
 		files[`skills/${m.skill.name}/${m.skill.references}/${name}`] = readFileSync(join(root, m.skill.references, name), "utf8");
-	files["skills/get-started/SKILL.md"] = getStartedSkill(m);
+	files["skills/get-started/SKILL.md"] = getStartedSkill(m, channel);
 	checkLinks(files);
 	return files;
 }
@@ -133,8 +145,20 @@ function checkLinks(files: Record<string, string>) {
 	}
 }
 
-function getStartedSkill(m: Manifest): string {
+function getStartedSkill(m: Manifest, channel: Channel): string {
 	const list = (items: string[]) => items.map((s, i) => `${i + 1}. ${s}`).join("\n");
+	const offer = channel.templates
+		? `   - its \`starters\` as a numbered list (each starter's \`title\` and one line);
+   - one closing line: reply with a number, say what to make, or ask to see them all (then \`open_templates\`, as the
+     skill says).`
+		: `   - its three \`starters\` as a numbered list (each starter's \`title\`; keep its \`prompt\` for when they pick it);
+   - one closing line: reply with a number, or say what to make.`;
+	const answer = channel.templates
+		? `3. When they answer, do it with the \`${m.skill.name}\` skill: a number is that template (\`get_template\` with its
+   \`id\`, then its protocol); words are \`get_started { locale, request }\` with them. A fixed starter from the list
+   above: its \`prompt\`, asking first for a file it needs (a product photo).`
+		: `3. When they answer, do it with the \`${m.skill.name}\` skill (a number: that starter's \`prompt\`). A starter that needs
+   their file (a product photo): ask for it first.`;
 	return `---
 name: get-started
 description: Welcome someone who just installed ${m.displayName} in one short message, with three things to try. Use right after ${m.displayName} is installed, when the user picks Set up, or asks how to start with ${m.displayName} or what to try first.
@@ -151,8 +175,7 @@ welcome: check the connection as in step 1, then do that task with the \`${m.ski
 2. Call \`get_started { locale }\` with the user's language (\`en\`, \`zh\`; for another language take \`en\` and
    translate faithfully). Write one short message from it, and call no other tools for it:
    - its \`welcome\`, in one or two sentences;
-   - its three \`starters\` as a numbered list (each starter's \`title\`; keep its \`prompt\` for when they pick it);
-   - one closing line: reply with a number, or say what to make.
+${offer}
 
    If \`get_started\` isn't in your tools, say in one or two sentences that ${m.displayName} makes pictures, clips,
    voice and music as cards on their own canvas, and offer these, word for word (in Chinese, the second list):
@@ -160,8 +183,7 @@ welcome: check the connection as in step 1, then do that task with the \`${m.ski
 ${list(m.starters.en).replace(/^/gm, "   ")}
 
 ${list(m.starters.zh).replace(/^/gm, "   ")}
-3. When they answer, do it with the \`${m.skill.name}\` skill (a number: that starter's \`prompt\`). A starter that needs
-   their file (a product photo): ask for it first.
+${answer}
 
 Never explain how ${m.displayName} was installed or configured, and don't mention models, plans or credits here.
 `;
@@ -616,8 +638,8 @@ export function generate(m: Manifest = loadManifest(), root = ROOT): Map<string,
 	const add = (dir: string, entries: Record<string, string>) => {
 		for (const [path, text] of Object.entries(entries)) files.set(dir ? `${dir}/${path}` : path, text);
 	};
-	const skills = skillFiles(m, root);
 	for (const channel of m.channels) {
+		const skills = skillFiles(m, root, channel);
 		add(packageDir("claude-code", channel), claudeCodePackage(m, channel, skills));
 		add(packageDir("codex", channel), codexPackage(m, channel, skills, root));
 		add(packageDir("antigravity", channel), antigravityPackage(m, channel, skills, root));

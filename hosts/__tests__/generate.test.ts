@@ -31,7 +31,12 @@ describe("host packages", () => {
 		test(`${channel.id}: Claude Code plugin`, () => {
 			const dir = `plugins/claude-code/${channel.id}`;
 			expect(parse(`${dir}/.claude-plugin/plugin.json`)).toMatchObject({ name: channel.id, version: m.version });
-			expect(parse(`${dir}/.mcp.json`).mcpServers[channel.id]).toEqual({ type: "http", url: channel.mcpUrl, headers: headers("claude-code", "claude-code-plugin") });
+			const servers = parse(`${dir}/.mcp.json`).mcpServers;
+			expect(Object.keys(servers)).toEqual(["flowith"]);
+			expect(servers.flowith).toEqual({ type: "http", url: channel.mcpUrl, headers: headers("claude-code", "claude-code-plugin") });
+			// Claude Code offers "Yes, and don't ask again" only while "plugin:<plugin>:<server> — <title>" is under 48
+			// columns: a tool title of 17 characters must still fit (creater-agent keeps its titles within that).
+			expect(`plugin:${channel.id}:flowith — ${"x".repeat(17)}`.length).toBeLessThan(48);
 			expect(files.get(`${dir}/skills/flowith/SKILL.md`)).toStartWith("---\nname: flowith\n");
 			const entry = parse(".claude-plugin/marketplace.json").plugins.find((p: { name: string }) => p.name === channel.id);
 			expect(entry.source).toBe(`./${dir}`);

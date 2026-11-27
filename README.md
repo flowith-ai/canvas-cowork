@@ -52,7 +52,7 @@ No local runtime: the agent gets Flowith's tools from a hosted server, and flowi
 |---|---|
 | Claude Code | `claude plugin marketplace add flowith-ai/canvas-cowork`<br>`claude plugin install flowith-next@flowith`<br>then `/reload-plugins`: your agent opens the sign-in page |
 | Codex | `codex plugin marketplace add flowith-ai/canvas-cowork`<br>`codex plugin add flowith-next@flowith`<br>`codex mcp login flowith-next` |
-| Cursor | [Add to Cursor](https://cursor.com/install-mcp?name=flowith-next&config=eyJ1cmwiOiJodHRwczovL2Zsb3dpdGgtY3JlYXRvci1hZ2VudC1wcmV2aWV3LmZseS5kZXYvbWNwIiwiaGVhZGVycyI6eyJ4LWZsb3dpdGgtbWNwLWNsaWVudCI6ImN1cnNvciIsIngtZmxvd2l0aC1wbHVnaW4tdmVyc2lvbiI6IjIuMC4wIiwieC1mbG93aXRoLWluc3RhbGwtc291cmNlIjoiY3Vyc29yLWRlZXBsaW5rIn19) |
+| Cursor | [Add to Cursor](https://cursor.com/install-mcp?name=flowith-next&config=eyJ1cmwiOiJodHRwczovL2Zsb3dpdGgtY3JlYXRvci1hZ2VudC1wcmV2aWV3LmZseS5kZXYvbWNwIiwiaGVhZGVycyI6eyJ4LWZsb3dpdGgtbWNwLWNsaWVudCI6ImN1cnNvciIsIngtZmxvd2l0aC1wbHVnaW4tdmVyc2lvbiI6IjIuMC4xIiwieC1mbG93aXRoLWluc3RhbGwtc291cmNlIjoiY3Vyc29yLWRlZXBsaW5rIn19) |
 | Antigravity | `agy plugin install https://github.com/flowith-ai/canvas-cowork/tree/main/plugins/antigravity/flowith-next` |
 | WorkBuddy | add the `flowith-next` entry to `~/.workbuddy/mcp.json` (INSTALL.md) |
 | DeepSeek Harness | the skill + CLI below |

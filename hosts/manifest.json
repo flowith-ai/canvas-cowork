@@ -2,7 +2,7 @@
   "$comment": "The one source of every host package. Edit here (or SKILL.md, references/, hosts/assets/), then run `node hosts/generate.ts`. hosts/__tests__/generate.test.ts fails when any generated file differs from what this manifest generates.",
   "name": "flowith",
   "displayName": "Flowith",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Make pictures, clips, voice and music as cards on your Flowith canvas, from your own agent: the same tools, prices and credits as Flo.",
   "longDescription": "Flowith gives your agent Flo's hands on your Flowith canvas. Ask for pictures, clips, text, voice-overs or music and they arrive as cards on your canvas, signed with your agent's name, priced and billed exactly like the cards you make yourself. Your agent can open the canvas beside the chat, look at what came out and fix what misses. Sign in once on flowith.io; disconnect any time in Flowith's Connections.",
   "author": { "name": "Flowith", "url": "https://flowith.io" },

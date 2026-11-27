@@ -1,6 +1,6 @@
 {
   "name": "canvas-cowork",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Flowith in your agent: the canvas-cowork skill, the per-host Flowith plugins, and the fallback CLI.",
   "license": "MIT",
   "repository": "github:flowith-ai/canvas-cowork",

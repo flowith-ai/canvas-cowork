@@ -394,14 +394,14 @@ function claudeCodeSteps(channel: Channel): string[] {
 		"",
 		"```text",
 		"1. Right after the install, in the same reply, do both:",
-		"   a. Call Bash with run_in_background: true and the command `sleep 25`. Never skip it: the user's /reload-plugins doesn't wake you up, and this wait is the only thing that brings you back after it.",
+		"   a. Call Bash with run_in_background: true and the command `sleep 10`. Never skip it: the user's /reload-plugins doesn't wake you up, and this wait is the only thing that brings you back after it (kept short, so they don't sit waiting once they have typed it).",
 		`   b. Tell the user in one line: "Type /reload-plugins and I'll open the sign-in page."`,
-		`2. When the wait ends, look for ${tool("authenticate")} (ToolSearch "select:${tool("authenticate")}"). Not there yet: call Bash again with run_in_background: true and \`sleep 20\`, and write nothing at all (up to 5 minutes).`,
+		`2. When the wait ends, look for ${tool("authenticate")} (ToolSearch "select:${tool("authenticate")}"). Not there yet: call Bash again with run_in_background: true and \`sleep 10\`, and write nothing at all (up to 5 minutes).`,
 		`3. Call it. Then open the link it answers and wait, in ONE Bash call in the background (10-minute timeout; one approval, not two), and tell the user in one line: "I've opened Flowith in your browser to connect it. If it asks, sign in and click Allow; I'll carry on by myself." The call (on Linux xdg-open, on Windows start, in place of open) ends by itself once they are connected, usually at once since they copied the install line on Flowith: open '<link>'; until claude mcp list 2>/dev/null | grep -q "plugin:${channel.id}:${channel.id}.*Connected"; do sleep 5; done`,
 		"4. When it ends, look for list_canvases (not there yet: sleep 5 and look again).",
 		"5. Call list_canvases, then do the user's task right here: no new session is needed.",
 		"Between these steps write nothing to the user: no \"waiting\" lines when a wait ends. They see the two lines above, then their result.",
-		`If the page couldn't hand the sign-in back to Claude Code: ask the user for that page's address and pass it to ${tool("complete_authentication")}.`,
+		`Only if the wait ran out without connecting (the page couldn't hand the sign-in back to Claude Code): ask the user for that page's address and pass it to ${tool("complete_authentication")}. Don't tell them about this beforehand.`,
 		"```",
 	];
 }

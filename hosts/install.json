@@ -14,15 +14,15 @@
       "site": "https://flowith.io",
       "mcpUrl": "https://agent.flowith.io/mcp",
       "installUrl": "https://flowith.io/agent",
-      "installUrlLive": false,
-      "live": false,
+      "installUrlLive": true,
+      "live": true,
       "internal": false,
-      "copyPrompt": "Install Flowith in this agent by following https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md, then show me what I can make with it.",
-      "copyPromptTemplate": "Install Flowith in this agent by following https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md, then {task}",
+      "copyPrompt": "Install Flowith in this agent by following https://flowith.io/agent, then show me what I can make with it.",
+      "copyPromptTemplate": "Install Flowith in this agent by following https://flowith.io/agent, then {task}",
       "hosts": {
         "claude-code": {
           "displayName": "Claude Code",
-          "copyPrompt": "Install Flowith in Claude Code by following https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md, then show me what I can make with it.",
+          "copyPrompt": "Install Flowith in Claude Code by following https://flowith.io/agent, then show me what I can make with it.",
           "mcp": {
             "commands": [
               "claude plugin marketplace add flowith-ai/canvas-cowork",
@@ -38,7 +38,7 @@
         },
         "codex": {
           "displayName": "Codex",
-          "copyPrompt": "Install Flowith in Codex by following https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md, then show me what I can make with it.",
+          "copyPrompt": "Install Flowith in Codex by following https://flowith.io/agent, then show me what I can make with it.",
           "mcp": {
             "commands": [
               "codex plugin marketplace add flowith-ai/canvas-cowork",
@@ -56,7 +56,7 @@
         },
         "cursor": {
           "displayName": "Cursor",
-          "copyPrompt": "Install Flowith in Cursor by following https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md, then show me what I can make with it.",
+          "copyPrompt": "Install Flowith in Cursor by following https://flowith.io/agent, then show me what I can make with it.",
           "mcp": {
             "commands": [],
             "oneClick": "cursor://anysphere.cursor-deeplink/mcp/install?name=flowith&config=eyJ1cmwiOiJodHRwczovL2FnZW50LmZsb3dpdGguaW8vbWNwIiwiaGVhZGVycyI6eyJ4LWZsb3dpdGgtbWNwLWNsaWVudCI6ImN1cnNvciIsIngtZmxvd2l0aC1wbHVnaW4tdmVyc2lvbiI6IjIuMC4wIiwieC1mbG93aXRoLWluc3RhbGwtc291cmNlIjoiY3Vyc29yLWRlZXBsaW5rIn19",
@@ -71,7 +71,7 @@
         },
         "antigravity": {
           "displayName": "Antigravity",
-          "copyPrompt": "Install Flowith in Antigravity by following https://raw.githubusercontent.com/flowith-ai/canvas-cowork/main/INSTALL.md, then show me what I can make with it.",
+          "copyPrompt": "Install Flowith in Antigravity by following https://flowith.io/agent, then show me what I can make with it.",
           "mcp": {
             "commands": [
               "agy plugin install https://github.com/flowith-ai/canvas-cowork/tree/main/plugins/antigravity/flowith"

@@ -33,11 +33,85 @@ Your host's steps below are in code blocks: follow them exactly, in order.
 7. **Carry the user's task through** (below). With no task, offer the three starters.
 
 <!-- generated:paths -->
-## Status
+## Hosted MCP (Flowith)
 
-The hosted Flowith MCP for **flowith.io is coming soon**. Until it is live, install the **skill + CLI** below: it is what works on flowith.io today. The hosted MCP runs only on **Flowith Next** (next-gen.flowith.io) for testing: use it only when the user asked for Flowith Next.
+Use this. Configure only this host. For Flowith Next, use the same commands with `flowith-next` in place of `flowith`.
 
-## Skill + CLI (flowith.io, today)
+### Claude Code
+
+```bash
+claude plugin marketplace add flowith-ai/canvas-cowork
+claude plugin install flowith@flowith
+```
+
+Then sign in and work in this same session, in exactly this order. Don't run `claude mcp login`: from your shell it stops at once (it needs a terminal). A plugin's server loads only after `/reload-plugins`, which only the user can type, and your background wait is what wakes you up after each thing the user does:
+
+```text
+1. Right after the install, in the same reply, do both:
+   a. Call Bash with run_in_background: true and the command `sleep 25`. Never skip it: the user's /reload-plugins doesn't wake you up, and this wait is the only thing that brings you back after it.
+   b. Tell the user in one line: "Type /reload-plugins and I'll open the sign-in page."
+2. When the wait ends, look for mcp__plugin_flowith_flowith__authenticate (ToolSearch "select:mcp__plugin_flowith_flowith__authenticate"). Not there yet: call Bash again with run_in_background: true and `sleep 20`, and write nothing at all (up to 5 minutes).
+3. Call it. Open the link it answers for the user (open '<link>' on macOS, xdg-open on Linux, start on Windows) and tell them in one line: "I've opened the sign-in page: click Allow there (sign up first if you're new), and I'll carry on when you're done." Then run this one command in the background (10-minute timeout); it ends by itself once they have clicked Allow: until claude mcp list 2>/dev/null | grep -q "plugin:flowith:flowith.*Connected"; do sleep 5; done
+4. When it ends, look for list_canvases (not there yet: sleep 5 and look again).
+5. Call list_canvases, then do the user's task right here: no new session is needed.
+Between these steps write nothing to the user: no "waiting" lines when a wait ends. They see the two lines above, then their result.
+If the page after Allow couldn't reach Claude Code: ask the user for that page's address and pass it to mcp__plugin_flowith_flowith__complete_authentication.
+```
+
+### Codex
+
+```bash
+codex plugin marketplace add flowith-ai/canvas-cowork
+codex plugin add flowith@flowith
+codex mcp login flowith
+```
+
+Codex's sandbox has no network and can't write to Codex's own folder, and these commands need both: run each with escalated permissions (`sandbox_permissions: "require_escalated"` and a short reason such as "Install Flowith") so the user approves it. If Codex rejects escalation without asking the user, tell them in one line: "Type /permissions, choose Ask for approval, then say go on." `mcp login` opens flowith.io; the user clicks **Allow** (run it in the background and wait for it).
+
+The tools load only in a new thread, which you start yourself:
+
+```text
+After mcp login: call create_thread (Codex's codex_tui tools) with the user's request, word for word, plus "Flowith is installed and signed in; check with list_canvases, then do this." Then tell the user in one line that it is running in a new thread (codex://threads/<threadId>), where Codex may ask them to allow Flowith's tools.
+```
+
+In the Codex app, once the marketplace is added, `codex://plugins/install/flowith?marketplace=flowith` opens the install page.
+
+### Cursor
+
+Open this install link (`open '<link>'` on macOS, `xdg-open` on Linux, `start` on Windows); Cursor asks the user to confirm, then to sign in:
+
+```text
+cursor://anysphere.cursor-deeplink/mcp/install?name=flowith&config=eyJ1cmwiOiJodHRwczovL2FnZW50LmZsb3dpdGguaW8vbWNwIiwiaGVhZGVycyI6eyJ4LWZsb3dpdGgtbWNwLWNsaWVudCI6ImN1cnNvciIsIngtZmxvd2l0aC1wbHVnaW4tdmVyc2lvbiI6IjIuMC4wIiwieC1mbG93aXRoLWluc3RhbGwtc291cmNlIjoiY3Vyc29yLWRlZXBsaW5rIn19
+```
+
+Where links can't open, add only this entry under `mcpServers` in `~/.cursor/mcp.json` and keep every other server as it is ([the file](https://github.com/flowith-ai/canvas-cowork/blob/main/plugins/cursor/flowith/mcp.json)); the user signs in from Cursor's MCP settings:
+
+```json
+{
+  "flowith": {
+    "url": "https://agent.flowith.io/mcp",
+    "headers": {
+      "x-flowith-mcp-client": "cursor",
+      "x-flowith-plugin-version": "2.0.0",
+      "x-flowith-install-source": "cursor-mcp-json"
+    }
+  }
+}
+```
+
+### Antigravity
+
+```bash
+agy plugin install https://github.com/flowith-ai/canvas-cowork/tree/main/plugins/antigravity/flowith
+```
+
+Antigravity opens flowith.io to sign in when the server first connects. The tools load in a new conversation.
+
+### Any other agent that can add a remote MCP server
+
+Add a Streamable HTTP server named `flowith` at `https://agent.flowith.io/mcp` with the host's own command or settings. It signs in with OAuth on first use (the user clicks **Allow** on flowith.io).
+
+## Skill + CLI (only where the host can't add a remote MCP server)
 
 Needs Node 22.18+ (or Bun 1.1+). Install the skill for this host only:
 
@@ -55,84 +129,6 @@ Then, in the installed skill's folder (the path `skills add` printed, e.g. `~/.c
 1. **Sign in**: run `node scripts/index.ts login` in the background (a timeout of 3 minutes or more). It opens flowith.io and prints a code on stderr; tell the user in one line to type that code on the page and click **Allow**, then wait for the command to finish.
 2. **Verify**: `node scripts/index.ts canvases --json` lists their canvases.
 3. **Carry on in this conversation**: read the skill's `SKILL.md` and do the user's task with the CLI. No new session is needed.
-
-## Hosted MCP (Flowith Next, testing only)
-
-### Claude Code
-
-```bash
-claude plugin marketplace add flowith-ai/canvas-cowork
-claude plugin install flowith-next@flowith
-```
-
-Then sign in and work in this same session, in exactly this order. Don't run `claude mcp login`: from your shell it stops at once (it needs a terminal). A plugin's server loads only after `/reload-plugins`, which only the user can type, and your background wait is what wakes you up after each thing the user does:
-
-```text
-1. Right after the install, in the same reply, do both:
-   a. Call Bash with run_in_background: true and the command `sleep 25`. Never skip it: the user's /reload-plugins doesn't wake you up, and this wait is the only thing that brings you back after it.
-   b. Tell the user in one line: "Type /reload-plugins and I'll open the sign-in page."
-2. When the wait ends, look for mcp__plugin_flowith-next_flowith-next__authenticate (ToolSearch "select:mcp__plugin_flowith-next_flowith-next__authenticate"). Not there yet: call Bash again with run_in_background: true and `sleep 20`, and write nothing at all (up to 5 minutes).
-3. Call it. Open the link it answers for the user (open '<link>' on macOS, xdg-open on Linux, start on Windows) and tell them in one line: "I've opened the sign-in page: click Allow there (sign up first if you're new), and I'll carry on when you're done." Then run this one command in the background (10-minute timeout); it ends by itself once they have clicked Allow: until claude mcp list 2>/dev/null | grep -q "plugin:flowith-next:flowith-next.*Connected"; do sleep 5; done
-4. When it ends, look for list_canvases (not there yet: sleep 5 and look again).
-5. Call list_canvases, then do the user's task right here: no new session is needed.
-Between these steps write nothing to the user: no "waiting" lines when a wait ends. They see the two lines above, then their result.
-If the page after Allow couldn't reach Claude Code: ask the user for that page's address and pass it to mcp__plugin_flowith-next_flowith-next__complete_authentication.
-```
-
-### Codex
-
-```bash
-codex plugin marketplace add flowith-ai/canvas-cowork
-codex plugin add flowith-next@flowith
-codex mcp login flowith-next
-```
-
-Codex's sandbox has no network and can't write to Codex's own folder, and these commands need both: run each with escalated permissions (`sandbox_permissions: "require_escalated"` and a short reason such as "Install Flowith Next") so the user approves it. If Codex rejects escalation without asking the user, tell them in one line: "Type /permissions, choose Ask for approval, then say go on." `mcp login` opens next-gen.flowith.io; the user clicks **Allow** (run it in the background and wait for it).
-
-The tools load only in a new thread, which you start yourself:
-
-```text
-After mcp login: call create_thread (Codex's codex_tui tools) with the user's request, word for word, plus "Flowith Next is installed and signed in; check with list_canvases, then do this." Then tell the user in one line that it is running in a new thread (codex://threads/<threadId>), where Codex may ask them to allow Flowith's tools.
-```
-
-In the Codex app, once the marketplace is added, `codex://plugins/install/flowith-next?marketplace=flowith` opens the install page.
-
-### Cursor
-
-Open this install link (`open '<link>'` on macOS, `xdg-open` on Linux, `start` on Windows); Cursor asks the user to confirm, then to sign in:
-
-```text
-cursor://anysphere.cursor-deeplink/mcp/install?name=flowith-next&config=eyJ1cmwiOiJodHRwczovL2Zsb3dpdGgtY3JlYXRvci1hZ2VudC1wcmV2aWV3LmZseS5kZXYvbWNwIiwiaGVhZGVycyI6eyJ4LWZsb3dpdGgtbWNwLWNsaWVudCI6ImN1cnNvciIsIngtZmxvd2l0aC1wbHVnaW4tdmVyc2lvbiI6IjIuMC4wIiwieC1mbG93aXRoLWluc3RhbGwtc291cmNlIjoiY3Vyc29yLWRlZXBsaW5rIn19
-```
-
-Where links can't open, add only this entry under `mcpServers` in `~/.cursor/mcp.json` and keep every other server as it is ([the file](https://github.com/flowith-ai/canvas-cowork/blob/main/plugins/cursor/flowith-next/mcp.json)); the user signs in from Cursor's MCP settings:
-
-```json
-{
-  "flowith-next": {
-    "url": "https://flowith-creator-agent-preview.fly.dev/mcp",
-    "headers": {
-      "x-flowith-mcp-client": "cursor",
-      "x-flowith-plugin-version": "2.0.0",
-      "x-flowith-install-source": "cursor-mcp-json"
-    }
-  }
-}
-```
-
-### Antigravity
-
-```bash
-agy plugin install https://github.com/flowith-ai/canvas-cowork/tree/main/plugins/antigravity/flowith-next
-```
-
-Antigravity opens next-gen.flowith.io to sign in when the server first connects. The tools load in a new conversation.
-
-### Any other agent that can add a remote MCP server
-
-Add a Streamable HTTP server named `flowith-next` at `https://flowith-creator-agent-preview.fly.dev/mcp` with the host's own command or settings. It signs in with OAuth on first use (the user clicks **Allow** on next-gen.flowith.io).
-
-The Flowith packages (`flowith`) are built the same way and turn on when flowith.io's hosted MCP ships.
 <!-- /generated:paths -->
 
 ## Carry the task

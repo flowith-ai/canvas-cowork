@@ -12,7 +12,7 @@
     {
       "name": "flowith",
       "source": "./plugins/claude-code/flowith",
-      "description": "Make pictures, clips, voice and music as cards on your Flowith canvas, from your own agent: the same tools, prices and credits as Flo. Coming soon: the hosted server for flowith.io is not live yet; use the canvas-cowork skill and CLI until it is.",
+      "description": "Make pictures, clips, voice and music as cards on your Flowith canvas, from your own agent: the same tools, prices and credits as Flo.",
       "version": "2.0.0",
       "author": {
         "name": "Flowith",

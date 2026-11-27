@@ -153,7 +153,8 @@ restarting anything.
 
 ## No task? Offer three starters
 
-With the hosted tools, call `get_started { locale }` and show its `welcome` and three `starters`. With the
+With the hosted tools, call `get_started { locale }` and show its `welcome` and `starters`; to see more, `open_templates`
+opens the whole gallery for them to pick from (the skill says how). With the
 CLI, one short message in the user's language: Flowith makes pictures, clips, voice and music as cards on
 their canvas, at the canvas's own prices. Then these, numbered, and "reply with a number, or say what to
 make":

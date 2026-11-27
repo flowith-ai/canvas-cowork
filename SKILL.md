@@ -40,11 +40,23 @@ ones takes `canvasId`. The server's own list and descriptions win over this summ
 | Need | MCP tools | CLI |
 |---|---|---|
 | Account | `get_started { locale? }`, `list_canvases { query?, limit? }`, `create_canvas { title }`, `open_canvas { canvasId }` → `url`, `handoffUrl`, `credits` → `credits` (the balance their Flowith page shows), `askAboveCredits`, `topUpUrl` | `cw help` · `cw canvases` · `cw new` · `cw open --handoff` · `cw credits` |
+| Ideas: the template gallery | `open_templates { type?, query? }` → `handoffUrl`, `taskId` (wait with `get_task`: it answers with the template the user picked and the steps to make it), `browse_templates { type?, query?, category?, limit?, cursor? }` (the same list, most used first, to choose from in chat) | — |
 | Overview: read, then look | `read_canvas` (the map of areas; `area` for one; `refs` + `view: true` for exact cards with their pictures), `view_canvas { mode?: "map" \| "photo", area? }` (an image of the canvas), `find_canvas_nodes`, `read_selection` (what the user selected and sees) | `cw look` · `cw read <ref>` · `cw selection` |
 | Micro edits (one call = one undo step) | `edit_canvas { operations: [...], focus? }` for several at once; `create_canvas_node`, `update_canvas_node` (rename, text, colour, size, link / unlink, ungroup), `layout_canvas { script }` (move, align, arrange), `group_canvas_nodes`, `copy_canvas_node`, `delete_canvas_node`, `canvas_comment`, `focus_canvas_nodes` (show the user the result) | `cw arrange` · `cw group` · `cw focus` |
 | Making | `generate_image`, `edit_image`, `generate_video`, `generate_audio`, then `get_task { taskId, waitSeconds? }` | `cw image` · `cw edit` · `cw video` · `cw speech` · `cw music` · `cw wait` |
 | Card tools and composition | `card_tool`, `upscale_image`, `make_transparent_image`, `image_action`, `video_action`, `create_storyboard`, `lay_out_storyboard`, `storyboard_action`, `make_board_film`, `break_down_video`, `build_director_stage`, `shoot_director_shot`, `director_action`, `timeline_action`, `add_to_cut`, `make_character`, `character_action`, `find_elements`, `save_element`, `library_element` | [references/cli.md](references/cli.md) |
 | The user's own files | `prepare_upload { fileName, contentType, sizeBytes }` → run its `command` (an HTTP PUT of the file), then `import_media { uploadId, near? }` | `cw upload <file>` |
+
+## When the user has no idea yet
+
+A first run, "what can you make?", "make something nice": don't invent a brief. Call `get_started`
+and offer its starters (the templates people make most, with covers). For the whole gallery, call
+`open_templates` and open its `handoffUrl` in your side browser (as for a canvas), say one short line
+("Pick one you like and I'll make it"), then wait with `get_task { taskId, waitSeconds: 50 }` until it
+answers `done`: follow the steps it gives (ask for the user's photo when the template needs one, make it
+on a new canvas, open the canvas). In a terminal with no browser, open it in the user's own browser. When
+the user would rather you choose, or there is no browser at all, `browse_templates` gives the same list.
+A locked template needs a Flowith plan: pass on its `upgradeUrl`.
 
 ## Steps that need the canvas open
 

@@ -14,8 +14,10 @@ welcome: check the connection as in step 1, then do that task with the `flowith`
 2. Call `get_started { locale }` with the user's language (`en`, `zh`; for another language take `en` and
    translate faithfully). Write one short message from it, and call no other tools for it:
    - its `welcome`, in one or two sentences;
-   - its three `starters` as a numbered list (each starter's `title`; keep its `prompt` for when they pick it);
-   - one closing line: reply with a number, or say what to make.
+   - its `starters` as a numbered list (each starter's `title`; keep its `make` steps, or its `prompt`, for when
+     they pick it);
+   - one closing line: reply with a number, say what to make, or ask to see more (then `open_templates`, as the
+     skill says).
 
    If `get_started` isn't in your tools, say in one or two sentences that Flowith makes pictures, clips,
    voice and music as cards on their own canvas, and offer these, word for word (in Chinese, the second list):
@@ -27,7 +29,7 @@ welcome: check the connection as in step 1, then do that task with the `flowith`
    1. 为一款秋季拿铁做三张海报，每张风格不同
    2. 给一个咖啡品牌做 15 秒广告分镜：四个画面，再把最好的一张做成视频
    3. 把我的产品图做成一段 5 秒、带声音的短视频
-3. When they answer, do it with the `flowith` skill (a number: that starter's `prompt`). A starter that needs
-   their file (a product photo): ask for it first.
+3. When they answer, do it with the `flowith` skill (a number: that starter's `make` steps, or its `prompt`).
+   A starter that needs their file (a product photo): ask for it first.
 
 Never explain how Flowith was installed or configured, and don't mention models, plans or credits here.

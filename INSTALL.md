@@ -74,7 +74,7 @@ Then, in the installed skill's folder (the path `skills add` printed, e.g. `~/.c
 claude plugin marketplace add flowith-ai/canvas-cowork; claude plugin install flowith-next@flowith
 ```
 
-Run it as one Bash call: one approval.
+Run it as one Bash call: one approval. The plugin holds only the address of Flowith's remote MCP server (`.mcp.json`) and two skills (`flowith`, `get-started`): no hooks, commands or code that runs on this computer. It is at https://github.com/flowith-ai/canvas-cowork/tree/main/plugins/claude-code/flowith-next.
 
 Then sign in and work in this same session, in exactly this order. Don't run `claude mcp login`: from your shell it stops at once (it needs a terminal). A plugin's server loads only after `/reload-plugins`, which only the user can type, and your background wait is what wakes you up after each thing the user does:
 

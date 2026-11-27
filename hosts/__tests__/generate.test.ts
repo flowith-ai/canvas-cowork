@@ -74,6 +74,22 @@ describe("host packages", () => {
 		});
 	}
 
+	test("only a channel whose server has templates gets the templates section and the template onboarding", () => {
+		expect(m.channels.find((c) => c.id === "flowith")?.templates).toBeFalsy();
+		expect(m.channels.find((c) => c.id === "flowith-next")?.templates).toBe(true);
+		for (const host of ["claude-code", "codex", "antigravity"]) {
+			for (const channel of m.channels) {
+				const skill = files.get(`plugins/${host}/${channel.id}/skills/flowith/SKILL.md`)!;
+				const onboarding = files.get(`plugins/${host}/${channel.id}/skills/get-started/SKILL.md`)!;
+				expect(skill.includes("## Templates:"), `${host}/${channel.id}`).toBe(Boolean(channel.templates));
+				expect(onboarding.includes("get_template"), `${host}/${channel.id}`).toBe(Boolean(channel.templates));
+				if (channel.templates) expect(skill.indexOf("## Templates:")).toBeLessThan(skill.indexOf("## Steps that need the canvas open"));
+			}
+		}
+		// The repo's own SKILL.md (the skills CLI installs it as is) stays flowith.io's.
+		expect(readFileSync(join(ROOT, "SKILL.md"), "utf8")).not.toContain("## Templates:");
+	});
+
 	test("every package of one host is the same apart from its channel", () => {
 		const [a, b] = m.channels;
 		const strip = (dir: string) => [...files].filter(([p]) => p.startsWith(dir)).map(([p]) => p.slice(dir.length)).sort();

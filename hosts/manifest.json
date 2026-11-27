@@ -40,6 +40,7 @@
       "installUrl": "https://next-gen.flowith.io/agent",
       "live": true,
       "internal": true,
+      "templates": true,
       "note": "next-gen.flowith.io, for internal testing of the hosted MCP."
     }
   ],

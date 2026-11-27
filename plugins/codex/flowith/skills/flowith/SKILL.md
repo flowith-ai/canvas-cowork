@@ -68,8 +68,13 @@ A generation answers at once; it never blocks until the picture exists.
 - `status: "needs_approval"` with `credits`, `askAboveCredits` and a `message`: it costs more than the
   user's ask-above limit. Ask the user, with the price in their words; only on a yes, send the same call
   again with `approveCredits: <credits>` (it is then capped at that price). Nothing was placed or charged.
-- `status: "not_started"` with a `message` and `topUpUrl`: their credits can't pay for it. Nothing was
-  placed or charged. Tell the user in Flowith's words with the `topUpUrl`; don't switch to a cheaper
+- `status: "quoted"` with `quoteId` and `credits` (a paid canvas step: card tools, image and video actions,
+  storyboard retries, director stage, characters, code runs): its price; nothing was made. Tell the user the
+  price and run it only on their yes: call the same tool again with `confirm: { quoteId, credits }` (above
+  their limit that answers `needs_approval`: send `approveCredits` too). A yes the user gave for this
+  price earlier in the request counts.
+- `status: "not_started"` with a `message` and `topUpUrl` (or `claimUrl`): their credits can't pay for it.
+  Nothing was placed or charged. Tell the user in Flowith's words with the link; don't switch to a cheaper
   model unless they ask.
 
 ## Show the canvas while you work

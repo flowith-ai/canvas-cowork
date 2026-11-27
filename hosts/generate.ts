@@ -149,8 +149,9 @@ welcome: check the connection as in step 1, then do that task with the \`${m.ski
 2. Call \`get_started { locale }\` with the user's language (\`en\`, \`zh\`; for another language take \`en\` and
    translate faithfully). Write one short message from it, and call no other tools for it:
    - its \`welcome\`, in one or two sentences;
-   - its three \`starters\` as a numbered list (each starter's \`title\`; keep its \`prompt\` for when they pick it);
-   - one closing line: reply with a number, or say what to make.
+   - its \`starters\` as a numbered list (each starter's \`title\` and one line);
+   - one closing line: reply with a number, say what to make, or ask to see them all (then \`open_templates\`, as the
+     skill says).
 
    If \`get_started\` isn't in your tools, say in one or two sentences that ${m.displayName} makes pictures, clips,
    voice and music as cards on their own canvas, and offer these, word for word (in Chinese, the second list):
@@ -158,8 +159,9 @@ welcome: check the connection as in step 1, then do that task with the \`${m.ski
 ${list(m.starters.en).replace(/^/gm, "   ")}
 
 ${list(m.starters.zh).replace(/^/gm, "   ")}
-3. When they answer, do it with the \`${m.skill.name}\` skill (a number: that starter's \`prompt\`). A starter that needs
-   their file (a product photo): ask for it first.
+3. When they answer, do it with the \`${m.skill.name}\` skill: a number is that template (\`get_template\` with its
+   \`id\`, then its protocol); words are \`get_started { locale, request }\` with them. A fixed starter from the list
+   above: its \`prompt\`, asking first for a file it needs (a product photo).
 
 Never explain how ${m.displayName} was installed or configured, and don't mention models, plans or credits here.
 `;

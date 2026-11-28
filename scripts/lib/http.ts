@@ -72,6 +72,7 @@ export async function httpFailure(resp: Response, what: string): Promise<CliErro
 	if (st === 403) return new CliError(`${what}: forbidden${detail ? ` (${detail})` : ""}`, "FORBIDDEN", body, st);
 	if (st === 404) return new CliError(`${what}: not found${detail ? ` (${detail})` : ""}`, "NOT_FOUND", body, st);
 	if (st === 429) return new CliError(`${what}: rate limited${detail ? ` (${detail})` : ""}`, "RATE_LIMITED", body, st);
+	if (st === 413) return new CliError(`${what}: too large${detail ? ` (${detail})` : ""}`, "TOO_LARGE", body, st);
 	const b = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
 	const typed = [b.error_code, b.error_type].find((v) => typeof v === "string" && v) as string | undefined;
 	return new CliError(
@@ -107,13 +108,15 @@ function noteServerTime(resp: Response) {
 export interface WorkerInit {
 	method?: string;
 	json?: unknown;
-	body?: FormData | string;
+	/** Raw bytes (a canvas folder file) are sent as they are, with their length. */
+	body?: FormData | string | Uint8Array;
 	timeoutMs?: number;
 	/** A POST that only asks (a price): allowed in a dry run. */
 	read?: boolean;
 }
 
-export async function worker<T = unknown>(api: Api, path: string, init: WorkerInit = {}): Promise<T> {
+/** The worker's answer itself, for bytes and headers (a canvas folder file); a refusal throws as `worker` does. */
+export async function workerResponse(api: Api, path: string, init: WorkerInit = {}): Promise<Response> {
 	const method = init.method ?? (init.json !== undefined || init.body ? "POST" : "GET");
 	if (!init.read) guardWrite(method, path.split("?")[0]!);
 	await api.recheck?.();
@@ -123,6 +126,7 @@ export async function worker<T = unknown>(api: Api, path: string, init: WorkerIn
 			headers: {
 				Authorization: api.accessToken,
 				...(init.json !== undefined ? { "Content-Type": "application/json" } : {}),
+				...(init.body instanceof Uint8Array ? { "Content-Type": "application/octet-stream" } : {}),
 			},
 			body: init.json !== undefined ? JSON.stringify(init.json) : init.body,
 			signal: AbortSignal.timeout(init.timeoutMs ?? 60_000),
@@ -135,7 +139,11 @@ export async function worker<T = unknown>(api: Api, path: string, init: WorkerIn
 	}
 	noteServerTime(resp);
 	if (!resp.ok) throw await httpFailure(resp, `${method} ${path.split("?")[0]}`);
-	return (await parseBody(resp)) as T;
+	return resp;
+}
+
+export async function worker<T = unknown>(api: Api, path: string, init: WorkerInit = {}): Promise<T> {
+	return (await parseBody(await workerResponse(api, path, init))) as T;
 }
 
 export interface RestInit {

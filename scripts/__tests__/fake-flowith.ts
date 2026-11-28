@@ -7,6 +7,7 @@ import { isDeepStrictEqual } from "node:util";
 import { tmpdir } from "os";
 import { join } from "path";
 import { b64url, openWith, sealWith } from "../lib/realtime.ts";
+import { fakeFolder } from "./fake-folder.ts";
 
 /**
  * The runtime the real CLI runs under in these tests: Bun by default, `CW_TEST_RUNTIME=node` for Node
@@ -200,13 +201,17 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 		return { arrived, release };
 	};
 	let title = "Test canvas";
+	/** The canvas's shared folder (Flowith Next's /canvas-folder). */
+	const folder = fakeFolder();
 	const server = Bun.serve<undefined>({
 		hostname: "localhost",
 		port: 0,
 		async fetch(req, server) {
 			const url = new URL(req.url);
 			if (url.pathname === "/realtime/v1/websocket" && server.upgrade(req)) return;
-			const body = req.method === "GET" ? undefined : await req.text().then((t) => { try { return JSON.parse(t); } catch { return t; } });
+			// A folder file goes up as its bytes.
+			const bytes = req.method === "PUT" && url.pathname.startsWith("/canvas-folder/");
+			const body = req.method === "GET" ? undefined : bytes ? new Uint8Array(await req.arrayBuffer()) : await req.text().then((t) => { try { return JSON.parse(t); } catch { return t; } });
 			requests.push({ method: req.method, path: url.pathname + url.search, body });
 			const answer = await handle(req, url, body);
 			const held = holds.find((h) => !h.taken && h.match(req.method, url));
@@ -249,6 +254,7 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 			if (p === "/auth/v1/logout") return new Response(null, { status: 204 });
 			if (p === "/auth/v1/token") return Response.json({ access_token: jwt(), refresh_token: "r2", expires_in: 3600 });
 			if (p === "/models") return Response.json(catalog);
+			if (p.startsWith("/canvas-folder/")) return folder.handle(req, url, body);
 			if (p.startsWith("/rest/v1/conversation")) {
 				if (req.method !== "GET" && body && typeof body === "object" && "title" in body && typeof body.title === "string") title = body.title;
 				return Response.json([{ id: CONV, title, updated_at: at, metadata: {}, team_id: opts.team ? "33333333-3333-4333-8333-333333333333" : null }]);
@@ -340,7 +346,7 @@ export function fakeFlowith(opts: FakeOptions = {}) {
 		return { json, code };
 	};
 	const writes = () => requests.filter((r) => r.method !== "GET" && !r.path.startsWith("/auth/v1/"));
-	return { origin, home, requests, writes, usage, opts, rows, run, runWith, runFrom, newHome, hold, stop: () => (server.stop(true), hangUp.stop(true)) };
+	return { origin, home, requests, writes, usage, opts, rows, folder, run, runWith, runFrom, newHome, hold, stop: () => (server.stop(true), hangUp.stop(true)) };
 }
 
 /** A token the CLI accepts as unexpired (it only reads the claims). */

@@ -82,6 +82,7 @@ exact title also works. Commands print JSON (`--json` for one line). Errors exit
 | Organise | `move <ref> --to x,y \| --right-of r \| --below r` · `arrange <refs…> --as row\|column\|grid` · `arrange <group>` · `group <refs…> --name "…"` · `ungroup <g>` · `rename <ref> "title"` · `link <from> <to>` / `unlink` · `copy <ref>` · `delete <refs…>` |
 | Read | `look [words] [--kind image] [--status running] [--by codex]` · `read <ref…> [--full]` · `shots [refs] [--full]` · `save <refs…> --out dir` · `wait [refs]` |
 | Account | `credits` · `spent [--since 30m]` · `models [image\|video\|text\|audio]` · `models <id>` · `whoami` · `open` · `logout` · `<command> --help` |
+| The canvas's files (Flowith Next only) | `sync <dir> [--watch] [--dry-run]`: a directory here in step with the canvas's shared folder ([folder](folder.md)) |
 
 **Run by the open canvas**: the canvas's own tools, exactly as Flo uses them. They need the target canvas
 open in the browser profile that approved `login`. See

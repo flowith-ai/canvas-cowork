@@ -40,6 +40,12 @@ Errors print one JSON line `{"error": CODE, "message": …}` and exit 1.
 | `SENT_UNKNOWN` (a card's `code`) | The request went out but no answer came back (network, gateway timeout): Flowith may have taken it | `cw wait <ref>`: it finishes if it was taken. `cw retry <ref>` sends it again only once the canvas's charges show it never arrived (it says when) |
 | `NOT_SENT` (a card's `code`) | A `retry` claimed the card but its request never went (the claim's answer was lost) | `cw retry <ref>` sends it; don't wait on it |
 | `BUSY` | The card is still generating (or its last send may still be on its way), or another `retry` (on another machine) ran it first, or it changed while the command ran | `cw wait <ref>` or `cw look`; don't send it again |
+| `NEXT_GEN_ONLY` | `sync`: the canvas folder is on Flowith Next only for now, and this session is flowith.io's | Sign in to Flowith Next in its own home: `FLOWITH_HOME=~/.flowith-next cw login --site next-gen.flowith.io` ([folder](folder.md)) |
+| `FOLDER_NOT_EMPTY` | `sync`: the directory has files and was never synced, and the canvas folder has files too | Sync into an empty directory, then copy yours in |
+| `FOLDER_CANVAS_MISMATCH` | `sync`: the directory is kept in step with another canvas's folder | Use another directory, or `--canvas` that canvas |
+| `FOLDER_STATE_INVALID` | `sync`: the directory's `.flowith-folder.json` is damaged | Move it away and sync into an empty directory |
+| `FOLDER_DOWNLOAD_DAMAGED` | `sync`: a file arrived not matching its hash; nothing was overwritten | Run `sync` again |
+| `TOO_LARGE` | `sync`: more than the folder's 5,000 files or 500 MB | Leave build output and caches out of the directory |
 | `DRY_RUN` | Internal guard: a dry run was about to change something and stopped | Report it: a preview should never reach this |
 
 Other things worth knowing:

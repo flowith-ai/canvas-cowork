@@ -10,7 +10,7 @@
  *   bun scripts/index.ts …  ·  npx -y github:flowith-ai/canvas-cowork …
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, watch, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
 import {
@@ -95,12 +95,26 @@ import {
 	ungroup,
 } from "./lib/write.ts";
 import { CANVAS_NODE_GAP, groupLayout, isClear, placeSingle } from "./lib/placement.ts";
+import {
+	assertFolderHost,
+	folderAgent,
+	folderHead,
+	type FolderState,
+	freshState,
+	isEmptyDirectory,
+	localChanges,
+	readState,
+	type Round,
+	scanDirectory,
+	STATE_FILE,
+	syncRound,
+} from "./lib/folder.ts";
 
 // ---------- args ----------
 
 const BOOLEAN_FLAGS = new Set([
 	"json", "quiet", "no-wait", "wait", "full", "fresh", "dry-run", "no-audio", "audio", "draft",
-	"transparent", "no-open", "open", "handoff", "instrumental", "vocals", "layout", "add", "help",
+	"transparent", "no-open", "open", "handoff", "instrumental", "vocals", "layout", "add", "help", "watch",
 ]);
 
 interface Args {
@@ -1555,6 +1569,144 @@ async function cmdModels(a: Args) {
 	console.log("\n`models <id>` for one model's full limits. 1 credit = $0.001.");
 }
 
+// ---------- canvas folder (Flowith Next) ----------
+
+/** How long a burst of writes here may take before it goes up (an editor saves, a tool writes several files). */
+const SYNC_SETTLE_MS = 1_000;
+
+/** What a round did, as the command answers it. */
+function roundReport(canvas: { id: string }, url: string, dir: string, round: Round) {
+	const pushed = round.pushed;
+	return {
+		canvas: canvas.id,
+		url,
+		dir,
+		from: round.base,
+		seq: round.seq,
+		handedBack: pushed ? pushed.changed : 0,
+		...(pushed?.merged ? { merged: true } : {}),
+		...(pushed?.conflicts.length ? { conflicts: pushed.conflicts } : {}),
+		took: round.pulled.written,
+		removed: round.pulled.removed,
+		...(round.pulled.kept.length ? { keptHere: round.pulled.kept } : {}),
+		...(pushed?.conflicts.length
+			? { next: "The folder kept both: the newest at each path, this computer's copy beside it as keptAs. Compare them, keep one, delete the other (or the user picks on the canvas: Folder → Conflict), then sync again." }
+			: {}),
+	};
+}
+
+/**
+ * sync <dir>: keeps a directory on this computer in step with the canvas's shared folder (Flowith Next only), so an
+ * agent here works on the canvas's files directly. A round hands what changed here back as one version, made on the
+ * version the directory was last in step with (the folder merges it with what changed meanwhile, and keeps both copies
+ * of a real conflict), then takes the folder's latest. --watch keeps doing so: what changes here goes up a moment
+ * later, and others' versions come down every --every seconds. --dry-run says what a round would do, sending nothing.
+ */
+async function cmdSync(a: Args) {
+	const target = a.pos[0];
+	if (!target || a.pos.length > 1) throw new CliError("Name one directory: `sync <dir>` (made when missing).", "INVALID_PARAM");
+	const dir = resolve(target);
+	const ctx = await context(a);
+	// Before anything is sent: flowith.io has no canvas folder yet.
+	assertFolderHost(ctx.session.workerURL);
+	const canvas = await canvasOf(ctx, a);
+	const url = canvasUrl(ctx.site, canvas.id);
+	let state: FolderState | undefined = readState(dir);
+	if (state && (state.canvasId !== canvas.id || state.workerURL !== ctx.session.workerURL))
+		throw new CliError(
+			`${dir} is kept in step with another canvas's folder (${state.canvasId}${state.workerURL !== ctx.session.workerURL ? `, on ${state.workerURL}` : ""}). Use another directory, or --canvas that canvas.`,
+			"FOLDER_CANVAS_MISMATCH",
+		);
+	const head = await folderHead(ctx.api, canvas.id);
+	if (!state) {
+		if (head && !isEmptyDirectory(dir))
+			throw new CliError(
+				`${dir} has files and was never synced, and the canvas folder has files too: nothing is merged blind. Sync into an empty directory, then copy yours in.`,
+				"FOLDER_NOT_EMPTY",
+			);
+		state = freshState(ctx.session.workerURL, canvas.id);
+	}
+	const agent = folderAgent(agentName(a) === "other" ? "local" : agentName(a));
+	const message = flag(a, "message") ?? "Synced from a directory on this computer";
+
+	if (dryRun) {
+		const local = existsSync(dir) ? localChanges(state, scanDirectory(dir, state.files)) : { changed: [], deleted: [] };
+		return out({
+			canvas: canvas.id,
+			url,
+			dir,
+			seq: state.seq,
+			head: head?.seq ?? null,
+			toHandBack: { changed: local.changed.map((f) => f.path), deleted: local.deleted },
+			toTake: (head?.seq ?? null) !== state.seq,
+			agent,
+			dryRun: true,
+		});
+	}
+	mkdirSync(dir, { recursive: true });
+	if (!has(a, "watch")) {
+		const { round } = await syncRound(ctx.api, dir, state, { agent, message });
+		return out(roundReport(canvas, url, dir, round));
+	}
+
+	const every = (num(a, "every") ?? 10) * 1000;
+	if (!(every >= 2_000)) throw new CliError("--every takes seconds, at least 2.", "INVALID_PARAM");
+	let wake: (() => void) | undefined;
+	let changedHere = false;
+	let stopping = false;
+	const nudge = () => wake?.();
+	const watcher = watch(dir, { recursive: true }, (_event, name) => {
+		const path = String(name ?? "").split("\\").join("/");
+		if (path === STATE_FILE || path.startsWith(`${STATE_FILE}.`) || path.endsWith(".flowith-tmp")) return;
+		changedHere = true;
+		nudge();
+	});
+	const stop = () => {
+		stopping = true;
+		nudge();
+	};
+	process.once("SIGINT", stop);
+	process.once("SIGTERM", stop);
+	log(`Keeping ${dir} in step with the folder of ${url} as ${agent}. Ctrl-C stops.`);
+	let rounds = 0;
+	let first = true;
+	try {
+		while (!stopping) {
+			if (!first) await new Promise<void>((r) => {
+				wake = r;
+				setTimeout(r, every);
+			});
+			wake = undefined;
+			if (stopping) break;
+			if (changedHere) await sleep(SYNC_SETTLE_MS);
+			changedHere = false;
+			const local = localChanges(state, scanDirectory(dir, state.files));
+			const latest = first ? head : await folderHead(ctx.api, canvas.id);
+			first = false;
+			if (!local.changed.length && !local.deleted.length && !state.stale && (latest?.seq ?? null) === state.seq) continue;
+			try {
+				const done = await syncRound(ctx.api, dir, state, { agent, message });
+				state = done.state;
+				rounds++;
+				const report = roundReport(canvas, url, dir, done.round);
+				if (jsonOut) out(report);
+				log(
+					`v${report.seq ?? "-"}: ${report.handedBack} handed back${report.merged ? " (merged)" : ""}, ${report.took.length} taken, ${report.removed.length} removed${report.conflicts ? `, ${report.conflicts.length} conflict(s): ${report.conflicts.map((c) => c.keptAs).join(", ")}` : ""}`,
+				);
+			} catch (e) {
+				// A network hiccup or a busy folder is tried again next round; signing out, a refusal or the limits are not.
+				if (e instanceof CliError && ["NOT_LOGGED_IN", "FORBIDDEN", "NOT_FOUND", "NEXT_GEN_ONLY", "TOO_LARGE", "FOLDER_STATE_INVALID"].includes(e.code)) throw e;
+				log(`This round didn't go through (${e instanceof Error ? e.message : String(e)}); trying again in ${every / 1000} s.`);
+			}
+		}
+	} finally {
+		watcher.close();
+		process.off("SIGINT", stop);
+		process.off("SIGTERM", stop);
+	}
+	if (!jsonOut) out({ canvas: canvas.id, url, dir, seq: state.seq, rounds, stopped: true });
+}
+
 // ---------- help ----------
 
 const HELP = `canvas-cowork — work on a Flowith 3.0 canvas. Every card you make shows up live on the user's canvas.
@@ -1590,6 +1742,8 @@ ON CANVAS   (run by the user's open canvas window, as Flo's operations are)
             breakdown <clip> [--layout] · character <picture> --name "Mia" [--subject animal] · cut <refs…>
             stage "scene idea" [--cast refs] · shoot <stage> [--shots all] · do <operation> --input '{…}'
 MODELS      models [image|video|text|audio] · models <id>
+FOLDER      sync <dir> [--watch] [--every 10] [--message "…"]   (Flowith Next) keep a directory in step with the
+            canvas's shared folder: changes here go back as a new version, others' come down
 
 Placement   new cards sit beside --near <card> (or the first --ref card), else in free space; several
             results form one group (--group "name"); --into <group> adds to an existing group.
@@ -1650,6 +1804,7 @@ const COMMANDS: Record<string, (a: Args) => Promise<unknown>> = {
 	retry: cmdRetry,
 	spent: cmdSpent,
 	models: cmdModels,
+	sync: cmdSync,
 	...ON_CANVAS,
 };
 
@@ -1665,6 +1820,7 @@ const COMMAND_FLAGS: Record<string, string> = {
 	move: "to gap right-of left-of below above", arrange: "as cols gap", group: "name", spent: "since", models: "fresh",
 	tidy: "as", split: "rows cols", angles: "angles", relight: "preset", lipsync: "with", motion: "with", soundtrack: "voice",
 	breakdown: "layout", character: "name subject style description", cut: "into start", stage: "add into title cast", shoot: "shots", do: "input",
+	sync: "watch every message",
 };
 
 function validateArgs(a: Args) {
@@ -1696,7 +1852,7 @@ const RENAMED: Record<string, string> = {
 };
 
 /** Commands whose --dry-run shows what they would do (requests, cards, credits) without doing it. */
-const PREVIEWS = new Set(["image", "edit", "vary", "retry", "video", "text", "speech", "music", "upscale", "cutout", "expand", "add", "note", "delete"]);
+const PREVIEWS = new Set(["image", "edit", "vary", "retry", "video", "text", "speech", "music", "upscale", "cutout", "expand", "add", "note", "delete", "sync"]);
 /** Commands that only read Flowith: --dry-run leaves them as they are. */
 const READS = new Set(["whoami", "status", "credits", "canvases", "list", "look", "read", "models", "spent", "wait"]);
 
